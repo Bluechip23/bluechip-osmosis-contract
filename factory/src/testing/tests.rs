@@ -2476,7 +2476,10 @@ fn test_set_oracle_update_bounty_admin_only() {
         env.clone(),
         non_admin,
         ExecuteMsg::SetOracleUpdateBounty {
-            new_bounty: Uint128::new(100_000),
+            // Pick a value at the new $0.02 cap so admin-only behavior
+            // is exercised at the boundary rather than well below it.
+            // Constant updated alongside MAX_ORACLE_UPDATE_BOUNTY_USD.
+            new_bounty: Uint128::new(20_000),
         },
     )
     .unwrap_err();
@@ -2493,7 +2496,7 @@ fn test_set_oracle_update_bounty_admin_only() {
         env,
         admin,
         ExecuteMsg::SetOracleUpdateBounty {
-            new_bounty: Uint128::new(100_000),
+            new_bounty: Uint128::new(20_000),
         },
     )
     .unwrap();
@@ -2501,7 +2504,7 @@ fn test_set_oracle_update_bounty_admin_only() {
     let bounty = crate::state::ORACLE_UPDATE_BOUNTY_USD
         .load(&deps.storage)
         .unwrap();
-    assert_eq!(bounty, Uint128::new(100_000));
+    assert_eq!(bounty, Uint128::new(20_000));
 }
 
 #[test]
@@ -2529,7 +2532,10 @@ fn test_set_oracle_update_bounty_rejects_above_cap() {
 
 #[test]
 fn test_oracle_update_pays_bounty_when_funded() {
-    let bounty = Uint128::new(50_000);
+    // $0.01 in 6-decimal microUSD. Below the $0.02 cap (lowered when
+    // UPDATE_INTERVAL dropped to 60s); the test exercises payout
+    // behaviour, not a specific dollar value.
+    let bounty = Uint128::new(10_000);
     // Pre-fund the factory contract with enough ubluechip to cover the bounty
     let mut deps = mock_dependencies(&[cosmwasm_std::Coin {
         denom: "ubluechip".to_string(),
@@ -2656,7 +2662,7 @@ fn test_oracle_update_skips_bounty_when_underfunded() {
         env.clone(),
         message_info(&admin_addr(), &[]),
         ExecuteMsg::SetOracleUpdateBounty {
-            new_bounty: Uint128::new(50_000),
+            new_bounty: Uint128::new(10_000),
         },
     )
     .unwrap();
@@ -3154,7 +3160,7 @@ fn test_oracle_update_bounty_equals_balance_boundary() {
     // still pay out. Pins the `>=` semantic — a regression to `>` would
     // silently break keeper payouts when the factory reserve is down to
     // exactly one bounty's worth.
-    let bounty = Uint128::new(50_000);
+    let bounty = Uint128::new(10_000);
     let mut deps = mock_dependencies(&[cosmwasm_std::Coin {
         denom: "ubluechip".to_string(),
         amount: bounty, // exactly equal
@@ -3223,7 +3229,7 @@ fn test_oracle_update_bounty_equals_balance_boundary() {
 #[test]
 fn test_oracle_update_bounty_one_less_than_amount_skipped() {
     // Mirror of the above: one ubluechip below the bounty must skip.
-    let bounty = Uint128::new(50_000);
+    let bounty = Uint128::new(10_000);
     let mut deps = mock_dependencies(&[cosmwasm_std::Coin {
         denom: "ubluechip".to_string(),
         amount: bounty - Uint128::one(), // one short
@@ -3299,8 +3305,8 @@ fn test_oracle_update_bounty_one_less_than_amount_skipped() {
 fn test_oracle_update_cooldown_blocks_second_call_even_with_bounty() {
     // The bounty must not bypass the UPDATE_INTERVAL cooldown — this is
     // the whole anti-spam property of the design. A second call in the
-    // same 5-minute window must be rejected regardless of bounty state.
-    let bounty = Uint128::new(50_000);
+    // same 60s window must be rejected regardless of bounty state.
+    let bounty = Uint128::new(10_000);
     let mut deps = mock_dependencies(&[cosmwasm_std::Coin {
         denom: "ubluechip".to_string(),
         amount: Uint128::new(100_000_000), // plenty
@@ -3357,10 +3363,10 @@ fn test_oracle_update_cooldown_blocks_second_call_even_with_bounty() {
     )
     .unwrap();
 
-    // Second call 60s later — inside the cooldown window. Must fail and
-    // must NOT pay out a second bounty.
+    // Second call 30s later — strictly inside the 60s cooldown. Must
+    // fail and must NOT pay out a second bounty.
     let mut t2 = t1;
-    t2.block.time = t2.block.time.plus_seconds(60);
+    t2.block.time = t2.block.time.plus_seconds(30);
     let err = execute(
         deps.as_mut(),
         t2,
@@ -3370,7 +3376,7 @@ fn test_oracle_update_cooldown_blocks_second_call_even_with_bounty() {
     .unwrap_err();
     assert!(
         matches!(err, crate::error::ContractError::UpdateTooSoon { .. }),
-        "second call within 5min must be rejected, got: {:?}",
+        "second call within UPDATE_INTERVAL must be rejected, got: {:?}",
         err
     );
 }

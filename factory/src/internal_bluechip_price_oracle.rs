@@ -118,7 +118,15 @@ pub const MIN_POOL_LIQUIDITY_USD: Uint128 = Uint128::new(5_000_000_000);
 pub const MIN_POOL_LIQUIDITY_USD: Uint128 = Uint128::new(1_000);
 
 pub const TWAP_WINDOW: u64 = 3600;
-pub const UPDATE_INTERVAL: u64 = 300;
+// Minimum gap (seconds) between consecutive `UpdateOraclePrice` keeper
+// calls. Tightened from 300s alongside the pool-side
+// `MAX_ORACLE_STALENESS_SECONDS = 120` change so keepers can refresh
+// `bluechip_price_cache.last_update` fast enough to keep commits live.
+// Each round still produces one TWAP observation, so the
+// `TWAP_WINDOW = 3600s` window now holds ~60 observations instead of
+// ~12 — finer-grained TWAP, individual observations carry less weight,
+// the time-weighted average magnitude is unchanged.
+pub const UPDATE_INTERVAL: u64 = 60;
 #[cfg(not(feature = "integration_short_timing"))]
 pub const ROTATION_INTERVAL: u64 = 3600;
 #[cfg(feature = "integration_short_timing")]
