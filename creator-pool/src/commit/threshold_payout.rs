@@ -113,6 +113,17 @@ pub fn trigger_threshold_payout(
     commit_config: &CommitLimitInfo,
     payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
+    // Live-resolved bluechip protocol-wallet (resolved at the entry
+    // point in `commit::execute_commit_logic` via
+    // `generic_helpers::resolve_live_bluechip_wallet`). Used as the
+    // recipient for the 25k-base-unit bluechip-share creator-token
+    // mint below. Distinct from `fee_info.bluechip_wallet_address`,
+    // which is the pool-instantiate snapshot — that snapshot is left
+    // unchanged for callers that have no Deps/querier handy, but every
+    // production call site (the two `threshold_crossing` handlers)
+    // threads the live value through here so an admin wallet rotation
+    // is honoured on the threshold-cross reward.
+    bluechip_wallet: &Addr,
     env: &Env,
 ) -> Result<ThresholdPayoutMsgs, ContractError> {
     // No-double-mint invariant — STRUCTURALLY enforced here.
@@ -211,7 +222,13 @@ pub fn trigger_threshold_payout(
 
     other_msgs.push(mint_tokens(
         &pool_info.token_address,
-        &fee_info.bluechip_wallet_address,
+        // LIVE bluechip protocol-wallet, threaded down from
+        // `execute_commit_logic`. Snapshot value remains accessible
+        // via `fee_info.bluechip_wallet_address` for callers that
+        // can't or shouldn't live-query, but production paths use the
+        // live value so an admin rotation (e.g., post key-compromise)
+        // redirects this 25k-base-unit reward to the new wallet.
+        bluechip_wallet,
         payout.bluechip_reward_amount,
     )?);
 

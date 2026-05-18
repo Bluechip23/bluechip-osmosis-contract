@@ -445,6 +445,7 @@ fn test_threshold_payout_integrity_check() {
         &commit_config,
         &bad_payout,
         &fee_info,
+        &fee_info.bluechip_wallet_address,
         &env,
     );
 

@@ -1576,6 +1576,10 @@ mod native_raised_net_semantics_tests {
             &commit_config,
             &payout,
             &fee_info,
+            // Live wallet not under test here; mirror the snapshot so
+            // assertions on the bluechip-reward recipient continue to
+            // resolve against the test fixture's bluechip wallet addr.
+            &fee_info.bluechip_wallet_address,
             &mock_env(),
         )
         .expect("trigger_threshold_payout must succeed");
@@ -1666,6 +1670,10 @@ mod native_raised_net_semantics_tests {
             &commit_config,
             &payout,
             &fee_info,
+            // bluechip_wallet — live-resolved in production. Tests pass
+            // the snapshot directly; the handler short-circuits on the
+            // IS_THRESHOLD_HIT gate before this value is consumed.
+            &fee_info.bluechip_wallet_address,
             vec![],
             &PoolAnalytics::default(),
         )
@@ -1718,6 +1726,7 @@ mod native_raised_net_semantics_tests {
             &commit_config,
             &payout,
             &fee_info,
+            &fee_info.bluechip_wallet_address,
             &mock_env(),
         )
         .unwrap_err();
@@ -1774,6 +1783,7 @@ mod native_raised_net_semantics_tests {
             &commit_config,
             &payout,
             &fee_info,
+            &fee_info.bluechip_wallet_address,
             &mock_env(),
         )
         .expect("trigger_threshold_payout must succeed on a clean pool");

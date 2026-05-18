@@ -1556,6 +1556,7 @@ fn test_m7_threshold_payout_emits_accept_ownership() {
         &commit_config,
         &payout,
         &fee_info,
+        &fee_info.bluechip_wallet_address,
         &mock_env(),
     )
     .unwrap();

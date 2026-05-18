@@ -59,6 +59,11 @@ pub(crate) fn process_threshold_crossing_with_excess(
     commit_config: &CommitLimitInfo,
     threshold_payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
+    // Live-resolved bluechip protocol-wallet, threaded down from
+    // `execute_commit_logic` so the threshold-cross creator-token
+    // reward mint goes to the CURRENT factory wallet, not the
+    // snapshot pinned on COMMITFEEINFO at pool create time.
+    bluechip_wallet: &Addr,
     mut messages: Vec<CosmosMsg>,
     belief_price: Option<Decimal>,
     max_spread: Option<Decimal>,
@@ -141,6 +146,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
         commit_config,
         threshold_payout,
         fee_info,
+        bluechip_wallet,
         &env,
     )?;
     messages.extend(payout_msgs.other_msgs);
@@ -358,6 +364,10 @@ pub(crate) fn process_threshold_hit_exact(
     commit_config: &CommitLimitInfo,
     threshold_payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
+    // See `process_threshold_crossing_with_excess` for the rationale on
+    // this parameter — live-resolved factory wallet for the
+    // threshold-cross creator-token reward mint.
+    bluechip_wallet: &Addr,
     mut messages: Vec<CosmosMsg>,
     analytics: &PoolAnalytics,
 ) -> Result<Response, ContractError> {
@@ -402,6 +412,7 @@ pub(crate) fn process_threshold_hit_exact(
         commit_config,
         threshold_payout,
         fee_info,
+        bluechip_wallet,
         &env,
     )?;
     messages.extend(payout.other_msgs);
