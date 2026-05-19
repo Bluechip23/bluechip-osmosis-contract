@@ -39,16 +39,25 @@ pub const POOL_CREATION_CONTEXT: Map<u64, PoolCreationContext> =
 pub const PENDING_CONFIG: Item<PendingConfig> = Item::new("pending_config");
 pub const POOL_COUNTER: Item<u64> = Item::new("pool_counter");
 
-/// Commit-pool-only ordinal. Bumped exactly once per `execute_create_creator_pool`
-/// and stored on the commit pool's `PoolDetails.commit_pool_ordinal` so the
-/// threshold-mint decay formula can use it as `x` instead of `pool_id`.
+/// Commit-pool threshold-cross ordinal allocator. Bumped exactly once per
+/// successful `execute_notify_threshold_crossed` call (after the
+/// `POOL_THRESHOLD_MINTED` idempotency gate), and the new value is
+/// written back to `PoolDetails.commit_pool_ordinal` for that pool. The
+/// bluechip mint-decay formula then uses this value as `x`.
 ///
-/// This split exists because `POOL_COUNTER` is bumped by both commit and
-/// standard pool creations; using `pool_id` directly in the decay formula
-/// would let permissionless `CreateStandardPool` calls inflate `x` and
-/// shrink (toward zero) the bluechip mint reward for legitimate commit
-/// pools created later. The dedicated counter keeps the decay schedule
-/// anchored to actual commit-pool creation activity.
+/// Two layers of inflation defense are at play here:
+/// 1. Decouple from `POOL_COUNTER` (which is bumped by every standard-pool
+///    creation too) so permissionless `CreateStandardPool` calls can't
+///    inflate `x`.
+/// 2. Decouple from create-time (which would let paid junk-create spam
+///    inflate `x` without the attacker ever crossing a threshold) so
+///    the counter advances only on real protocol activity.
+///
+/// Atomicity: incremented after `POOL_THRESHOLD_MINTED.save(true)` but
+/// before `calculate_and_mint_bluechip` dispatches the mint. Any failure
+/// downstream reverts the whole tx — including this bump — so a retried
+/// notify after a failed first attempt re-allocates from the same prior
+/// value (no slot is consumed by a failed cross-tx).
 pub const COMMIT_POOL_COUNTER: Item<u64> = Item::new("commit_pool_counter");
 
 // Three coupled pool-registry maps. They MUST stay in sync — every pool
@@ -528,12 +537,14 @@ pub struct PoolCreationState {
 pub struct PoolCreationContext {
     pub temp: TempPoolCreation,
     pub state: PoolCreationState,
-    /// Captured at commit-pool create time and threaded through the reply
-    /// chain into `PoolDetails.commit_pool_ordinal`. Stored on the context
-    /// rather than re-computed in `finalize_pool` so the ordinal is fixed
-    /// at create time even if a concurrent commit-pool create races —
-    /// commit pools share the global `COMMIT_POOL_COUNTER` allocator but
-    /// each pool's ordinal is locked in here on its own create tx.
+    /// Vestigial create-time sentinel. The real ordinal is now allocated
+    /// at threshold-cross time inside `execute_notify_threshold_crossed`,
+    /// so this field is always `0` for fresh contexts and is kept only
+    /// for storage-schema continuity (cw_serde requires every field in
+    /// the struct to round-trip). The reply chain still propagates this
+    /// value into `PoolDetails.commit_pool_ordinal` at `finalize_pool`,
+    /// where it lands as `0` — the notify handler overwrites it with
+    /// the real allocation at threshold-cross.
     #[serde(default)]
     pub commit_pool_ordinal: u64,
 }

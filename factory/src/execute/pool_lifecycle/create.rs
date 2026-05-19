@@ -17,7 +17,7 @@ use crate::error::ContractError;
 use crate::msg::{CreatorTokenInfo, TokenInstantiateMsg};
 use crate::pool_struct::{CreatePool, TempPoolCreation};
 use crate::state::{
-    canonical_pair_key, CreationStatus, COMMIT_POOL_COUNTER,
+    canonical_pair_key, CreationStatus,
     COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS, FACTORYINSTANTIATEINFO, LAST_COMMIT_POOL_CREATE_AT,
     LAST_STANDARD_POOL_CREATE_AT, PAIRS, POOL_COUNTER, POOL_CREATION_CONTEXT,
     PoolCreationContext, PoolCreationState, STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS,
@@ -324,13 +324,18 @@ pub(crate) fn execute_create_creator_pool(
     let pool_counter = POOL_COUNTER.may_load(deps.storage)?.unwrap_or(0);
     let pool_id = pool_counter + 1;
     POOL_COUNTER.save(deps.storage, &pool_id)?;
-    // Allocate the commit-pool-only ordinal. Bumped only here, never in
-    // `execute_create_standard_pool`, so the bluechip mint-decay formula
-    // sees a count of legitimate commit-pool creations rather than a
-    // count that permissionless standard-pool creation can inflate.
-    let commit_pool_counter = COMMIT_POOL_COUNTER.may_load(deps.storage)?.unwrap_or(0);
-    let commit_pool_ordinal = commit_pool_counter + 1;
-    COMMIT_POOL_COUNTER.save(deps.storage, &commit_pool_ordinal)?;
+    // Sentinel ordinal at create time. The real allocation happens at
+    // threshold-cross inside `execute_notify_threshold_crossed`, so the
+    // bluechip mint-decay formula's `x` reflects pools that actually
+    // reached threshold rather than pools that were merely created.
+    // Junk pools that never cross do not consume an ordinal slot and
+    // therefore cannot inflate the decay input for legitimate future
+    // crossings. The downstream guard in
+    // `calculate_and_mint_bluechip` (`if commit_pool_ordinal == 0:
+    // Err`) keeps the invariant load-bearing: any path that reaches
+    // the mint without going through the notify-handler's allocation
+    // fails closed.
+    let commit_pool_ordinal: u64 = 0;
 
     let msg = WasmMsg::Instantiate {
         code_id: factory_cw20.cw20_token_contract_id,

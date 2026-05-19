@@ -159,22 +159,28 @@ pub fn calculate_and_mint_bluechip(
     // POOL_COUNTER) cannot inflate `x` and shrink legitimate commit pools'
     // mint reward toward zero.
     //
-    // Fail-loud invariant: `commit_pool_ordinal` is set on every commit
-    // pool at create time (`execute_create_creator_pool` in
-    // `factory/src/execute/pool_lifecycle/create.rs`) and is non-zero by
-    // construction (counter is bumped to `current + 1` before save).
-    // v1 is the launch version — there is no pre-existing chain state —
-    // so a zero ordinal at this point can only mean storage corruption.
+    // Fail-loud invariant: by the time `calculate_and_mint_bluechip` runs,
+    // `commit_pool_ordinal` MUST have been allocated by the immediately-
+    // preceding step in `execute_notify_threshold_crossed`, which bumps
+    // `COMMIT_POOL_COUNTER` and writes the new value back to
+    // `PoolDetails.commit_pool_ordinal` right after the
+    // `POOL_THRESHOLD_MINTED` idempotency check. Reaching this function
+    // with ordinal == 0 indicates a path that bypassed that allocation
+    // (storage corruption, or a future call site that calls this helper
+    // directly without going through the notify handler).
+    //
     // We reject rather than fall back: `calculate_mint_amount(s, 0)`
     // returns the FULL base amount (500_000_000), so a silent fallback
     // would *inflate* the mint relative to the intended schedule — the
-    // worst possible direction.
+    // worst possible direction. Commit pools at create time carry
+    // ordinal == 0 by design (sentinel); this branch is only reachable
+    // inside the mint flow, where allocation has already happened.
     if pool_details.commit_pool_ordinal == 0 {
         return Err(ContractError::Std(StdError::generic_err(format!(
-            "Pool {} has commit_pool_ordinal == 0; refusing to mint to avoid \
-             base-amount inflation in the decay formula. This indicates either \
-             a pre-v1 legacy record or storage corruption — investigate the \
-             pool's PoolDetails entry before retrying.",
+            "Pool {} has commit_pool_ordinal == 0 at mint time; refusing to mint \
+             to avoid base-amount inflation in the decay formula. The notify \
+             handler should have allocated it immediately above this call — \
+             investigate the call chain or PoolDetails entry before retrying.",
             pool_id
         ))));
     }
