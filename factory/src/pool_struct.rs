@@ -215,27 +215,36 @@ pub struct PoolDetails {
     /// to standard-pool support was a commit pool.
     #[serde(default)]
     pub pool_kind: PoolKind,
-    /// 1-indexed ordinal among commit pools at the time this pool was
-    /// created. Always zero for standard pools. Consumed by the bluechip
-    /// mint-decay formula in `calculate_and_mint_bluechip` so that
-    /// permissionless standard-pool creation (which also bumps the
-    /// global `POOL_COUNTER`) cannot inflate `x` in the decay polynomial
-    /// and shrink legitimate commit pools' threshold-mint reward toward
-    /// zero.
+    /// 1-indexed ordinal among commit pools that have CROSSED THEIR
+    /// THRESHOLD (NOT the order in which pools were created). Always
+    /// zero for standard pools, and zero for commit pools that have
+    /// not yet crossed. Consumed by the bluechip mint-decay formula
+    /// in `calculate_and_mint_bluechip` as the polynomial input `x`.
     ///
-    /// Set non-zero at create time by `execute_create_creator_pool`
-    /// (the counter is bumped to `current + 1` before save), so a
-    /// commit pool with `commit_pool_ordinal == 0` indicates either
-    /// storage corruption or a pre-v1 legacy record. v1 is the launch
-    /// version — there is no legacy chain state to back-fill — so
+    /// Lifecycle:
+    /// 1. At create time (`execute_create_creator_pool`), this field
+    ///    is written as `0` (sentinel meaning "not yet allocated").
+    /// 2. At threshold-cross time (`execute_notify_threshold_crossed`,
+    ///    after the `POOL_THRESHOLD_MINTED` idempotency gate), the
+    ///    notify handler bumps `COMMIT_POOL_COUNTER` and writes the
+    ///    new value back here.
+    ///
+    /// Two layers of inflation defense are coupled here:
+    /// - Decouple from `POOL_COUNTER` so permissionless
+    ///   `CreateStandardPool` cannot inflate `x`.
+    /// - Decouple from create-time so paid junk-create spam (pools that
+    ///   never threshold-cross) cannot inflate `x` for legitimate future
+    ///   crossings. The counter advances only on real protocol activity.
+    ///
     /// `calculate_and_mint_bluechip` fail-closes (`Err`) on a zero
-    /// ordinal rather than falling back to a value that would
-    /// inflate the mint relative to the intended schedule.
+    /// ordinal — that branch is reachable only if some path bypasses
+    /// `execute_notify_threshold_crossed`'s allocation, which would be
+    /// a bug. Failing closed prevents the formula from inflating the
+    /// mint by treating zero as the (vacuously) lowest-ordinal slot.
     ///
-    /// `#[serde(default)]` is retained so a future migration that
-    /// extends `PoolDetails` with another field continues to
-    /// deserialize cleanly; it is NOT a back-compat shim for legacy
-    /// records (none exist).
+    /// `#[serde(default)]` is retained for future-field-extension
+    /// compatibility; v1 fresh chain state has no legacy records to
+    /// back-fill.
     #[serde(default)]
     pub commit_pool_ordinal: u64,
 }

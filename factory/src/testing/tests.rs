@@ -112,17 +112,19 @@ pub fn register_test_pool_addr(
                 ],
                 creator_pool_addr: pool_addr.clone(),
                 pool_kind: pool_factory_interfaces::PoolKind::Commit,
-                // Mirror what the real commit-pool create flow produces:
-                // `COMMIT_POOL_COUNTER` is bumped to `current + 1` and
-                // pinned onto `PoolDetails.commit_pool_ordinal` at create
-                // time, so the first commit pool gets ordinal 1, the second
-                // gets 2, etc. Tests in this file only register commit
-                // pools sequentially by `pool_id`, so `pool_id` is the
-                // correct ordinal here. The production code in
-                // `calculate_and_mint_bluechip` now hard-rejects ordinal
-                // 0 to prevent silent base-amount inflation in the decay
+                // Mirror what a post-threshold-cross pool looks like in the
+                // registry: `COMMIT_POOL_COUNTER` is now bumped at
+                // threshold-cross time (in `execute_notify_threshold_crossed`,
+                // not at create), and the new value is pinned onto
+                // `PoolDetails.commit_pool_ordinal`. This helper bypasses the
+                // notify handler and stamps PoolDetails directly, so it
+                // emits the ordinal that a fully-crossed pool would carry.
+                // Tests in this file only register pools sequentially by
+                // `pool_id`, so `pool_id` is the correct ordinal here.
+                // `calculate_and_mint_bluechip` hard-rejects ordinal 0 to
+                // prevent silent base-amount inflation in the decay
                 // formula, so this helper MUST emit a non-zero ordinal to
-                // remain a faithful test fixture.
+                // remain a faithful "post-cross pool" fixture.
                 commit_pool_ordinal: pool_id,
             },
         )

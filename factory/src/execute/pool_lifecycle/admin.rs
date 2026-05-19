@@ -15,7 +15,7 @@ use cosmwasm_std::{
 
 use crate::error::ContractError;
 use crate::mint_bluechips_pool_creation::calculate_and_mint_bluechip;
-use crate::state::{POOLS_BY_ID, POOL_THRESHOLD_MINTED};
+use crate::state::{COMMIT_POOL_COUNTER, POOLS_BY_ID, POOL_THRESHOLD_MINTED};
 
 use super::super::ensure_admin;
 
@@ -218,6 +218,32 @@ pub fn execute_notify_threshold_crossed(
     }
 
     POOL_THRESHOLD_MINTED.save(deps.storage, pool_id, &true)?;
+
+    // Allocate the commit-pool ordinal here, at threshold-cross time —
+    // NOT at create time. Junk-create pools that never cross threshold
+    // therefore do not consume an ordinal slot, so they cannot inflate
+    // the bluechip-mint decay formula's `x` input for legitimate future
+    // crossings. The counter is bumped after the POOL_THRESHOLD_MINTED
+    // idempotency check above, so a `RetryFactoryNotify` after a failed
+    // initial dispatch does not double-allocate. CosmWasm storage
+    // atomicity guarantees: if `calculate_and_mint_bluechip` below
+    // fails (e.g. expand_economy daily-cap exceeded), the entire tx
+    // reverts including the bumps above — POOL_THRESHOLD_MINTED reverts
+    // to false, COMMIT_POOL_COUNTER reverts, and a later RetryFactoryNotify
+    // re-runs allocation cleanly.
+    let prior_counter = COMMIT_POOL_COUNTER.may_load(deps.storage)?.unwrap_or(0);
+    let new_ordinal = prior_counter
+        .checked_add(1)
+        .ok_or_else(|| ContractError::Std(StdError::generic_err(
+            "COMMIT_POOL_COUNTER overflow on threshold-cross allocation",
+        )))?;
+    COMMIT_POOL_COUNTER.save(deps.storage, &new_ordinal)?;
+    // Write the freshly-allocated ordinal back to PoolDetails so
+    // `calculate_and_mint_bluechip` (which re-loads PoolDetails) reads
+    // the assigned value rather than the create-time sentinel 0.
+    let mut pool_details = pool_details;
+    pool_details.commit_pool_ordinal = new_ordinal;
+    POOLS_BY_ID.save(deps.storage, pool_id, &pool_details)?;
 
     // Use the pool-supplied crossed_at when present (MEDIUM-2: anchors
     // the decay formula to the original crossing time so a retried
