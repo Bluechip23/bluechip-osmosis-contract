@@ -59,6 +59,11 @@ pub(crate) fn process_threshold_crossing_with_excess(
     commit_config: &CommitLimitInfo,
     threshold_payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
+    // Live-resolved bluechip protocol-wallet, threaded down from
+    // `execute_commit_logic` so the threshold-cross creator-token
+    // reward mint goes to the CURRENT factory wallet, not the
+    // snapshot pinned on COMMITFEEINFO at pool create time.
+    bluechip_wallet: &Addr,
     mut messages: Vec<CosmosMsg>,
     belief_price: Option<Decimal>,
     max_spread: Option<Decimal>,
@@ -124,7 +129,9 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // crossing tx. So the crosser's privileged excess is unaffected,
     // while every follower trade in this block plus the next
     // POST_THRESHOLD_COOLDOWN_BLOCKS blocks is rejected with
-    // PostThresholdCooldownActive.
+    // PostThresholdCooldownActive. Once the cooldown ends, the
+    // post-threshold swap-cap ramp (MEDIUM-4 Option B) bounds per-tx
+    // MEV for POST_THRESHOLD_SWAP_RAMP_BLOCKS additional blocks.
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK.save(
         deps.storage,
         &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
@@ -141,6 +148,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
         commit_config,
         threshold_payout,
         fee_info,
+        bluechip_wallet,
         &env,
     )?;
     messages.extend(payout_msgs.other_msgs);
@@ -358,6 +366,10 @@ pub(crate) fn process_threshold_hit_exact(
     commit_config: &CommitLimitInfo,
     threshold_payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
+    // See `process_threshold_crossing_with_excess` for the rationale on
+    // this parameter — live-resolved factory wallet for the
+    // threshold-cross creator-token reward mint.
+    bluechip_wallet: &Addr,
     mut messages: Vec<CosmosMsg>,
     analytics: &PoolAnalytics,
 ) -> Result<Response, ContractError> {
@@ -388,7 +400,9 @@ pub(crate) fn process_threshold_hit_exact(
     // Arm the post-threshold cooldown so other actors can't atomically
     // sandwich the freshly-seeded pool in the same block (or the next
     // two). Crossing tx itself is unaffected — the writes here land
-    // before the next tx ever runs the cooldown check.
+    // before the next tx ever runs the cooldown check. After cooldown
+    // ends, the post-threshold swap-cap ramp (MEDIUM-4 Option B) caps
+    // per-tx MEV for POST_THRESHOLD_SWAP_RAMP_BLOCKS additional blocks.
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK.save(
         deps.storage,
         &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
@@ -402,6 +416,7 @@ pub(crate) fn process_threshold_hit_exact(
         commit_config,
         threshold_payout,
         fee_info,
+        bluechip_wallet,
         &env,
     )?;
     messages.extend(payout.other_msgs);

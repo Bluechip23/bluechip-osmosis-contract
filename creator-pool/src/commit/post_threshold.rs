@@ -64,6 +64,26 @@ pub(super) fn process_post_threshold_commit(
     let offer_pool = pool_state.reserve0;
     let ask_pool = pool_state.reserve1;
 
+    // MEDIUM-4 Option B: per-tx swap cap ramp. After the cooldown ends,
+    // each post-threshold commit (which IS a swap) is capped at a
+    // fraction of the offer-side reserve, ramping from 0.5% up to
+    // "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks.
+    // Mirrors the gate in pool_core::swap::execute_simple_swap so
+    // commits and simple swaps face the same per-tx cap during the
+    // ramp window.
+    if let Some(cap) = pool_core::state::post_threshold_swap_cap(
+        deps.storage,
+        env.block.height,
+        offer_pool,
+    )? {
+        if swap_amount > cap {
+            return Err(ContractError::PostThresholdSwapCapExceeded {
+                offer: swap_amount,
+                cap,
+            });
+        }
+    }
+
     // Pre-state drain guard. Mirrors `pool_core::swap::execute_simple_swap`
     // so the post-threshold commit path enforces the same MINIMUM_LIQUIDITY
     // floor as a plain swap. Without this, an already-drained pool (either

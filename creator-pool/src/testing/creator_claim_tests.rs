@@ -185,6 +185,14 @@ fn retry_factory_notify_dispatches_submsg_when_pending() {
     // Arm the pending flag (production flow sets this from the
     // reply_on_error handler when the initial factory notify fails).
     PENDING_FACTORY_NOTIFY.save(&mut deps.storage, &true).unwrap();
+    // MEDIUM-2: production flow sets THRESHOLD_CROSSED_AT inside
+    // `trigger_threshold_payout` alongside IS_THRESHOLD_HIT. The retry
+    // handler `load`s it (not `may_load`) so the snapshot must be
+    // present whenever PENDING_FACTORY_NOTIFY is true. Seed it here to
+    // simulate the post-crossing storage state.
+    crate::state::THRESHOLD_CROSSED_AT
+        .save(&mut deps.storage, &mock_env().block.time)
+        .unwrap();
 
     // Anyone can call RetryFactoryNotify — factory's POOL_THRESHOLD_
     // MINTED idempotency gates double-mints.

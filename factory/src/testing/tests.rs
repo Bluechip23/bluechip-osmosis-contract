@@ -2311,7 +2311,7 @@ fn test_bluechip_minting_on_threshold_crossing() {
     register_test_pool_addr(deps.as_mut().storage, 1, &pool_addr);
 
     // Now simulate the pool notifying threshold crossed
-    let notify_msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1 };
+    let notify_msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1, crossed_at: None };
     let pool_info = message_info(&pool_addr, &[]);
     let res = execute(deps.as_mut(), env.clone(), pool_info, notify_msg).unwrap();
 
@@ -2335,7 +2335,7 @@ fn test_bluechip_minting_on_threshold_crossing() {
     }
 
     // Verify double-minting is prevented
-    let notify_msg2 = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1 };
+    let notify_msg2 = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1, crossed_at: None };
     let pool_info2 = message_info(&pool_addr, &[]);
     let err = execute(deps.as_mut(), env.clone(), pool_info2, notify_msg2);
     assert!(
@@ -2476,7 +2476,10 @@ fn test_set_oracle_update_bounty_admin_only() {
         env.clone(),
         non_admin,
         ExecuteMsg::SetOracleUpdateBounty {
-            new_bounty: Uint128::new(100_000),
+            // Pick a value at the new $0.02 cap so admin-only behavior
+            // is exercised at the boundary rather than well below it.
+            // Constant updated alongside MAX_ORACLE_UPDATE_BOUNTY_USD.
+            new_bounty: Uint128::new(20_000),
         },
     )
     .unwrap_err();
@@ -2493,7 +2496,7 @@ fn test_set_oracle_update_bounty_admin_only() {
         env,
         admin,
         ExecuteMsg::SetOracleUpdateBounty {
-            new_bounty: Uint128::new(100_000),
+            new_bounty: Uint128::new(20_000),
         },
     )
     .unwrap();
@@ -2501,7 +2504,7 @@ fn test_set_oracle_update_bounty_admin_only() {
     let bounty = crate::state::ORACLE_UPDATE_BOUNTY_USD
         .load(&deps.storage)
         .unwrap();
-    assert_eq!(bounty, Uint128::new(100_000));
+    assert_eq!(bounty, Uint128::new(20_000));
 }
 
 #[test]
@@ -2529,7 +2532,10 @@ fn test_set_oracle_update_bounty_rejects_above_cap() {
 
 #[test]
 fn test_oracle_update_pays_bounty_when_funded() {
-    let bounty = Uint128::new(50_000);
+    // $0.01 in 6-decimal microUSD. Below the $0.02 cap (lowered when
+    // UPDATE_INTERVAL dropped to 60s); the test exercises payout
+    // behaviour, not a specific dollar value.
+    let bounty = Uint128::new(10_000);
     // Pre-fund the factory contract with enough ubluechip to cover the bounty
     let mut deps = mock_dependencies(&[cosmwasm_std::Coin {
         denom: "ubluechip".to_string(),
@@ -2656,7 +2662,7 @@ fn test_oracle_update_skips_bounty_when_underfunded() {
         env.clone(),
         message_info(&admin_addr(), &[]),
         ExecuteMsg::SetOracleUpdateBounty {
-            new_bounty: Uint128::new(50_000),
+            new_bounty: Uint128::new(10_000),
         },
     )
     .unwrap();
@@ -3154,7 +3160,7 @@ fn test_oracle_update_bounty_equals_balance_boundary() {
     // still pay out. Pins the `>=` semantic — a regression to `>` would
     // silently break keeper payouts when the factory reserve is down to
     // exactly one bounty's worth.
-    let bounty = Uint128::new(50_000);
+    let bounty = Uint128::new(10_000);
     let mut deps = mock_dependencies(&[cosmwasm_std::Coin {
         denom: "ubluechip".to_string(),
         amount: bounty, // exactly equal
@@ -3223,7 +3229,7 @@ fn test_oracle_update_bounty_equals_balance_boundary() {
 #[test]
 fn test_oracle_update_bounty_one_less_than_amount_skipped() {
     // Mirror of the above: one ubluechip below the bounty must skip.
-    let bounty = Uint128::new(50_000);
+    let bounty = Uint128::new(10_000);
     let mut deps = mock_dependencies(&[cosmwasm_std::Coin {
         denom: "ubluechip".to_string(),
         amount: bounty - Uint128::one(), // one short
@@ -3299,8 +3305,8 @@ fn test_oracle_update_bounty_one_less_than_amount_skipped() {
 fn test_oracle_update_cooldown_blocks_second_call_even_with_bounty() {
     // The bounty must not bypass the UPDATE_INTERVAL cooldown — this is
     // the whole anti-spam property of the design. A second call in the
-    // same 5-minute window must be rejected regardless of bounty state.
-    let bounty = Uint128::new(50_000);
+    // same 60s window must be rejected regardless of bounty state.
+    let bounty = Uint128::new(10_000);
     let mut deps = mock_dependencies(&[cosmwasm_std::Coin {
         denom: "ubluechip".to_string(),
         amount: Uint128::new(100_000_000), // plenty
@@ -3357,10 +3363,10 @@ fn test_oracle_update_cooldown_blocks_second_call_even_with_bounty() {
     )
     .unwrap();
 
-    // Second call 60s later — inside the cooldown window. Must fail and
-    // must NOT pay out a second bounty.
+    // Second call 30s later — strictly inside the 60s cooldown. Must
+    // fail and must NOT pay out a second bounty.
     let mut t2 = t1;
-    t2.block.time = t2.block.time.plus_seconds(60);
+    t2.block.time = t2.block.time.plus_seconds(30);
     let err = execute(
         deps.as_mut(),
         t2,
@@ -3370,7 +3376,7 @@ fn test_oracle_update_cooldown_blocks_second_call_even_with_bounty() {
     .unwrap_err();
     assert!(
         matches!(err, crate::error::ContractError::UpdateTooSoon { .. }),
-        "second call within 5min must be rejected, got: {:?}",
+        "second call within UPDATE_INTERVAL must be rejected, got: {:?}",
         err
     );
 }
@@ -5370,5 +5376,89 @@ mod post_reset_buffer_tests {
             proposed_at_second > proposed_at_first,
             "cancel + re-buffer restarts the observation window"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HIGH-2: cache writes store Pyth publish_time, not on-chain current_time
+// ---------------------------------------------------------------------------
+//
+// The cache-fallback path rejects a cached value once its age exceeds
+// `MAX_PRICE_AGE_SECONDS_BEFORE_STALE`. The age is computed as
+// `current_time - cached_pyth_timestamp`. HIGH-2 pinned that
+// `cached_pyth_timestamp` must store Pyth's `publish_time` (publisher
+// signing time), not the on-chain block.time at which we wrote the
+// cache. Otherwise a price read at the edge of its 300s
+// live-staleness budget would get another 300s of fallback validity,
+// effectively doubling the documented policy to ~600s.
+//
+// Verify the wiring at the query-helper boundary: with
+// MOCK_PYTH_PUBLISH_TIME distinct from env.block.time, the helper
+// returns the publish_time as the 3rd tuple element. The full
+// end-to-end behavior (cache stores publish_time, fallback rejects
+// at the publish-time boundary) is covered by the existing
+// `pyth_cache_*` boundary tests, whose `setup_oracle_with_cached_pyth`
+// fixture has always seeded cached_pyth_timestamp as
+// "env.block.time − age" — which IS the new publish-time semantic.
+#[cfg(test)]
+mod pyth_cache_publish_time_tests {
+    use super::*;
+    use crate::internal_bluechip_price_oracle::{
+        query_pyth_atom_usd_price_with_conf, MOCK_PYTH_PRICE, MOCK_PYTH_PUBLISH_TIME,
+    };
+
+    /// The mock branch of `query_pyth_atom_usd_price_with_conf` honors
+    /// `MOCK_PYTH_PUBLISH_TIME` when set, returning it as the 3rd tuple
+    /// element. This is the wiring that lets HIGH-2's cache-write
+    /// paths store Pyth's publisher signing time instead of the
+    /// on-chain block.time.
+    #[test]
+    fn query_pyth_returns_configured_publish_time() {
+        let mut deps = mock_dependencies(&[]);
+        let env = mock_env();
+        let current_time = env.block.time.seconds();
+
+        // publish_time distinct from current_time. Choose 200s in the
+        // past — a publish that's well inside live-staleness but not
+        // freshly stamped.
+        let mock_publish_time = current_time - 200;
+        MOCK_PYTH_PRICE
+            .save(&mut deps.storage, &Uint128::new(12_000_000))
+            .unwrap();
+        MOCK_PYTH_PUBLISH_TIME
+            .save(&mut deps.storage, &mock_publish_time)
+            .unwrap();
+
+        let (price, _conf, publish_time) =
+            query_pyth_atom_usd_price_with_conf(deps.as_ref(), &env).unwrap();
+        assert_eq!(price, Uint128::new(12_000_000));
+        assert_eq!(
+            publish_time, mock_publish_time,
+            "HIGH-2: query must surface publish_time so callers can \
+             cache it instead of current_time"
+        );
+        assert_ne!(
+            publish_time, current_time,
+            "HIGH-2 regression: query must not return current_time as \
+             publish_time"
+        );
+    }
+
+    /// When `MOCK_PYTH_PUBLISH_TIME` is unset, the mock falls back to
+    /// `env.block.time.seconds()` — keeps existing tests unaffected by
+    /// the HIGH-2 wiring change (publish_time defaults to current_time
+    /// only in the test mock, which is the conservative pre-fix
+    /// equivalent for fixtures that don't care).
+    #[test]
+    fn query_pyth_defaults_publish_time_to_env_block_time() {
+        let mut deps = mock_dependencies(&[]);
+        let env = mock_env();
+        MOCK_PYTH_PRICE
+            .save(&mut deps.storage, &Uint128::new(10_000_000))
+            .unwrap();
+        // MOCK_PYTH_PUBLISH_TIME unset.
+        let (_price, _conf, publish_time) =
+            query_pyth_atom_usd_price_with_conf(deps.as_ref(), &env).unwrap();
+        assert_eq!(publish_time, env.block.time.seconds());
     }
 }

@@ -860,3 +860,187 @@ fn test_upgrade_retry_queue_rotates_when_head_stays_paused() {
         "after retry with all head pools still paused, queue must rotate so pool 11 (previously at the back) moves to the front"
     );
 }
+
+// ---------------------------------------------------------------------------
+// HIGH-5: bluechip_denom drift cross-check (factory ↔ expand-economy)
+// ---------------------------------------------------------------------------
+//
+// `execute_update_factory_config` refuses to apply a `bluechip_denom`
+// change when the configured expand-economy contract still has the
+// OLD denom. Without this, an admin who applies factory's update first
+// (and forgets the matching expand-economy apply) bricks every
+// `RequestExpansion` until both sides re-align — for up to 48h.
+//
+// The three tests below pin: the rejection path, the success path, and
+// the skip-when-no-expand-economy path.
+
+fn make_instantiate_with_ee(
+    expand_economy_addr: Option<Addr>,
+    bluechip_denom: &str,
+) -> FactoryInstantiate {
+    FactoryInstantiate {
+        cw721_nft_contract_id: 58,
+        factory_admin_address: admin_addr(),
+        commit_threshold_limit_usd: Uint128::new(100),
+        pyth_contract_addr_for_conversions: MockApi::default().addr_make("oracle0000").to_string(),
+        pyth_atom_usd_price_feed_id: "ORCL".to_string(),
+        cw20_token_contract_id: 10,
+        create_pool_wasm_contract_id: 11,
+        standard_pool_wasm_contract_id: 0,
+        bluechip_wallet_address: make_addr("ubluechip"),
+        commit_fee_bluechip: Decimal::from_ratio(10u128, 100u128),
+        commit_fee_creator: Decimal::from_ratio(10u128, 100u128),
+        max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
+        creator_excess_liquidity_lock_days: 7,
+        atom_bluechip_anchor_pool_address: atom_bluechip_pool_addr(),
+        bluechip_mint_contract_address: expand_economy_addr,
+        bluechip_denom: bluechip_denom.to_string(),
+        atom_denom: "uatom".to_string(),
+        standard_pool_creation_fee_usd: cosmwasm_std::Uint128::new(1_000_000),
+        threshold_payout_amounts: Default::default(),
+        emergency_withdraw_delay_seconds: 86_400,
+    }
+}
+
+/// Factory apply rejects when the expand-economy contract still has the
+/// OLD denom. The error message tells the operator to apply
+/// expand-economy first.
+#[test]
+fn test_apply_factory_denom_change_rejects_when_expand_economy_mismatch() {
+    let mut deps = mock_dependencies_2(&[]);
+    setup_atom_pool(&mut deps);
+
+    let ee_addr = make_addr("expand_economy");
+    let initial = make_instantiate_with_ee(Some(ee_addr.clone()), "ubluechip");
+
+    let env = mock_env();
+    let info = message_info(&admin_addr(), &[]);
+    instantiate(deps.as_mut(), env.clone(), info.clone(), initial.clone()).unwrap();
+
+    // Mock expand-economy at the OLD denom — operator forgot the
+    // matching expand-economy apply.
+    deps.querier.mock_expand_economy_denom = Some("ubluechip".to_string());
+
+    // Propose factory denom change to a NEW value.
+    let new_config = FactoryInstantiate {
+        bluechip_denom: "ubluechip2".to_string(),
+        ..initial
+    };
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        info.clone(),
+        ExecuteMsg::ProposeConfigUpdate {
+            config: new_config,
+        },
+    )
+    .unwrap();
+
+    // Wait out the timelock.
+    let pending = PENDING_CONFIG.load(&deps.storage).unwrap();
+    let mut later_env = env;
+    later_env.block.time = pending.effective_after.plus_seconds(1);
+
+    let err = execute(deps.as_mut(), later_env, info, ExecuteMsg::UpdateConfig {})
+        .unwrap_err();
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("expand-economy") && err_msg.contains("ubluechip"),
+        "expected cross-check rejection mentioning expand-economy + current denom, got: {}",
+        err_msg
+    );
+
+    // Pending config NOT cleared — operator can retry after fixing
+    // expand-economy.
+    assert!(
+        PENDING_CONFIG.may_load(&deps.storage).unwrap().is_some(),
+        "rejection must leave pending config intact for retry"
+    );
+}
+
+/// Factory apply succeeds when the expand-economy contract already has
+/// the NEW denom — i.e., the operator did the rotations in the correct
+/// order (expand-economy first, factory second).
+#[test]
+fn test_apply_factory_denom_change_succeeds_when_expand_economy_pre_aligned() {
+    let mut deps = mock_dependencies_2(&[]);
+    setup_atom_pool(&mut deps);
+
+    let ee_addr = make_addr("expand_economy");
+    let initial = make_instantiate_with_ee(Some(ee_addr.clone()), "ubluechip");
+
+    let env = mock_env();
+    let info = message_info(&admin_addr(), &[]);
+    instantiate(deps.as_mut(), env.clone(), info.clone(), initial.clone()).unwrap();
+
+    // Operator already applied the matching change on expand-economy —
+    // it's at the NEW denom.
+    deps.querier.mock_expand_economy_denom = Some("ubluechip2".to_string());
+
+    let new_config = FactoryInstantiate {
+        bluechip_denom: "ubluechip2".to_string(),
+        ..initial
+    };
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        info.clone(),
+        ExecuteMsg::ProposeConfigUpdate {
+            config: new_config,
+        },
+    )
+    .unwrap();
+
+    let pending = PENDING_CONFIG.load(&deps.storage).unwrap();
+    let mut later_env = env;
+    later_env.block.time = pending.effective_after.plus_seconds(1);
+
+    execute(deps.as_mut(), later_env, info, ExecuteMsg::UpdateConfig {})
+        .expect("apply must succeed when expand-economy already matches");
+
+    // Verify factory's stored denom is the new value.
+    let stored: FactoryInstantiate = crate::state::FACTORYINSTANTIATEINFO
+        .load(&deps.storage)
+        .unwrap();
+    assert_eq!(
+        stored.bluechip_denom, "ubluechip2",
+        "factory denom must reflect the applied change"
+    );
+}
+
+/// Cross-check is skipped entirely when `bluechip_mint_contract_address`
+/// is None — no expand-economy means no drift surface.
+#[test]
+fn test_apply_factory_denom_change_skipped_when_no_mint_contract() {
+    let mut deps = mock_dependencies_2(&[]);
+    setup_atom_pool(&mut deps);
+
+    let initial = make_instantiate_with_ee(None, "ubluechip");
+
+    let env = mock_env();
+    let info = message_info(&admin_addr(), &[]);
+    instantiate(deps.as_mut(), env.clone(), info.clone(), initial.clone()).unwrap();
+
+    // Don't mock expand-economy — the cross-check should never even
+    // attempt the query because bluechip_mint_contract_address is None.
+    let new_config = FactoryInstantiate {
+        bluechip_denom: "ubluechip2".to_string(),
+        ..initial
+    };
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        info.clone(),
+        ExecuteMsg::ProposeConfigUpdate {
+            config: new_config,
+        },
+    )
+    .unwrap();
+
+    let pending = PENDING_CONFIG.load(&deps.storage).unwrap();
+    let mut later_env = env;
+    later_env.block.time = pending.effective_after.plus_seconds(1);
+
+    execute(deps.as_mut(), later_env, info, ExecuteMsg::UpdateConfig {})
+        .expect("apply must succeed when no expand-economy is configured");
+}

@@ -569,6 +569,12 @@ pub fn apply(world: &mut World, action: Action) -> ActionOutcome {
                 &crate::factory_shim::HarnessExecuteMsg::Factory(
                     pool_factory_interfaces::FactoryExecuteMsg::NotifyThresholdCrossed {
                         pool_id: forged_pool_id,
+                        // MEDIUM-2: fuzz harness doesn't exercise the
+                        // mint-decay timing path; None falls back to
+                        // env.block.time on the shim side (pre-MEDIUM-2
+                        // behaviour) so existing fuzz scenarios are
+                        // unaffected.
+                        crossed_at: None,
                     }
                 ),
                 &[],

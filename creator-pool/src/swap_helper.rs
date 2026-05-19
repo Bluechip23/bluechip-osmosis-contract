@@ -16,21 +16,26 @@ enum FactoryQueryWrapper {
 }
 
 // Pool-side acceptance window for the factory oracle's `ConversionResponse`.
-// Sized to the factory's oracle update interval (`UPDATE_INTERVAL = 300s`,
+// Sized to the factory's oracle update interval (`UPDATE_INTERVAL = 60s`,
 // the *minimum* gap between successive `UpdateOraclePrice` calls — keepers
 // physically cannot refresh sooner) plus a 60s grace buffer for keeper
 // scheduling jitter. The factory's `convert_with_oracle` returns
 // `ConversionResponse.timestamp = bluechip_price_cache.last_update`, which
-// only advances when a keeper successfully refreshes the cache. With a
-// strict 90s window here against a 300s update cadence, ~70% of every
-// 5-minute cycle would reject every commit with "Oracle price is stale"
-// even on a fully healthy system.
+// only advances when a keeper successfully refreshes the cache.
+//
+// Tightened from 360s — the previous window was sized to a 300s update
+// interval; under fast-moving bluechip markets the 300s+grace combination
+// admitted commit valuations against ~5-10% stale prices, enabling an
+// attacker to over-claim their distribution share on the threshold-
+// crossing commit (HIGH-3). The 120s window cuts the mispricing
+// arbitrage roughly 3× and stays one update-cycle behind the keeper so
+// healthy commits don't reject.
 //
 // The acceptable Pyth staleness is enforced separately on the factory side
 // via `MAX_PRICE_AGE_SECONDS_BEFORE_STALE`; that check guards the upstream
 // price feed. This pool-side check guards the cache-read freshness, which
 // is a strict superset of the same age in the worst case.
-pub const MAX_ORACLE_STALENESS_SECONDS: u64 = 360;
+pub const MAX_ORACLE_STALENESS_SECONDS: u64 = 120;
 
 /// Must match factory::internal_bluechip_price_oracle::PRICE_PRECISION.
 /// Duplicated here rather than imported because the pool crate intentionally

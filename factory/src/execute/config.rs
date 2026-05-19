@@ -211,17 +211,86 @@ pub fn execute_update_factory_config(
     // the state lands.
     validate_factory_config(deps.as_ref(), &pending.new_config)?;
 
+    // Single load of the prior config — we read it for both the
+    // anchor-change refresh decision below and the expand-economy
+    // denom cross-check.
+    let prior_config = FACTORYINSTANTIATEINFO.may_load(deps.storage)?;
+    let prior_anchor = prior_config
+        .as_ref()
+        .map(|c| c.atom_bluechip_anchor_pool_address.clone());
+    let prior_denom = prior_config.as_ref().map(|c| c.bluechip_denom.clone());
+    let new_anchor = pending.new_config.atom_bluechip_anchor_pool_address.clone();
+    let anchor_changed = prior_anchor.as_ref() != Some(&new_anchor);
+    let new_denom = pending.new_config.bluechip_denom.clone();
+    let denom_changed = prior_denom.as_ref() != Some(&new_denom);
+
+    // HIGH-5: bluechip_denom drift between factory and expand-economy
+    // bricks every `RequestExpansion` (and therefore every threshold-
+    // crossing's bluechip mint reward) until both sides re-align. Each
+    // contract has its own independent 48h timelock; without an
+    // apply-time cross-check, an operator who applies factory's update
+    // first leaves expand-economy stuck at the old denom, and every
+    // RetryFactoryNotify fails with BluechipDenomMismatch until the
+    // matching expand-economy apply runs (up to 48h later).
+    //
+    // Force the explicit ordering: if factory's apply changes the denom,
+    // expand-economy must already have applied the matching change. The
+    // operator's runbook becomes:
+    //   1. Propose denom change on BOTH expand-economy and factory.
+    //   2. Wait 48h. Apply expand-economy first.
+    //   3. Apply factory — this gate verifies (1) and (2) succeeded.
+    //
+    // If the operator inverts the order, this apply errors with a clear
+    // message rather than landing the change and bricking RequestExpansion.
+    // Skipped when bluechip_mint_contract_address is None (no
+    // expand-economy configured — no drift surface).
+    if denom_changed {
+        if let Some(ref ee_addr) = pending.new_config.bluechip_mint_contract_address {
+            // Minimal mirror of expand-economy's QueryMsg::GetConfig.
+            // Defined locally so the factory crate stays compile-free
+            // of an expand-economy dep (wire-format contract only).
+            #[derive(serde::Serialize)]
+            #[serde(rename_all = "snake_case")]
+            enum ExpandEconomyQuery {
+                GetConfig {},
+            }
+            #[derive(serde::Deserialize)]
+            struct ExpandEconomyConfigSubset {
+                bluechip_denom: String,
+            }
+            let ee_config: ExpandEconomyConfigSubset = deps
+                .querier
+                .query_wasm_smart(ee_addr.to_string(), &ExpandEconomyQuery::GetConfig {})
+                .map_err(|e| {
+                    ContractError::Std(StdError::generic_err(format!(
+                        "Cannot apply factory bluechip_denom change to \"{}\": \
+                         expand-economy query to {} failed: {}. Verify \
+                         bluechip_mint_contract_address is reachable, or \
+                         clear it via ProposeConfigUpdate if no \
+                         expand-economy should be configured.",
+                        new_denom, ee_addr, e
+                    )))
+                })?;
+            if ee_config.bluechip_denom != new_denom {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "Cannot apply factory bluechip_denom change to \"{}\": \
+                     expand-economy at {} still has bluechip_denom=\"{}\". \
+                     Apply the matching expand-economy ProposeConfigUpdate \
+                     first, then re-execute this factory apply. Forcing the \
+                     explicit ordering prevents threshold-crossing mint \
+                     reward strand-out from cross-contract denom drift.",
+                    new_denom, ee_addr, ee_config.bluechip_denom
+                ))));
+            }
+        }
+    }
+
     // Detect anchor change against the currently-stored anchor and, if
     // the apply will mutate it, refresh `INTERNAL_ORACLE` so it samples
     // the new anchor and clears the stale price cache. Without this,
     // the oracle would keep querying the old anchor address (which may
     // be defunct) until the next rotation interval and could either
     // freeze with `MissingAtomPool` or serve stale/wrong prices.
-    let prior_anchor = FACTORYINSTANTIATEINFO
-        .may_load(deps.storage)?
-        .map(|c| c.atom_bluechip_anchor_pool_address);
-    let new_anchor = pending.new_config.atom_bluechip_anchor_pool_address.clone();
-    let anchor_changed = prior_anchor.as_ref() != Some(&new_anchor);
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &pending.new_config)?;
     PENDING_CONFIG.remove(deps.storage);

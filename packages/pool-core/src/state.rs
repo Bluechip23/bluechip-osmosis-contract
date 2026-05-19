@@ -527,6 +527,103 @@ pub const MINIMUM_LIQUIDITY: Uint128 = Uint128::new(1000);
 /// hurt UX for legitimate first traders.
 pub const POST_THRESHOLD_COOLDOWN_BLOCKS: u64 = 2;
 
+// ---------------------------------------------------------------------------
+// MEDIUM-4 Option B: per-tx swap cap ramp.
+//
+// After the post-threshold cooldown ends, each swap (simple_swap,
+// execute_swap_cw20, process_post_threshold_commit) is capped at a
+// fraction of the offer-side reserve. The cap ramps linearly from
+// POST_THRESHOLD_SWAP_CAP_START_BPS up to POST_THRESHOLD_SWAP_CAP_END_BPS
+// over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks. Past the ramp window the
+// helper returns `None` and no per-tx cap applies.
+//
+// Bounds per-tx MEV on the freshly-seeded pool: the first post-cooldown
+// trade can swap at most 0.5% of the offer reserve, scaling to
+// "unrestricted" over ~500s on a 5s-block chain. A sandwich attacker
+// can still extract value, but each leg of the sandwich is bounded by
+// the cap_bps × reserve product, so any single trade's price impact
+// is limited during the ramp window.
+//
+// Standard pools never set POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK, so the
+// ramp helper short-circuits with `None` for them and standard-pool
+// swap economics are unchanged. Pre-threshold creator pools likewise
+// never reach the helper (swap path is already gated by
+// IS_THRESHOLD_HIT).
+// ---------------------------------------------------------------------------
+
+/// Number of blocks over which the per-tx swap cap ramps from
+/// `POST_THRESHOLD_SWAP_CAP_START_BPS` to "unrestricted" after the
+/// post-threshold cooldown ends. 100 blocks ≈ 500s on a 5s-block chain.
+pub const POST_THRESHOLD_SWAP_RAMP_BLOCKS: u64 = 100;
+
+/// Initial per-tx swap cap, expressed in basis points of the offer-side
+/// reserve, at the moment the cooldown ends (ramp block 0). 50 bps =
+/// 0.5%. Sized to bound per-tx MEV on the freshly-seeded pool while
+/// permitting modest legitimate first trades — a 0.5%-of-reserve trade
+/// moves price by ~0.5-1% on xyk math.
+pub const POST_THRESHOLD_SWAP_CAP_START_BPS: u64 = 50;
+
+/// End-of-ramp cap in basis points. 10_000 bps = 100% of reserve — xyk
+/// math can't reach that absolute amount (the pool would have zero
+/// liquidity on the ask side at 100% offer consumption), so this
+/// effectively means "unrestricted". Once the ramp passes, the helper
+/// returns `None` and skips the check entirely; the constant exists for
+/// the linear-interpolation math during the ramp window.
+pub const POST_THRESHOLD_SWAP_CAP_END_BPS: u64 = 10_000;
+
+/// Per-tx swap cap during the post-threshold ramp window. Returns
+/// `Some(cap)` (the maximum offer amount allowed for this swap) when
+/// the ramp is active, or `None` when the cap doesn't apply.
+///
+/// Returns `None` when:
+/// - the pool never crossed threshold (POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+///   is unset — standard pool, or pre-threshold creator pool)
+/// - the current block is still within the cooldown window (the
+///   separate cooldown gate handles rejection; we don't double-gate)
+/// - the ramp has fully elapsed
+///   (`blocks_since_cooldown_end >= POST_THRESHOLD_SWAP_RAMP_BLOCKS`)
+///
+/// Otherwise returns `Some(reserve * cap_bps / 10_000)` where `cap_bps`
+/// is the linear interpolation between START and END based on
+/// `blocks_since_cooldown_end`.
+///
+/// Saturating arithmetic everywhere — block-height subtractions and the
+/// interpolation product are bounded by `RAMP_BLOCKS * (END - START)`
+/// which fits in u64 for any plausible value of the three constants.
+pub fn post_threshold_swap_cap(
+    storage: &dyn cosmwasm_std::Storage,
+    current_block: u64,
+    offer_reserve: cosmwasm_std::Uint128,
+) -> cosmwasm_std::StdResult<Option<cosmwasm_std::Uint128>> {
+    let cooldown_until = POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+        .may_load(storage)?
+        .unwrap_or(0);
+    if cooldown_until == 0 {
+        // Never crossed threshold — standard pool, or a creator pool
+        // pre-crossing. No cap.
+        return Ok(None);
+    }
+    if current_block < cooldown_until {
+        // Still inside the cooldown window. The separate cooldown gate
+        // (PostThresholdCooldownActive) handles rejection; the ramp
+        // cap is for the post-cooldown ramp window only, so return
+        // None here.
+        return Ok(None);
+    }
+    let blocks_since = current_block.saturating_sub(cooldown_until);
+    if blocks_since >= POST_THRESHOLD_SWAP_RAMP_BLOCKS {
+        // Ramp fully elapsed — no per-tx cap applies.
+        return Ok(None);
+    }
+    // Linear interpolation: cap_bps = START + (END - START) * blocks / RAMP.
+    let cap_bps = POST_THRESHOLD_SWAP_CAP_START_BPS
+        + (POST_THRESHOLD_SWAP_CAP_END_BPS - POST_THRESHOLD_SWAP_CAP_START_BPS)
+            * blocks_since
+            / POST_THRESHOLD_SWAP_RAMP_BLOCKS;
+    let cap = offer_reserve.multiply_ratio(cap_bps, 10_000u128);
+    Ok(Some(cap))
+}
+
 /// Default per-commit rate-limit floor (seconds). Pool is instantiated
 /// with this value in `PoolSpecs.min_commit_interval`. 13s is one
 /// `block_time + 1s` budget on most Cosmos chains — tight enough to
@@ -682,4 +779,129 @@ pub fn maybe_auto_pause_on_low_liquidity(
     POOL_PAUSED.save(storage, &true)?;
     POOL_PAUSED_AUTO.save(storage, &true)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod post_threshold_swap_cap_tests {
+    use super::*;
+    use cosmwasm_std::testing::mock_dependencies;
+
+    /// Standard pool (POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK unset) →
+    /// helper returns None regardless of reserve / block. Confirms the
+    /// ramp cap has zero impact on standard pools.
+    #[test]
+    fn returns_none_when_cooldown_unset() {
+        let deps = mock_dependencies();
+        let cap = post_threshold_swap_cap(
+            &deps.storage,
+            1_000_000,
+            Uint128::new(1_000_000_000),
+        )
+        .unwrap();
+        assert!(cap.is_none(), "no cooldown → no cap");
+    }
+
+    /// During the cooldown window itself, the helper returns None
+    /// because the separate `PostThresholdCooldownActive` gate handles
+    /// rejection — we don't want to double-gate or surface a confusing
+    /// "cap exceeded" error during a window where ALL swaps are
+    /// already rejected.
+    #[test]
+    fn returns_none_during_cooldown_window() {
+        let mut deps = mock_dependencies();
+        POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+            .save(&mut deps.storage, &100)
+            .unwrap();
+        // Block 99 is still inside the cooldown window.
+        let cap = post_threshold_swap_cap(
+            &deps.storage,
+            99,
+            Uint128::new(1_000_000_000),
+        )
+        .unwrap();
+        assert!(cap.is_none(), "in cooldown → no cap (separate gate)");
+    }
+
+    /// At the exact moment cooldown ends (block == cooldown_until,
+    /// blocks_since = 0), the cap is the START value (50 bps = 0.5%).
+    #[test]
+    fn cap_at_cooldown_end_equals_start_bps() {
+        let mut deps = mock_dependencies();
+        POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+            .save(&mut deps.storage, &100)
+            .unwrap();
+        let cap = post_threshold_swap_cap(
+            &deps.storage,
+            100,
+            Uint128::new(1_000_000_000),
+        )
+        .unwrap()
+        .expect("ramp active at cooldown_end");
+        // 0.5% of 1B = 5M.
+        assert_eq!(cap, Uint128::new(5_000_000));
+    }
+
+    /// Linear interpolation at mid-ramp. blocks_since = 50,
+    /// RAMP_BLOCKS = 100 → cap_bps = 50 + (10000-50) * 50/100 = 5025.
+    #[test]
+    fn cap_at_mid_ramp_is_linear() {
+        let mut deps = mock_dependencies();
+        POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+            .save(&mut deps.storage, &100)
+            .unwrap();
+        let cap = post_threshold_swap_cap(
+            &deps.storage,
+            100 + 50, // mid-ramp
+            Uint128::new(1_000_000_000),
+        )
+        .unwrap()
+        .expect("ramp active at mid-ramp");
+        // 5025 bps of 1B = 502.5M. Integer math: 1_000_000_000 * 5025 / 10_000 = 502_500_000.
+        assert_eq!(cap, Uint128::new(502_500_000));
+    }
+
+    /// Past the ramp window, the helper returns None.
+    #[test]
+    fn returns_none_past_ramp() {
+        let mut deps = mock_dependencies();
+        POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+            .save(&mut deps.storage, &100)
+            .unwrap();
+        // Block is RAMP_BLOCKS past cooldown_until — ramp fully elapsed.
+        let cap = post_threshold_swap_cap(
+            &deps.storage,
+            100 + POST_THRESHOLD_SWAP_RAMP_BLOCKS,
+            Uint128::new(1_000_000_000),
+        )
+        .unwrap();
+        assert!(cap.is_none(), "past ramp → no cap");
+    }
+
+    /// LP withdrawal shrinks the offer-side reserve, which shrinks the
+    /// absolute cap proportionally. Confirms the ramp is reserve-aware
+    /// and doesn't grant a fixed-dollar MEV window even if liquidity
+    /// drains.
+    #[test]
+    fn cap_scales_with_offer_reserve() {
+        let mut deps = mock_dependencies();
+        POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+            .save(&mut deps.storage, &100)
+            .unwrap();
+        let cap_high = post_threshold_swap_cap(
+            &deps.storage,
+            100,
+            Uint128::new(1_000_000_000),
+        )
+        .unwrap()
+        .unwrap();
+        let cap_low = post_threshold_swap_cap(
+            &deps.storage,
+            100,
+            Uint128::new(100_000_000),
+        )
+        .unwrap()
+        .unwrap();
+        // 10× the reserve → 10× the absolute cap.
+        assert_eq!(cap_high, cap_low.checked_mul(Uint128::new(10)).unwrap());
+    }
 }

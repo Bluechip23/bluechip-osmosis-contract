@@ -1576,6 +1576,10 @@ mod native_raised_net_semantics_tests {
             &commit_config,
             &payout,
             &fee_info,
+            // Live wallet not under test here; mirror the snapshot so
+            // assertions on the bluechip-reward recipient continue to
+            // resolve against the test fixture's bluechip wallet addr.
+            &fee_info.bluechip_wallet_address,
             &mock_env(),
         )
         .expect("trigger_threshold_payout must succeed");
@@ -1666,6 +1670,10 @@ mod native_raised_net_semantics_tests {
             &commit_config,
             &payout,
             &fee_info,
+            // bluechip_wallet — live-resolved in production. Tests pass
+            // the snapshot directly; the handler short-circuits on the
+            // IS_THRESHOLD_HIT gate before this value is consumed.
+            &fee_info.bluechip_wallet_address,
             vec![],
             &PoolAnalytics::default(),
         )
@@ -1718,6 +1726,7 @@ mod native_raised_net_semantics_tests {
             &commit_config,
             &payout,
             &fee_info,
+            &fee_info.bluechip_wallet_address,
             &mock_env(),
         )
         .unwrap_err();
@@ -1774,6 +1783,7 @@ mod native_raised_net_semantics_tests {
             &commit_config,
             &payout,
             &fee_info,
+            &fee_info.bluechip_wallet_address,
             &mock_env(),
         )
         .expect("trigger_threshold_payout must succeed on a clean pool");
@@ -1786,6 +1796,109 @@ mod native_raised_net_semantics_tests {
             IS_THRESHOLD_HIT.load(&deps.storage).unwrap(),
             true,
             "post-trigger: flag must be true (set inside trigger_threshold_payout's tail)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MEDIUM-2: threshold-crossing timestamp snapshotting for retry mint amount
+// ---------------------------------------------------------------------------
+//
+// trigger_threshold_payout snapshots env.block.time into THRESHOLD_CROSSED_AT
+// alongside flipping IS_THRESHOLD_HIT. RetryFactoryNotify reads that
+// snapshot and supplies it on the retry SubMsg's `crossed_at` field so
+// the factory's bluechip-mint decay formula uses the ORIGINAL crossing
+// time, not the retry time.
+#[cfg(test)]
+mod crossed_at_snapshot_tests {
+    use super::*;
+    use crate::commit::threshold_payout::trigger_threshold_payout;
+    use crate::msg::CommitFeeInfo;
+    use crate::state::{
+        CommitLimitInfo, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, PoolInfo, POOL_FEE_STATE,
+        POOL_INFO, POOL_STATE, THRESHOLD_CROSSED_AT, THRESHOLD_PAYOUT_AMOUNTS,
+    };
+
+    #[test]
+    fn trigger_threshold_payout_snapshots_crossed_at_with_env_time() {
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        NATIVE_RAISED_FROM_COMMIT
+            .save(&mut deps.storage, &Uint128::new(1_000_000))
+            .unwrap();
+
+        // Pre-trigger: snapshot must not exist.
+        assert!(
+            THRESHOLD_CROSSED_AT
+                .may_load(&deps.storage)
+                .unwrap()
+                .is_none(),
+            "pre-trigger: snapshot must be absent"
+        );
+
+        let pool_info: PoolInfo = POOL_INFO.load(&deps.storage).unwrap();
+        let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
+        let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
+        let commit_config: CommitLimitInfo = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
+        let payout = THRESHOLD_PAYOUT_AMOUNTS.load(&deps.storage).unwrap();
+        let fee_info: CommitFeeInfo = COMMITFEEINFO.load(&deps.storage).unwrap();
+        let env = mock_env();
+        let expected_crossed_at = env.block.time;
+
+        trigger_threshold_payout(
+            &mut deps.storage,
+            &pool_info,
+            &mut pool_state,
+            &mut pool_fee_state,
+            &commit_config,
+            &payout,
+            &fee_info,
+            &fee_info.bluechip_wallet_address,
+            &env,
+        )
+        .expect("trigger_threshold_payout must succeed");
+
+        // Post-trigger: snapshot equals env.block.time used at crossing
+        // and matches the flipped IS_THRESHOLD_HIT flag.
+        assert_eq!(
+            IS_THRESHOLD_HIT.load(&deps.storage).unwrap(),
+            true,
+            "IS_THRESHOLD_HIT must be true post-trigger"
+        );
+        assert_eq!(
+            THRESHOLD_CROSSED_AT.load(&deps.storage).unwrap(),
+            expected_crossed_at,
+            "THRESHOLD_CROSSED_AT must equal env.block.time at crossing"
+        );
+    }
+
+    /// RetryFactoryNotify reads THRESHOLD_CROSSED_AT (load, not may_load)
+    /// so a missing snapshot surfaces as an error rather than silently
+    /// regressing to current-time behavior.
+    #[test]
+    fn retry_factory_notify_errors_when_crossed_at_missing() {
+        use crate::contract::execute_retry_factory_notify;
+        use crate::state::PENDING_FACTORY_NOTIFY;
+
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        // Arm pending notify but DON'T set THRESHOLD_CROSSED_AT — this
+        // simulates a state corruption / storage-layout mismatch. The
+        // load() in execute_retry_factory_notify must surface this as
+        // an error.
+        PENDING_FACTORY_NOTIFY
+            .save(&mut deps.storage, &true)
+            .unwrap();
+
+        let info = message_info(&Addr::unchecked("anyone"), &[]);
+        let err = execute_retry_factory_notify(deps.as_mut(), mock_env(), info)
+            .expect_err("missing THRESHOLD_CROSSED_AT must surface as error");
+        // Hard-coded message details are brittle; just confirm something
+        // bubbles up rather than a silent succeed-with-wrong-timestamp.
+        assert!(
+            !err.to_string().is_empty(),
+            "expected non-empty error, got: {}",
+            err
         );
     }
 }

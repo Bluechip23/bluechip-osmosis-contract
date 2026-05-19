@@ -43,6 +43,14 @@ pub struct WasmMockQuerier {
     // returns the same numbers regardless of which pool was asked.
     pub pool_state_overrides:
         std::collections::HashMap<String, PoolStateResponseForFactory>,
+    // When set, responds to `ExpandEconomyQuery::GetConfig {}` (sent by
+    // `execute_update_factory_config`'s denom cross-check, HIGH-5) with a
+    // `ConfigResponse` carrying this `bluechip_denom`. The
+    // `factory_address` / `owner` fields in the response are stubbed
+    // with dummy addresses since the factory's cross-check only reads
+    // `bluechip_denom`. None means the query goes through the
+    // unrecognized-query error path.
+    pub mock_expand_economy_denom: Option<String>,
 }
 
 impl Querier for WasmMockQuerier {
@@ -138,6 +146,33 @@ impl WasmMockQuerier {
                     panic!("Unsupported factory query");
                 }
 
+                // Expand-economy `GetConfig {}` for the HIGH-5 cross-check.
+                // Mirror of the locally-defined `ExpandEconomyQuery` enum
+                // in `execute_update_factory_config` — same snake_case
+                // wire format. Defined here as a test-only struct to avoid
+                // pulling the expand-economy crate into the test dep graph.
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "snake_case")]
+                enum ExpandEconomyQueryProbe {
+                    GetConfig {},
+                }
+                if let Ok(ExpandEconomyQueryProbe::GetConfig {}) = from_json::<ExpandEconomyQueryProbe>(&msg) {
+                    if let Some(denom) = self.mock_expand_economy_denom.clone() {
+                        #[derive(serde::Serialize)]
+                        struct ConfigResponse {
+                            factory_address: Addr,
+                            owner: Addr,
+                            bluechip_denom: String,
+                        }
+                        let resp = ConfigResponse {
+                            factory_address: Addr::unchecked("factory_stub"),
+                            owner: Addr::unchecked("owner_stub"),
+                            bluechip_denom: denom,
+                        };
+                        return SystemResult::Ok(to_json_binary(&resp).into());
+                    }
+                }
+
                 // If neither parse succeeded
                 SystemResult::Err(SystemError::InvalidRequest {
                     error: "Could not parse query message".to_string(),
@@ -157,6 +192,7 @@ impl WasmMockQuerier {
             query_error_pools: std::collections::HashSet::new(),
             mock_bluechip_usd_price: None,
             pool_state_overrides: std::collections::HashMap::new(),
+            mock_expand_economy_denom: None,
         }
     }
 

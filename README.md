@@ -208,7 +208,7 @@ Once the threshold is crossed, the pool operates as a full AMM:
 - **Remove Liquidity**: Withdraw liquidity (partial or full)
 - **Collect Fees**: Claim accumulated trading fees without burning position
 
-A 2-block post-threshold cooldown delays the first swap to prevent bundling a manipulative swap into the same block as the threshold-crossing tx.
+A 2-block post-threshold cooldown delays the first swap to prevent bundling a manipulative swap into the same block as the threshold-crossing tx. After the cooldown ends, a 100-block per-tx swap-cap ramp limits each individual trade to a fraction of the offer-side reserve, ramping from 0.5% at the cooldown end to "unrestricted" 100 blocks later. The ramp bounds the per-tx MEV any single trader can extract on the freshly-seeded pool while still allowing legitimate first traders to participate.
 
 ---
 
@@ -386,11 +386,13 @@ See `docs/ORACLE_CONSTANTS.md` for the full rationale on every hardcoded constan
 
 ### Manipulation Resistance
 
-- **Anchor-only TWAP**: time-weighted price over the 1h `TWAP_WINDOW`, sampled at `UPDATE_INTERVAL = 300s` minimum cadence.
+- **Anchor-only TWAP**: time-weighted price over the 1h `TWAP_WINDOW`, sampled at `UPDATE_INTERVAL = 60s` minimum cadence. Keepers refresh `bluechip_price_cache` once per minute on a healthy schedule.
 - **TWAP Circuit Breaker**: Each update is rejected if it deviates by more than `MAX_TWAP_DRIFT_BPS = 30%` from the prior published price (the very first update bypasses the breaker by definition).
 - **Warm-Up Gate**: After bootstrap, an admin-driven anchor change, or `ForceRotateOraclePools`, the oracle requires `ANCHOR_CHANGE_WARMUP_OBSERVATIONS = 5` successive successful TWAP rounds before downstream USD conversions resume — preventing the very first post-reset observation from being locked in by an attacker who briefly perturbed the new anchor's reserves. Strict callers (commit valuation) hard-fail during warm-up; best-effort callers (CreateStandardPool fee, distribution bounty) fall back to `pre_reset_last_price` when available.
 - **Stale-Price Rejection**: Pyth prices older than `MAX_PRICE_AGE_SECONDS_BEFORE_STALE = 300s` are rejected. The staleness check uses `u64` saturating subtraction and rejects negative `publish_time` plus any timestamp more than 5 seconds in the future, so a buggy publisher cannot wrap signed-`i64` arithmetic to pass the cap vacuously.
-- **Pool-side staleness window**: pool-level `MAX_ORACLE_STALENESS_SECONDS = 360s` (matches `UPDATE_INTERVAL + 60s grace`) gates commit acceptance against cache freshness; the boundary is `>` (strict), so exactly `ts + 360s` accepts.
+- **Pyth same-block MEV gate**: Pyth prices are required to be at least `MIN_PYTH_AGE_SECONDS = 10s` old (i.e., `publish_time + 10s <= block.time`). Forces the `pyth.UpdatePriceFeeds` tx and the consuming `Commit` to land in different blocks, removing the same-block-bundle ordering edge.
+- **Cache-fallback bounded by publish_time, not write time**: when the live Pyth read fails, the fallback path consults `bluechip_price_cache.cached_pyth_price`. The cached entry stores Pyth's `publish_time` (publisher signing time), not the block at which the cache was written, so `current_time - cached_pyth_timestamp` measures the price's TRUE age and the 300s bound is honored cleanly. Pre-fix, a price read at the edge of its live-staleness window got another 300s of fallback validity, doubling the effective bound to ~600s.
+- **Pool-side staleness window**: pool-level `MAX_ORACLE_STALENESS_SECONDS = 120s` (matches `UPDATE_INTERVAL + 60s grace`) gates commit acceptance against cache freshness; the boundary is `>` (strict), so exactly `ts + 120s` accepts. Tightened from 360s alongside the `UPDATE_INTERVAL: 300 → 60` cadence change to roughly 3× harder stale-oracle commit-valuation arbitrage.
 
 ### Force-Rotate (Admin)
 
@@ -398,7 +400,7 @@ See `docs/ORACLE_CONSTANTS.md` for the full rationale on every hardcoded constan
 
 ### Keeper Bounty
 
-`UpdateOraclePrice` is permissionless and pays a USD-denominated bounty (capped at $0.10) to the caller, paid out in bluechip after USD→bluechip conversion. The existing per-update interval gates frequency, so the bounty cannot be spammed.
+`UpdateOraclePrice` is permissionless and pays a USD-denominated bounty (capped at $0.02 per call) to the caller, paid out in bluechip after USD→bluechip conversion. The existing per-update interval (60s) gates frequency, so the bounty cannot be spammed. With the 60s cadence and $0.02 cap, the worst-case daily admin-compromise drain is ~$28.80/day ≈ $10.5k/year — the same total exposure as the prior $0.10-per-call / 300s-cadence design.
 
 ---
 
@@ -542,8 +544,10 @@ The standard-pool reply handler will reject the transaction if the CW20 has a tr
 - Warm-up gate (5 successive observations) re-arms after every bootstrap, anchor change, and admin-triggered force-rotate, preventing first-observation-after-reset from being locked in. Bifurcated: strict callers hard-fail during warm-up; best-effort callers fall back to `pre_reset_last_price` when available.
 - Per-update TWAP circuit breaker (30% max drift) rejects out-of-band price moves on every update after the first.
 - Stale-price rejection at 300 seconds (Pyth). The staleness check uses `u64` saturating subtraction and explicitly rejects negative `publish_time` values plus any `publish_time` more than 5 seconds in the future, so a buggy or malicious Pyth publisher cannot wrap signed-`i64` arithmetic in release wasm to make a far-past or far-future timestamp pass the cap vacuously.
-- Pool-side staleness window (360s) matches the 300s update cadence plus a 60s keeper-jitter grace; boundary is strict (`>`), so exactly `ts + 360s` accepts.
-- Keeper bounty USD-denominated and hard-capped at $0.10 — caps yearly drain at ~$10.5k worst-case if admin is compromised.
+- Pyth same-block MEV gate at 10 seconds: `publish_time + 10s <= block.time` required. Forces `pyth.UpdatePriceFeeds` and consuming `Commit` into different blocks, eliminating the bundled-update ordering edge that previously let an MEV bot inject a freshly-favorable Pyth value at threshold-crossing time.
+- Pyth cache stores `publish_time`, not write time: the cache-fallback path measures the cached price's TRUE publisher-relative age, so the 300s policy can't be doubled by reading at the live-staleness edge and immediately bridging into the fallback window.
+- Pool-side staleness window (120s) matches the 60s update cadence plus a 60s keeper-jitter grace; boundary is strict (`>`), so exactly `ts + 120s` accepts. Tightened from 360s alongside `UPDATE_INTERVAL: 300 → 60` to make stale-oracle commit-valuation arbitrage ~3× harder.
+- Keeper bounty USD-denominated and hard-capped at $0.02 per call — with the 60s `UPDATE_INTERVAL`, daily admin-compromise drain caps at ~$28.80/day ≈ $10.5k/year (same total exposure as before the cadence change; 5× more calls × 1/5 the per-call payout).
 
 ### Threshold Mechanics
 - Threshold can only be crossed once (irreversible).
@@ -551,7 +555,7 @@ The standard-pool reply handler will reject the transaction if the CW20 has a tr
 - USD-based tracking prevents token-price manipulation around the threshold.
 - Batched distribution for large committer sets (>40), with per-call keeper bounty paid by the factory.
 - Stuck-state recovery via `RecoverStuckStates` (factory admin, after timeout); handler refuses to operate on already-drained pools.
-- 2-block post-threshold cooldown delays the first swap so an attacker can't bundle a manipulative swap into the threshold-crossing block.
+- 2-block post-threshold cooldown delays the first swap so an attacker can't bundle a manipulative swap into the threshold-crossing block. After cooldown, a 100-block per-tx swap-cap ramp (0.5% → 100% of offer-side reserve, linear) bounds each individual trade on the freshly-seeded pool, preventing major sniping without freezing legitimate first traders.
 
 ### Per-Address Rate Limit on Pool Creation
 - 1-hour cooldown per `info.sender` on creator-pool creation. Defends against trivial spam-creates that would inflate the commit-pool ordinal and gas-amplify per-pool storage scans. Coordinated multi-address spam still has to fund and sign from each new address it rotates through.
@@ -866,14 +870,17 @@ overrides. Constants without 🧪 are pinned regardless of build flavour.
 | Standard-pool create rate limit 🧪 | 3600 seconds | Per-address, per `CreateStandardPool` call |
 | Default slippage | 0.5% | Default max slippage for swaps |
 | Max slippage | 50% | Hard cap on swap slippage |
-| Post-threshold swap cooldown | 2 blocks | Delays first swap after threshold |
+| Post-threshold swap cooldown | 2 blocks | Cooldown after threshold — no swaps allowed |
+| Post-threshold swap cap ramp | 100 blocks | After cooldown ends, per-tx swap capped at fraction of offer reserve, ramping from 0.5% to 100% |
+| Post-threshold swap cap start | 50 bps (0.5%) | Initial per-tx cap as % of offer-side reserve at cooldown end |
 | Emergency withdraw timelock | 86,400 s (24h) | Phase 1 → Phase 2 delay |
 | Admin timelock (factory) 🧪 | 172,800 s (48h) | Config / upgrade / force-rotate |
 | Admin timelock (expand-economy) 🧪 | 172,800 s (48h) | Config update + withdrawal |
 | Oracle TWAP window | 3600 seconds | Time-weighted price window |
-| Oracle update interval 🧪 | 300 seconds | Min between price updates |
+| Oracle update interval 🧪 | 60 seconds | Min between price updates (tightened from 300s) |
 | Oracle stale-price max age (Pyth) | 300 seconds | Live Pyth + cached-Pyth max age |
-| Oracle stale-price max age (pool-side) | 360 seconds | Pool-side acceptance window for `ConversionResponse` |
+| Pyth minimum age | 10 seconds | `publish_time + 10s <= block.time` required — eliminates same-block bundled-update MEV |
+| Oracle stale-price max age (pool-side) | 120 seconds | Pool-side acceptance window for `ConversionResponse` (tightened from 360s alongside `UPDATE_INTERVAL`) |
 | Oracle rotation interval 🧪 | 3600 seconds | Sample re-selection cadence (basket disabled in v1) |
 | Oracle warm-up observations 🧪 | 5 | Required after anchor change / rotate (force-cleared per call under integration_short_timing) |
 | Oracle TWAP drift cap | 30% (3000 bps) | Per-update circuit breaker |
@@ -884,7 +891,7 @@ overrides. Constants without 🧪 are pinned regardless of build flavour.
 | Oracle snapshot refresh rate limit 🧪 | 7200 blocks (~12h) | Min between `RefreshOraclePoolSnapshot` calls |
 | `ORACLE_BASKET_ENABLED` 🧪 | `false` | When `true` the oracle samples eligible pools; when `false` it stays anchor-only |
 | Eligible-pool refresh window | 72,000 blocks (~5d) | Snapshot rebuild cadence |
-| Oracle update bounty cap | $0.10 USD (6 dec) | Per successful update |
+| Oracle update bounty cap | $0.02 USD (6 dec) | Per successful update (lowered from $0.10 alongside `UPDATE_INTERVAL` change to keep daily admin-compromise drain unchanged) |
 | Distribution batch bounty cap | $0.10 USD (6 dec) | Per successful batch |
 | Expand-economy daily cap | 100,000,000,000 ubluechip | Rolling 24h cap on `RequestExpansion` |
 | Expand-economy window | 86,400 seconds | Single-bucket reset interval |

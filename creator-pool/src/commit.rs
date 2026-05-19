@@ -141,6 +141,24 @@ fn execute_commit_logic(
     let fee_info = COMMITFEEINFO.load(deps.storage)?;
     let sender = info.sender.clone();
 
+    // Resolve the LIVE bluechip protocol-wallet for both the per-commit
+    // fee transfer and the threshold-cross bluechip-reward mint. The
+    // pool's `COMMITFEEINFO.bluechip_wallet_address` is snapshotted at
+    // create time; the factory's address is admin-tunable via the
+    // standard 48h `ProposeConfigUpdate` flow. Querying live here keeps
+    // both fund flows in lockstep with a key-compromise-driven wallet
+    // rotation — without it, every existing pool would keep paying the
+    // protocol fee and the 25k-token threshold-cross reward to the old
+    // (potentially compromised) wallet indefinitely. Mirrors the live-
+    // query pattern already in use on the emergency-drain recipient
+    // (pool-core::admin). Fail-soft fallback to the snapshot keeps
+    // commits live if the factory is unreachable.
+    let live_bluechip_wallet = crate::generic_helpers::resolve_live_bluechip_wallet(
+        deps.as_ref(),
+        &pool_info.factory_addr,
+        &fee_info.bluechip_wallet_address,
+    );
+
     // commits flow only in the bluechip direction.
     // `validate_pool_token_info` pins `asset_infos[0]` to the canonical
     // bluechip Native denom and `asset_infos[1]` to the creator-token
@@ -241,6 +259,7 @@ fn execute_commit_logic(
 
             let messages = build_fee_messages(
                 &fee_info,
+                &live_bluechip_wallet,
                 denom,
                 commit_fee_bluechip_amt,
                 commit_fee_creator_amt,
@@ -317,6 +336,7 @@ fn execute_commit_logic(
                             &commit_config,
                             &threshold_payout,
                             &fee_info,
+                            &live_bluechip_wallet,
                             messages,
                             belief_price,
                             max_spread,
@@ -342,6 +362,7 @@ fn execute_commit_logic(
                             &commit_config,
                             &threshold_payout,
                             &fee_info,
+                            &live_bluechip_wallet,
                             messages,
                             &analytics,
                         )?
@@ -413,8 +434,20 @@ fn calculate_commit_fees(
 }
 
 /// Build bank-send messages for the two fee recipients.
+///
+/// `bluechip_wallet` is resolved at the caller via
+/// `generic_helpers::resolve_live_bluechip_wallet` so the protocol-fee
+/// destination tracks the LIVE factory config rather than the snapshot
+/// pinned in `fee_info.bluechip_wallet_address` at pool create. This
+/// keeps an admin wallet rotation (e.g., after a key compromise) actually
+/// effective for every pre-existing pool's commit-fee stream.
+///
+/// `fee_info.creator_wallet_address` stays as-is — the creator wallet is
+/// per-pool, set from the pool's creator at instantiate, and is not a
+/// protocol-level rotation target.
 fn build_fee_messages(
     fee_info: &CommitFeeInfo,
+    bluechip_wallet: &Addr,
     denom: &str,
     bluechip_fee: Uint128,
     creator_fee: Uint128,
@@ -422,7 +455,7 @@ fn build_fee_messages(
     let mut messages = Vec::new();
     if !bluechip_fee.is_zero() {
         messages.push(get_bank_transfer_to_msg(
-            &fee_info.bluechip_wallet_address,
+            bluechip_wallet,
             denom,
             bluechip_fee,
         )?);

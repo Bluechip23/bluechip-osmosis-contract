@@ -259,11 +259,17 @@ pub const STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS: u64 = 30;
 pub const ORACLE_UPDATE_BOUNTY_USD: Item<Uint128> = Item::new("oracle_update_bounty_usd");
 
 // Hard cap to protect the factory's reserve if the admin key is
-// compromised. $0.10 USD per successful update (6 decimals). Realistic
-// keeper gas is ~$0.003–$0.03 per oracle update on typical Cosmos
-// chains; $0.10 leaves headroom for gas spikes while capping the yearly
-// drain at ~$28.80/day ≈ $10.5k/year if admin is compromised.
-pub const MAX_ORACLE_UPDATE_BOUNTY_USD: Uint128 = Uint128::new(100_000);
+// compromised. $0.02 USD per successful update (6 decimals).
+//
+// Lowered from $0.10 alongside the `UPDATE_INTERVAL: 300 → 60` change
+// (HIGH-3 Option B) so the daily admin-compromise drain stays
+// approximately constant: 5× more keeper calls × 1/5 the per-call
+// payout = same total. Worst-case daily drain at full cap remains
+// ~$28.80/day ≈ $10.5k/year (= 86400/60 × $0.02), unchanged from the
+// pre-fix economics. Realistic keeper gas is ~$0.003–$0.03 per oracle
+// update on typical Cosmos chains; $0.02 still covers the median
+// keeper cost on a 1-min cadence with headroom.
+pub const MAX_ORACLE_UPDATE_BOUNTY_USD: Uint128 = Uint128::new(20_000);
 
 // (`ORACLE_BOUNTY_DENOM` was removed — the bounty path now reads the
 // canonical bluechip denom from `FACTORYINSTANTIATEINFO.bluechip_denom`

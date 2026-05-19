@@ -191,8 +191,8 @@ pub fn execute(
         ExecuteMsg::CancelPoolConfigUpdate { pool_id } => {
             execute_cancel_pool_config_update(deps, info, pool_id)
         }
-        ExecuteMsg::NotifyThresholdCrossed { pool_id } => {
-            execute_notify_threshold_crossed(deps, env, info, pool_id)
+        ExecuteMsg::NotifyThresholdCrossed { pool_id, crossed_at } => {
+            execute_notify_threshold_crossed(deps, env, info, pool_id, crossed_at)
         }
         ExecuteMsg::PausePool { pool_id } => execute_pause_pool(deps, info, pool_id),
         ExecuteMsg::UnpausePool { pool_id } => execute_unpause_pool(deps, info, pool_id),
