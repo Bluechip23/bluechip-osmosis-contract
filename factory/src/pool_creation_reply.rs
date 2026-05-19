@@ -229,10 +229,13 @@ pub fn finalize_pool(
         // chain (triggered by ExecuteMsg::Create). Standard pools have
         // their own reply chain that sets pool_kind = Standard.
         pool_kind: pool_factory_interfaces::PoolKind::Commit,
-        // Captured at create time on `PoolCreationContext.commit_pool_ordinal`
-        // so the threshold-mint decay formula uses commit-pool-count
-        // semantics rather than a global pool counter mixed with
-        // permissionlessly-created standard pools.
+        // Sentinel 0 propagated from `PoolCreationContext.commit_pool_ordinal`.
+        // The real ordinal is allocated at threshold-cross time inside
+        // `execute_notify_threshold_crossed`, which overwrites this field.
+        // We still propagate `ctx.commit_pool_ordinal` rather than hardcoding
+        // 0 so the wire format stays uniform with any future migration that
+        // re-introduces create-time allocation; under current code it is
+        // always 0 for fresh pools.
         commit_pool_ordinal: ctx.commit_pool_ordinal,
     };
 

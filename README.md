@@ -130,7 +130,7 @@ Each creator pool receives:
 - Factory-configured fee structure (default: 1% protocol + 5% creator)
 - Bluechip tokens minted via the Expand Economy contract on threshold-crossing (up to 500 per pool, decreasing over time)
 
-A per-address rate limit (1 hour) on `Create` calls keeps an attacker from cheaply inflating the commit-pool ordinal that drives the expand-economy decay schedule.
+A per-address rate limit (1 hour) on `Create` calls plus a USD-denominated creation fee keep registry bloat and gas-amplified per-pool storage scans in check. The expand-economy decay schedule's `x` input is allocated at threshold-cross time (not create time), so junk-create spam cannot inflate it without the attacker also committing the full USD threshold per junk pool — making decay-grief economically self-defeating.
 
 ### Creating a Standard Pool
 
@@ -558,7 +558,7 @@ The standard-pool reply handler will reject the transaction if the CW20 has a tr
 - 2-block post-threshold cooldown delays the first swap so an attacker can't bundle a manipulative swap into the threshold-crossing block. After cooldown, a 100-block per-tx swap-cap ramp (0.5% → 100% of offer-side reserve, linear) bounds each individual trade on the freshly-seeded pool, preventing major sniping without freezing legitimate first traders.
 
 ### Per-Address Rate Limit on Pool Creation
-- 1-hour cooldown per `info.sender` on creator-pool creation. Defends against trivial spam-creates that would inflate the commit-pool ordinal and gas-amplify per-pool storage scans. Coordinated multi-address spam still has to fund and sign from each new address it rotates through.
+- 1-hour cooldown per `info.sender` on creator-pool creation, plus a USD-denominated creation fee. Defends against registry bloat and gas-amplified per-pool storage scans. The expand-economy decay input `x` is allocated at threshold-cross time (not create), so junk-create spam alone cannot inflate it; coordinated multi-address spam still has to fund and sign from each new address AND drive each junk pool across the full USD threshold to advance `x`.
 
 ### Standard-Pool / Pool-Core Defenses
 - **SubMsg-based deposit balance verification** (standard-pool only): each CW20-side TransferFrom is anchored by a `reply_on_success` SubMsg whose handler re-queries the post-balance and asserts equality with the credited delta. Strict equality (not `≥`) so both fee-on-transfer shortfalls and inflate-on-transfer overages revert.
@@ -652,7 +652,7 @@ mint_amount = 500 - ((5x² + x) / ((s / 6) + 333x))
 ```
 
 Where:
-- **x** = `commit_pool_ordinal` — a commit-pool-only counter (NOT the global `pool_id`). Standard-pool creations cannot inflate `x`.
+- **x** = `commit_pool_ordinal` — a 1-indexed counter of commit pools that have CROSSED THEIR THRESHOLD (NOT created). Allocated inside `execute_notify_threshold_crossed` immediately after the `POOL_THRESHOLD_MINTED` idempotency gate, so junk-created commit pools that never cross threshold do not inflate `x`. Standard-pool creations cannot inflate `x` either (separate counter, never bumped on the standard path).
 - **s** = seconds elapsed since the first threshold-crossing
 - **Result** is in whole tokens (multiplied by 10⁶ for micro-denomination)
 

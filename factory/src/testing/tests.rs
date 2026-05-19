@@ -2350,6 +2350,296 @@ fn test_bluechip_minting_on_threshold_crossing() {
     assert_eq!(pool_count, 1);
 }
 
+/// Regression test for the HIGH-1 audit fix:
+/// `commit_pool_ordinal` (and the `COMMIT_POOL_COUNTER` it's allocated from)
+/// must advance ONLY on threshold-cross, never on pool creation. This
+/// prevents paid junk-create spam from inflating the mint-decay formula's
+/// `x` input for legitimate future crossings.
+///
+/// The test:
+/// 1. Calls `ExecuteMsg::Create` and asserts `COMMIT_POOL_COUNTER` stays at
+///    its prior value (sentinel 0, no allocation at create-time).
+/// 2. Manually registers the pool with `commit_pool_ordinal: 0` (matching
+///    the create-time sentinel that the real reply chain would have written).
+/// 3. Calls `NotifyThresholdCrossed` and asserts:
+///    - `COMMIT_POOL_COUNTER` advances by exactly 1.
+///    - `PoolDetails.commit_pool_ordinal` is overwritten from 0 → 1.
+#[test]
+fn test_commit_pool_ordinal_advances_on_threshold_cross_not_create() {
+    let mut deps = mock_dependencies(&[]);
+
+    setup_atom_pool(&mut deps);
+    let msg = FactoryInstantiate {
+        factory_admin_address: admin_addr(),
+        cw721_nft_contract_id: 58,
+        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        pyth_contract_addr_for_conversions: MockApi::default().addr_make("oracle0000").to_string(),
+        pyth_atom_usd_price_feed_id: "BLUECHIP".to_string(),
+        cw20_token_contract_id: 10,
+        create_pool_wasm_contract_id: 11,
+        standard_pool_wasm_contract_id: 0,
+        bluechip_wallet_address: bluechip_wallet_addr(),
+        commit_fee_bluechip: Decimal::percent(1),
+        commit_fee_creator: Decimal::percent(5),
+        max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
+        creator_excess_liquidity_lock_days: 7,
+        atom_bluechip_anchor_pool_address: atom_bluechip_pool_addr(),
+        bluechip_mint_contract_address: None,
+        bluechip_denom: "ubluechip".to_string(),
+        atom_denom: "uatom".to_string(),
+        standard_pool_creation_fee_usd: cosmwasm_std::Uint128::new(1_000_000),
+        threshold_payout_amounts: Default::default(),
+        emergency_withdraw_delay_seconds: 86_400,
+    };
+
+    let env = mock_env();
+    let info = message_info(&admin_addr(), &[]);
+    instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
+    prime_oracle_for_first_update(&mut deps);
+
+    // Pre-state: counter at the sentinel zero (no commit pool has crossed yet).
+    let counter_before_create = crate::state::COMMIT_POOL_COUNTER
+        .may_load(&deps.storage)
+        .unwrap()
+        .unwrap_or(0);
+    assert_eq!(counter_before_create, 0);
+
+    // Phase 1: Create the commit pool. After the M-1 fix this must NOT bump
+    // COMMIT_POOL_COUNTER — the counter is now allocated at threshold-cross
+    // time inside `execute_notify_threshold_crossed`.
+    let create_msg = ExecuteMsg::Create {
+        pool_msg: create_test_pool_msg(),
+        token_info: CreatorTokenInfo {
+            name: "First Token".to_string(),
+            symbol: "FIRST".to_string(),
+            decimal: 6,
+        },
+    };
+    let create_info = message_info(&admin_addr(), &creation_fee_funds());
+    execute(deps.as_mut(), env.clone(), create_info, create_msg).unwrap();
+
+    let counter_after_create = crate::state::COMMIT_POOL_COUNTER
+        .may_load(&deps.storage)
+        .unwrap()
+        .unwrap_or(0);
+    assert_eq!(
+        counter_after_create, 0,
+        "COMMIT_POOL_COUNTER must NOT advance on create — this is the M-1 \
+         regression invariant. Allocation moved to execute_notify_threshold_crossed."
+    );
+
+    // Phase 2: Register the pool with `commit_pool_ordinal: 0` — matching
+    // the create-time sentinel that the real reply chain writes via
+    // `PoolCreationContext.commit_pool_ordinal: 0`.
+    let pool_addr = Addr::unchecked("pool_contract_1");
+    crate::state::POOLS_BY_ID
+        .save(
+            deps.as_mut().storage,
+            1,
+            &PoolDetails {
+                pool_id: 1,
+                pool_token_info: [
+                    TokenType::Native {
+                        denom: "ubluechip".to_string(),
+                    },
+                    TokenType::CreatorToken {
+                        contract_addr: Addr::unchecked("token"),
+                    },
+                ],
+                creator_pool_addr: pool_addr.clone(),
+                pool_kind: pool_factory_interfaces::PoolKind::Commit,
+                // Create-time sentinel: zero until threshold-cross allocates.
+                commit_pool_ordinal: 0,
+            },
+        )
+        .unwrap();
+    crate::state::POOL_ID_BY_ADDRESS
+        .save(deps.as_mut().storage, pool_addr.clone(), &1u64)
+        .unwrap();
+
+    // Phase 3: Notify threshold crossed. This is the call that allocates the
+    // ordinal under the M-1 fix.
+    let notify_msg = ExecuteMsg::NotifyThresholdCrossed {
+        pool_id: 1,
+        crossed_at: None,
+    };
+    let pool_info = message_info(&pool_addr, &[]);
+    execute(deps.as_mut(), env.clone(), pool_info, notify_msg).unwrap();
+
+    // Post-state assertions:
+    //  (a) COMMIT_POOL_COUNTER advances exactly once.
+    //  (b) The pool's PoolDetails.commit_pool_ordinal is overwritten from 0 → 1.
+    let counter_after_cross = crate::state::COMMIT_POOL_COUNTER
+        .load(&deps.storage)
+        .unwrap();
+    assert_eq!(
+        counter_after_cross, 1,
+        "COMMIT_POOL_COUNTER must advance to 1 on the first threshold-cross."
+    );
+
+    let pool_details_after_cross = crate::state::POOLS_BY_ID
+        .load(&deps.storage, 1)
+        .unwrap();
+    assert_eq!(
+        pool_details_after_cross.commit_pool_ordinal, 1,
+        "Pool 1's commit_pool_ordinal must be overwritten from the sentinel 0 \
+         to the freshly-allocated value 1 at threshold-cross."
+    );
+}
+
+/// Regression test for the HIGH-1 audit fix:
+/// Junk pools that are created but never threshold-cross MUST NOT consume
+/// ordinal slots. A legitimate pool created AFTER N junk creates and then
+/// crossed must receive ordinal 1 (not N+1), so the mint formula treats it
+/// as the first real crossing.
+///
+/// This is the economic invariant the fix protects: paid create-spam can't
+/// decay the bluechip mint stream for honest creators.
+#[test]
+fn test_junk_creates_do_not_inflate_ordinal_for_legitimate_crosser() {
+    let mut deps = mock_dependencies(&[]);
+
+    setup_atom_pool(&mut deps);
+    let msg = FactoryInstantiate {
+        factory_admin_address: admin_addr(),
+        cw721_nft_contract_id: 58,
+        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        pyth_contract_addr_for_conversions: MockApi::default().addr_make("oracle0000").to_string(),
+        pyth_atom_usd_price_feed_id: "BLUECHIP".to_string(),
+        cw20_token_contract_id: 10,
+        create_pool_wasm_contract_id: 11,
+        standard_pool_wasm_contract_id: 0,
+        bluechip_wallet_address: bluechip_wallet_addr(),
+        commit_fee_bluechip: Decimal::percent(1),
+        commit_fee_creator: Decimal::percent(5),
+        max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
+        creator_excess_liquidity_lock_days: 7,
+        atom_bluechip_anchor_pool_address: atom_bluechip_pool_addr(),
+        bluechip_mint_contract_address: None,
+        bluechip_denom: "ubluechip".to_string(),
+        atom_denom: "uatom".to_string(),
+        standard_pool_creation_fee_usd: cosmwasm_std::Uint128::new(1_000_000),
+        threshold_payout_amounts: Default::default(),
+        emergency_withdraw_delay_seconds: 86_400,
+    };
+
+    let mut env = mock_env();
+    let info = message_info(&admin_addr(), &[]);
+    instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
+    prime_oracle_for_first_update(&mut deps);
+
+    // Simulate 3 junk creates from 3 distinct attacker addresses. Each
+    // ExecuteMsg::Create bumps POOL_COUNTER but, under the M-1 fix, must
+    // NOT bump COMMIT_POOL_COUNTER. We advance block time past the per-
+    // address rate-limit between creates (each address has a 1h cooldown).
+    for i in 0..3 {
+        let attacker = MockApi::default().addr_make(&format!("attacker_{i}"));
+        let create_msg = ExecuteMsg::Create {
+            pool_msg: create_test_pool_msg(),
+            token_info: CreatorTokenInfo {
+                name: format!("Junk-{i}"),
+                symbol: format!("JUNK{i}"),
+                decimal: 6,
+            },
+        };
+        let attacker_info = message_info(&attacker, &creation_fee_funds());
+        env.block.time = env.block.time.plus_seconds(3700);
+        execute(deps.as_mut(), env.clone(), attacker_info, create_msg).unwrap();
+    }
+
+    let counter_after_3_junk = crate::state::COMMIT_POOL_COUNTER
+        .may_load(&deps.storage)
+        .unwrap()
+        .unwrap_or(0);
+    assert_eq!(
+        counter_after_3_junk, 0,
+        "Three junk creates (without threshold-cross) must NOT advance \
+         COMMIT_POOL_COUNTER. M-1 regression: prior to the fix this would \
+         have been 3, decaying the next legitimate pool's mint."
+    );
+
+    // Now register the LEGITIMATE pool 4 with create-time sentinel ordinal 0
+    // and cross its threshold. It must receive ordinal 1 (the FIRST real
+    // cross), so the decay formula treats it as `x=1` and emits the full
+    // base mint (not a value decayed by `x=4`).
+    let pool_addr = Addr::unchecked("pool_contract_4");
+    crate::state::POOLS_BY_ID
+        .save(
+            deps.as_mut().storage,
+            4,
+            &PoolDetails {
+                pool_id: 4,
+                pool_token_info: [
+                    TokenType::Native {
+                        denom: "ubluechip".to_string(),
+                    },
+                    TokenType::CreatorToken {
+                        contract_addr: Addr::unchecked("token"),
+                    },
+                ],
+                creator_pool_addr: pool_addr.clone(),
+                pool_kind: pool_factory_interfaces::PoolKind::Commit,
+                commit_pool_ordinal: 0,
+            },
+        )
+        .unwrap();
+    crate::state::POOL_ID_BY_ADDRESS
+        .save(deps.as_mut().storage, pool_addr.clone(), &4u64)
+        .unwrap();
+
+    let notify_msg = ExecuteMsg::NotifyThresholdCrossed {
+        pool_id: 4,
+        crossed_at: None,
+    };
+    let pool_info = message_info(&pool_addr, &[]);
+    let res = execute(deps.as_mut(), env.clone(), pool_info, notify_msg).unwrap();
+
+    let counter_after_cross = crate::state::COMMIT_POOL_COUNTER
+        .load(&deps.storage)
+        .unwrap();
+    assert_eq!(
+        counter_after_cross, 1,
+        "Pool 4 is the FIRST to cross threshold, so COMMIT_POOL_COUNTER \
+         must be 1 — NOT 4 (which would be the create-order count)."
+    );
+
+    let pool_details_after_cross = crate::state::POOLS_BY_ID
+        .load(&deps.storage, 4)
+        .unwrap();
+    assert_eq!(
+        pool_details_after_cross.commit_pool_ordinal, 1,
+        "Pool 4's ordinal must be 1 — the first crossing. If this assertion \
+         ever fails, the M-1 regression has returned: junk creates are \
+         decaying the mint stream for honest creators."
+    );
+
+    // Bonus: assert the mint amount in the response is close to the
+    // undecayed base (≈ 500 bluechip), confirming the formula sees x=1.
+    let mint_bank_msg = res
+        .messages
+        .iter()
+        .find_map(|m| match &m.msg {
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount })
+                if to_address == bluechip_wallet_addr().as_str() =>
+            {
+                Some(amount[0].amount)
+            }
+            _ => None,
+        })
+        .expect("Threshold-cross must produce a mint bank-send to the protocol wallet");
+    // At x=1, s=0: 500e6 - (5+1)*1e6/333 ≈ 499.98e6
+    assert!(
+        mint_bank_msg > Uint128::new(499_000_000),
+        "Mint amount with x=1 should be near base 500e6, got {}",
+        mint_bank_msg
+    );
+    assert!(
+        mint_bank_msg <= Uint128::new(500_000_000),
+        "Mint amount must not exceed base 500e6, got {}",
+        mint_bank_msg
+    );
+}
+
 #[test]
 fn test_no_mint_when_amount_is_zero() {
     let mut deps = mock_dependencies(&[]);
