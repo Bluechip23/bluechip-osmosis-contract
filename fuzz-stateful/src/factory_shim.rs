@@ -148,7 +148,7 @@ pub fn execute(
             POOL_ID_BY_ADDR.save(deps.storage, &addr, &pool_id)?;
             Ok(Response::new().add_attribute("action", "register_pool"))
         }
-        HarnessExecuteMsg::Factory(FactoryExecuteMsg::NotifyThresholdCrossed { pool_id }) => {
+        HarnessExecuteMsg::Factory(FactoryExecuteMsg::NotifyThresholdCrossed { pool_id, .. }) => {
             // Authenticate caller is the registered pool.
             let registered = POOL_ADDR_BY_ID.may_load(deps.storage, pool_id)?;
             match registered {

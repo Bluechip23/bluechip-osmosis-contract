@@ -2311,7 +2311,7 @@ fn test_bluechip_minting_on_threshold_crossing() {
     register_test_pool_addr(deps.as_mut().storage, 1, &pool_addr);
 
     // Now simulate the pool notifying threshold crossed
-    let notify_msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1 };
+    let notify_msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1, crossed_at: None };
     let pool_info = message_info(&pool_addr, &[]);
     let res = execute(deps.as_mut(), env.clone(), pool_info, notify_msg).unwrap();
 
@@ -2335,7 +2335,7 @@ fn test_bluechip_minting_on_threshold_crossing() {
     }
 
     // Verify double-minting is prevented
-    let notify_msg2 = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1 };
+    let notify_msg2 = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1, crossed_at: None };
     let pool_info2 = message_info(&pool_addr, &[]);
     let err = execute(deps.as_mut(), env.clone(), pool_info2, notify_msg2);
     assert!(

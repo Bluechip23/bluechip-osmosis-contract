@@ -738,12 +738,26 @@ pub fn execute_retry_factory_notify(
     }
 
     let pool_info = POOL_INFO.load(deps.storage)?;
+    // MEDIUM-2: re-supply the ORIGINAL threshold-crossing time so the
+    // factory's bluechip-mint decay formula uses the same `s` reference
+    // as it would have at first-attempt. Without this, a retry after a
+    // long delay would receive a smaller mint than the pool was
+    // entitled to at original crossing.
+    //
+    // THRESHOLD_CROSSED_AT is saved alongside IS_THRESHOLD_HIT inside
+    // `trigger_threshold_payout`. If PENDING_FACTORY_NOTIFY is true,
+    // the crossing succeeded on the pool side — so the snapshot is
+    // present. We `load` (not `may_load`) deliberately so a missing
+    // snapshot surfaces loudly rather than silently regressing to the
+    // `None` path (which would equal current-time, defeating the fix).
+    let crossed_at = crate::state::THRESHOLD_CROSSED_AT.load(deps.storage)?;
     let notify = SubMsg::reply_always(
         CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: pool_info.factory_addr.to_string(),
             msg: to_json_binary(
                 &pool_factory_interfaces::FactoryExecuteMsg::NotifyThresholdCrossed {
                     pool_id: pool_info.pool_id,
+                    crossed_at: Some(crossed_at),
                 },
             )?,
             funds: vec![],
@@ -754,7 +768,8 @@ pub fn execute_retry_factory_notify(
     Ok(Response::new()
         .add_submessage(notify)
         .add_attribute("action", "retry_factory_notify")
-        .add_attribute("pool_id", pool_info.pool_id.to_string()))
+        .add_attribute("pool_id", pool_info.pool_id.to_string())
+        .add_attribute("crossed_at", crossed_at.to_string()))
 }
 
 /// SubMsg reply handler.

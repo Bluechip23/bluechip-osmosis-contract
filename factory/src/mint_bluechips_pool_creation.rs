@@ -94,6 +94,14 @@ pub fn calculate_and_mint_bluechip(
     deps: &mut DepsMut,
     env: Env,
     pool_id: u64,
+    // Pool's `env.block.time` at the moment threshold flipped, threaded
+    // through from `execute_notify_threshold_crossed`. The caller has
+    // already (a) validated the pool-supplied value isn't in the future
+    // and (b) substituted `env.block.time` when the pool sent None
+    // (legacy wire-format compat). Used as the `s` reference instead of
+    // `env.block.time` so a retried-after-failure notify still mints
+    // the amount the pool was entitled to at original crossing time.
+    crossed_at: cosmwasm_std::Timestamp,
 ) -> Result<Vec<CosmosMsg>, ContractError> {
     // Defense-in-depth: hard guard that this function is only
     // ever called for commit pools. Belongs above the mock-feature
@@ -109,15 +117,21 @@ pub fn calculate_and_mint_bluechip(
     }
 
     // Lazy-init the "first threshold crossed" anchor timestamp. The
-    // decay formula's `s` input is `block.time - first_threshold_time`
+    // decay formula's `s` input is `crossed_at - first_threshold_time`
     // so `s == 0` for the pool that triggers this branch for the very
     // first time. Subsequent pools see a growing `s`, which shrinks
     // the mint amount per the polynomial below.
+    //
+    // Anchor stored from `crossed_at` (NOT env.block.time) so a retried
+    // first-pool notify uses the same anchor a successful-first-time
+    // notify would have used. Without this, a failed-then-retried first
+    // notify would anchor the entire global decay schedule to the
+    // retry time, shifting `s=0` for every subsequent pool.
     let _first_threshold_time = match FIRST_THRESHOLD_TIMESTAMP.may_load(deps.storage)? {
         Some(time) => time,
         None => {
-            FIRST_THRESHOLD_TIMESTAMP.save(deps.storage, &env.block.time)?;
-            env.block.time
+            FIRST_THRESHOLD_TIMESTAMP.save(deps.storage, &crossed_at)?;
+            crossed_at
         }
     };
 
@@ -131,9 +145,12 @@ pub fn calculate_and_mint_bluechip(
     let first_threshold_time = _first_threshold_time;
     let mut msgs: Vec<CosmosMsg> = Vec::new();
     let config = FACTORYINSTANTIATEINFO.load(deps.storage)?;
-    let seconds_elapsed = env
-        .block
-        .time
+    // Use `crossed_at` (the original crossing time) instead of
+    // `env.block.time` (which is the notify-or-retry time). Ensures the
+    // decay amount a pool gets at retry equals the amount it would have
+    // gotten at original crossing.
+    let _ = env;
+    let seconds_elapsed = crossed_at
         .seconds()
         .saturating_sub(first_threshold_time.seconds());
 

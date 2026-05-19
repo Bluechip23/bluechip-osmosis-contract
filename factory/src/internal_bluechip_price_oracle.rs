@@ -2044,6 +2044,38 @@ pub fn query_pyth_with_feed(
             return Err(StdError::generic_err("ATOM price is stale"));
         }
 
+        // MEDIUM-1: require Pyth price to be at least MIN_PYTH_AGE_SECONDS
+        // old. Forces the Pyth update (`pyth.UpdatePriceFeeds`) and our
+        // consumption to be in DIFFERENT blocks, removing the same-block
+        // bundle attack where an MEV bot submits
+        //   tx1: UpdatePriceFeeds(favorable_price)
+        //   tx2: pool.Commit(...)
+        // in the same block to inject a freshly-favorable conversion rate.
+        //
+        // With a 10s minimum age on chains with 5-7s block times, any Pyth
+        // update lands at least one block before our read can consume it.
+        // The bot can still pick a favorable Pyth value from the
+        // (MIN_PYTH_AGE..MAX_PRICE_AGE) window (10..300s), but the
+        // bundled-update ordering edge is gone — they must commit to the
+        // price in advance, then submit the commit in a later block.
+        //
+        // Honest users: on a 5s-block chain, this adds at most 1 block of
+        // latency vs the prior 0-age policy. Frontends that quote with a
+        // just-fetched Pyth price should not assume "current_time ==
+        // publish_time" and can pre-warm by submitting a Pyth update tx
+        // before broadcasting the commit.
+        const MIN_PYTH_AGE_SECONDS: u64 = 10;
+        if age_seconds < MIN_PYTH_AGE_SECONDS {
+            return Err(StdError::generic_err(format!(
+                "Pyth price too fresh: age {}s below minimum {}s. Forces \
+                 cross-block separation between UpdatePriceFeeds and this \
+                 consumption to prevent same-block bundled-update MEV. \
+                 Retry in the next block once the Pyth payload ages past \
+                 the floor.",
+                age_seconds, MIN_PYTH_AGE_SECONDS
+            )));
+        }
+
         // Validate price is positive. We rely on this check for the conf
         // threshold below — moving or removing it would cause `price as u64`
         // to wrap a negative value into a huge number and pass the conf

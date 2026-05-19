@@ -157,12 +157,19 @@ pub fn trigger_threshold_payout(
     // factory handler fails, the pool's `reply` entrypoint sets
     // PENDING_FACTORY_NOTIFY=true and swallows the error so the commit
     // tx overall still succeeds. See state::PENDING_FACTORY_NOTIFY.
+    //
+    // `crossed_at = env.block.time` is the original threshold-crossing
+    // time (MEDIUM-2). Snapshotted into THRESHOLD_CROSSED_AT below for
+    // RetryFactoryNotify to read on later retries, so the factory's
+    // bluechip-mint decay formula uses the same `s` regardless of when
+    // the notify finally lands.
     let factory_notify = SubMsg::reply_on_error(
         CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: pool_info.factory_addr.to_string(),
             msg: to_json_binary(
                 &pool_factory_interfaces::FactoryExecuteMsg::NotifyThresholdCrossed {
                     pool_id: pool_info.pool_id,
+                    crossed_at: Some(env.block.time),
                 },
             )?,
             funds: vec![],
@@ -334,6 +341,14 @@ pub fn trigger_threshold_payout(
     // per tx by design — but keeping the save at the tail makes the
     // invariant a clean "flag flips iff mint completed" statement.)
     IS_THRESHOLD_HIT.save(storage, &true)?;
+
+    // MEDIUM-2: snapshot the original crossing time so
+    // `execute_retry_factory_notify` can re-supply it on later retries.
+    // The factory's bluechip-mint decay formula uses this timestamp as
+    // its `s` reference, so a retried notify after a long delay still
+    // mints the amount the pool was entitled to at original crossing
+    // time. Paired with IS_THRESHOLD_HIT — both flip together atomically.
+    crate::state::THRESHOLD_CROSSED_AT.save(storage, &env.block.time)?;
 
     Ok(ThresholdPayoutMsgs {
         factory_notify,

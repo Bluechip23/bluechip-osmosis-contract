@@ -41,6 +41,11 @@ semver = { workspace = true }
 pool-factory-interfaces = { path = "../packages/pool-factory-interfaces" }
 pool-core = { path = "../packages/pool-core" }
 cw-utils = { workspace = true }
+# MEDIUM-4: SHA-256 over (block_time, block_height, contract_addr,
+# chain_id) gives the randomized post-threshold cooldown its 0-7
+# block offset. Same dep + version the factory uses for its
+# eligible-pool sampling hash.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 cw-multi-test = { workspace = true }

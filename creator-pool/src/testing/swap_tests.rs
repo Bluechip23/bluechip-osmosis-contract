@@ -2429,8 +2429,16 @@ fn test_concurrent_commits_both_recorded() {
     // routes through the post-threshold AMM swap path, recording a
     // reserve increase for Bob's bluechip — confirms the cooldown is
     // a temporary gate, not a permanent block.
+    //
+    // MEDIUM-4: the cooldown now includes a randomized 0-7 block
+    // offset on top of POST_THRESHOLD_COOLDOWN_BLOCKS. Read the actual
+    // until-block from storage and advance the env to it, rather than
+    // assuming the pre-fix deterministic base+1 was enough.
+    let cooldown_until = pool_core::state::POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+        .load(&deps.storage)
+        .expect("cooldown must be armed after threshold cross");
     let mut env_after_cooldown = env.clone();
-    env_after_cooldown.block.height += pool_core::state::POST_THRESHOLD_COOLDOWN_BLOCKS + 1;
+    env_after_cooldown.block.height = cooldown_until;
     // Advance time too so the per-user `min_commit_interval` rate-limit
     // (13s) doesn't reject the retry under the same-block timestamp.
     env_after_cooldown.block.time = env_after_cooldown.block.time.plus_seconds(60);

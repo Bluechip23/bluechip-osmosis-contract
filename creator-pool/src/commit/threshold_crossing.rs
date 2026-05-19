@@ -22,6 +22,7 @@ use cosmwasm_std::{
     to_json_binary, Addr, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128, WasmMsg,
 };
 use cw20::Cw20ExecuteMsg;
+use sha2::{Digest, Sha256};
 
 use crate::asset::{get_native_denom, TokenInfo};
 use crate::error::ContractError;
@@ -40,6 +41,34 @@ use crate::swap_helper::{
 };
 
 use super::commit_base_attributes;
+
+/// Randomized 0-7 block offset applied on top of
+/// `POST_THRESHOLD_COOLDOWN_BLOCKS`. With base 2 + the +1 in the save
+/// site, the cooldown ends between block+3 and block+10.
+///
+/// Hash inputs (`block.time`, `block.height`, `contract_address`,
+/// `chain_id`) are all on-chain observable, so a sophisticated MEV bot
+/// that watches the crossing tx CAN compute the offset and target the
+/// exact unlock block. The randomization mostly imposes a cost on naive
+/// bots that would otherwise spam at the deterministic `block+3` —
+/// a wider random window would force sophisticated bots to spam more
+/// candidate blocks, raising their gas cost without changing the
+/// fundamental MEV economics. 0-7 strikes a balance: enough uncertainty
+/// to deter naive bots, narrow enough that cooldown stays bounded at
+/// ~50s on a 5s-block chain.
+const POST_THRESHOLD_COOLDOWN_RANDOM_OFFSET_MASK: u8 = 0x07;
+
+/// Compute the randomized cooldown extension. Returns a 0-7 block
+/// offset added on top of the base `POST_THRESHOLD_COOLDOWN_BLOCKS`.
+fn cooldown_random_offset(env: &Env) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(env.block.time.seconds().to_be_bytes());
+    hasher.update(env.block.height.to_be_bytes());
+    hasher.update(env.contract.address.as_bytes());
+    hasher.update(env.block.chain_id.as_bytes());
+    let hash = hasher.finalize();
+    (hash[0] & POST_THRESHOLD_COOLDOWN_RANDOM_OFFSET_MASK) as u64
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_threshold_crossing_with_excess(
@@ -128,11 +157,14 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // process_post_threshold_commit, none of which run inside the
     // crossing tx. So the crosser's privileged excess is unaffected,
     // while every follower trade in this block plus the next
-    // POST_THRESHOLD_COOLDOWN_BLOCKS blocks is rejected with
-    // PostThresholdCooldownActive.
+    // POST_THRESHOLD_COOLDOWN_BLOCKS + 0..=7 blocks is rejected with
+    // PostThresholdCooldownActive. The random 0-7 offset (MEDIUM-4)
+    // deters naive MEV bots that hardcode `block+3` as the unlock
+    // target; sophisticated bots can still compute the hash but pay an
+    // extra gas tax for spamming across the unknown unlock block.
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK.save(
         deps.storage,
-        &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
+        &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1 + cooldown_random_offset(&env)),
     )?;
 
     // Hold factory_notify aside; it becomes a SubMsg on the final Response
@@ -395,13 +427,13 @@ pub(crate) fn process_threshold_hit_exact(
     // (called below). See the equivalent comment in
     // `process_threshold_crossing_with_excess` for full rationale.
 
-    // Arm the post-threshold cooldown so other actors can't atomically
-    // sandwich the freshly-seeded pool in the same block (or the next
-    // two). Crossing tx itself is unaffected — the writes here land
-    // before the next tx ever runs the cooldown check.
+    // Arm the post-threshold cooldown. Same randomized-offset shape as
+    // `process_threshold_crossing_with_excess` — see the helper
+    // `cooldown_random_offset` above and the matching call site there
+    // for the MEDIUM-4 rationale.
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK.save(
         deps.storage,
-        &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
+        &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1 + cooldown_random_offset(&env)),
     )?;
 
     let payout = trigger_threshold_payout(

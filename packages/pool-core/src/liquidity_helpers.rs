@@ -80,19 +80,31 @@ pub fn calculate_fees_owed_split(
 /// separately recomputes the same `fee_growth_delta` subtraction;
 /// folding both into one call hoists that shared step.
 ///
-/// Returns `(removed_adj, removed_clip, preserved_adj)`. The preserved
-/// clip is intentionally dropped: the clipped slice on the remaining
-/// liquidity accrues through the next `fee_growth` snapshot on the
-/// following collect, matching the pre-refactor behavior exactly.
+/// Returns `(removed_adj, removed_clip, preserved_adj, preserved_clip)`:
+/// - `removed_adj`    : LP payout on the removed slice (multiplier-applied).
+/// - `removed_clip`   : creator-pot debit from the removed slice
+///   (`removed_base - removed_adj`).
+/// - `preserved_adj`  : multiplier-applied earned fees on the preserved
+///   slice, stored as `unclaimed_fees_*` and paid on next collect.
+/// - `preserved_clip` : creator-pot debit from the preserved slice
+///   (`preserved_base - preserved_adj`). MEDIUM-3 fix — previously
+///   dropped, which silently orphaned the multiplier-clipped portion in
+///   `fee_reserve_*`. The caller is now responsible for routing both
+///   clips into `CREATOR_FEE_POT` and debiting both from `fee_reserve_*`.
 pub fn calculate_fees_owed_split_pair(
     liquidity_removed: Uint128,
     liquidity_preserved: Uint128,
     fee_growth_global: Decimal,
     fee_growth_last: Decimal,
     fee_multiplier: Decimal,
-) -> Result<(Uint128, Uint128, Uint128), ContractError> {
+) -> Result<(Uint128, Uint128, Uint128, Uint128), ContractError> {
     if fee_growth_global < fee_growth_last {
-        return Ok((Uint128::zero(), Uint128::zero(), Uint128::zero()));
+        return Ok((
+            Uint128::zero(),
+            Uint128::zero(),
+            Uint128::zero(),
+            Uint128::zero(),
+        ));
     }
     let fee_growth_delta = fee_growth_global - fee_growth_last;
 
@@ -124,8 +136,9 @@ pub fn calculate_fees_owed_split_pair(
                 e
             )))
         })?;
+    let preserved_clip = preserved_base.saturating_sub(preserved_adj);
 
-    Ok((removed_adj, removed_clip, preserved_adj))
+    Ok((removed_adj, removed_clip, preserved_adj, preserved_clip))
 }
 
 pub fn calc_capped_fees(
@@ -687,5 +700,55 @@ mod tests {
             None,
         );
         assert!(r.is_ok());
+    }
+
+    /// MEDIUM-3: `calculate_fees_owed_split_pair` returns the
+    /// preserved-clip slice as the 4th tuple element. Previously it was
+    /// dropped, silently orphaning the multiplier-clipped portion of
+    /// fees on the preserved liquidity.
+    #[test]
+    fn calculate_fees_owed_split_pair_returns_preserved_clip() {
+        // fee_growth_delta = 10%, multiplier = 0.3 → 70% clip on both sides.
+        // liquidity_removed = 1,000,000  -> removed_base   = 100,000
+        //                                   removed_adj    =  30,000
+        //                                   removed_clip   =  70,000
+        // liquidity_preserved = 500,000  -> preserved_base =  50,000
+        //                                   preserved_adj  =  15,000
+        //                                   preserved_clip =  35,000
+        let (removed_adj, removed_clip, preserved_adj, preserved_clip) =
+            calculate_fees_owed_split_pair(
+                Uint128::new(1_000_000),
+                Uint128::new(500_000),
+                Decimal::percent(10),
+                Decimal::zero(),
+                Decimal::percent(30),
+            )
+            .unwrap();
+        assert_eq!(removed_adj, Uint128::new(30_000));
+        assert_eq!(removed_clip, Uint128::new(70_000));
+        assert_eq!(preserved_adj, Uint128::new(15_000));
+        assert_eq!(
+            preserved_clip,
+            Uint128::new(35_000),
+            "preserved clip must be returned, not silently dropped"
+        );
+    }
+
+    /// At multiplier = 1.0 (no clipping), both `removed_clip` and
+    /// `preserved_clip` must be zero. Confirms standard-pool semantics
+    /// (APPLY_DUST_MULTIPLIER=false → multiplier always 1.0) are
+    /// unaffected by the MEDIUM-3 fix.
+    #[test]
+    fn calculate_fees_owed_split_pair_zero_clip_at_full_multiplier() {
+        let (_, removed_clip, _, preserved_clip) = calculate_fees_owed_split_pair(
+            Uint128::new(1_000_000),
+            Uint128::new(500_000),
+            Decimal::percent(10),
+            Decimal::zero(),
+            Decimal::one(),
+        )
+        .unwrap();
+        assert_eq!(removed_clip, Uint128::zero());
+        assert_eq!(preserved_clip, Uint128::zero());
     }
 }

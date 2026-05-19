@@ -133,7 +133,25 @@ pub struct AllPoolsResponse {
 #[cw_serde]
 pub enum FactoryExecuteMsg {
     // Called by a pool when its commit threshold has been crossed.
-    NotifyThresholdCrossed { pool_id: u64 },
+    //
+    // `crossed_at` is the pool's `env.block.time` at the moment the
+    // threshold flipped (snapshotted by `trigger_threshold_payout` into
+    // pool storage). The factory's bluechip-mint decay formula
+    // (`calculate_mint_amount`) uses this timestamp to compute
+    // `seconds_elapsed` against `FIRST_THRESHOLD_TIMESTAMP`, so the
+    // mint amount reflects when the pool ACTUALLY crossed — not when
+    // the (possibly retried-after-failure) notification finally lands.
+    //
+    // `#[serde(default)]` keeps the wire format backward-compatible:
+    // legacy callers (no field) deserialize with `crossed_at = None`,
+    // and the factory falls back to `env.block.time` (the prior
+    // behaviour). Production callers in this workspace always supply
+    // the field after MEDIUM-2.
+    NotifyThresholdCrossed {
+        pool_id: u64,
+        #[serde(default)]
+        crossed_at: Option<cosmwasm_std::Timestamp>,
+    },
     // Called by a pool's ContinueDistribution handler to ask the factory
     // to pay the keeper bounty out of the factory's native reserve.
     // The factory verifies the caller is a registered pool via

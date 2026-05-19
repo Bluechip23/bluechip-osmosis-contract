@@ -266,26 +266,30 @@ pub fn remove_partial_liquidity(
     // Compute split fees for both the removed portion (LP payout) and
     // the preserved portion (rolled into the position's `unclaimed_fees`)
     // in a single helper call per token. The clipped slice of the
-    // removed portion is routed to the creator pot below; the preserved
-    // clip is intentionally dropped — it accrues through the standard
-    // `fee_growth` snapshot on the next collect.
+    // removed portion is routed to the creator pot below;
+    // the clipped slice of the preserved portion is also routed to the
+    // pot (was previously dropped — multiplier-clipped fees on the
+    // preserved liquidity silently orphaned in `fee_reserve_*` with no
+    // payout path until emergency drain).
     let remaining_liquidity = liquidity_position
         .liquidity
         .checked_sub(liquidity_to_remove)?;
-    let (fees_owed_0, clipped_0, preserved_fees_0) = calculate_fees_owed_split_pair(
-        liquidity_to_remove,
-        remaining_liquidity,
-        pool_fee_state.fee_growth_global_0,
-        liquidity_position.fee_growth_inside_0_last,
-        liquidity_position.fee_size_multiplier,
-    )?;
-    let (fees_owed_1, clipped_1, preserved_fees_1) = calculate_fees_owed_split_pair(
-        liquidity_to_remove,
-        remaining_liquidity,
-        pool_fee_state.fee_growth_global_1,
-        liquidity_position.fee_growth_inside_1_last,
-        liquidity_position.fee_size_multiplier,
-    )?;
+    let (fees_owed_0, clipped_0, preserved_fees_0, preserved_clip_0) =
+        calculate_fees_owed_split_pair(
+            liquidity_to_remove,
+            remaining_liquidity,
+            pool_fee_state.fee_growth_global_0,
+            liquidity_position.fee_growth_inside_0_last,
+            liquidity_position.fee_size_multiplier,
+        )?;
+    let (fees_owed_1, clipped_1, preserved_fees_1, preserved_clip_1) =
+        calculate_fees_owed_split_pair(
+            liquidity_to_remove,
+            remaining_liquidity,
+            pool_fee_state.fee_growth_global_1,
+            liquidity_position.fee_growth_inside_1_last,
+            liquidity_position.fee_size_multiplier,
+        )?;
 
     if pool_state.total_liquidity.is_zero() {
         return Err(ContractError::Std(StdError::generic_err(
@@ -304,6 +308,26 @@ pub fn remove_partial_liquidity(
     // LP portion so the two debits can't exceed the actual reserve.
     let clipped_0 = clipped_0.min(pool_fee_state.fee_reserve_0.saturating_sub(fees_owed_0));
     let clipped_1 = clipped_1.min(pool_fee_state.fee_reserve_1.saturating_sub(fees_owed_1));
+    // Cap the preserved-clip slice against whatever fee_reserve remains
+    // AFTER both the LP-payout debit AND the removed-clip debit, so the
+    // four debits in sequence can't underflow the reserve. The cap
+    // ordering matches the debit order below: LP > removed-clip >
+    // preserved-clip. Preserved-clip is the lowest-priority claim — it
+    // exists to align with design intent (clipped fees flow to creator
+    // pot, not orphaned into fee_reserve), not to compete with the
+    // higher-priority LP and removed-clip payouts.
+    let preserved_clip_0 = preserved_clip_0.min(
+        pool_fee_state
+            .fee_reserve_0
+            .saturating_sub(fees_owed_0)
+            .saturating_sub(clipped_0),
+    );
+    let preserved_clip_1 = preserved_clip_1.min(
+        pool_fee_state
+            .fee_reserve_1
+            .saturating_sub(fees_owed_1)
+            .saturating_sub(clipped_1),
+    );
 
     check_slippage(withdrawal_amount_0, min_amount0, "bluechip")?;
     check_slippage(withdrawal_amount_1, min_amount1, "cw20")?;
@@ -319,20 +343,36 @@ pub fn remove_partial_liquidity(
     update_price_accumulator(&mut pool_state, env.block.time.seconds())?;
     pool_state.reserve0 = pool_state.reserve0.checked_sub(withdrawal_amount_0)?;
     pool_state.reserve1 = pool_state.reserve1.checked_sub(withdrawal_amount_1)?;
+    // Debit fee_reserve for ALL three claims in one pass:
+    // LP payout + removed-clip + preserved-clip. Cap ordering above
+    // guarantees the chained subtraction never underflows.
     pool_fee_state.fee_reserve_0 = pool_fee_state
         .fee_reserve_0
         .checked_sub(fees_owed_0)?
-        .checked_sub(clipped_0)?;
+        .checked_sub(clipped_0)?
+        .checked_sub(preserved_clip_0)?;
     pool_fee_state.fee_reserve_1 = pool_fee_state
         .fee_reserve_1
         .checked_sub(fees_owed_1)?
-        .checked_sub(clipped_1)?;
+        .checked_sub(clipped_1)?
+        .checked_sub(preserved_clip_1)?;
 
+    // Route BOTH clip slices to the creator pot. The removed slice's
+    // clip mirrors the prior behaviour. The preserved slice's clip is
+    // the new path (MEDIUM-3) — previously orphaned in fee_reserve, now
+    // flows to the creator wallet via ClaimCreatorFees (creator-pool)
+    // or to bluechip_wallet at emergency drain (both paths).
     let mut pot = CREATOR_FEE_POT
         .may_load(deps.storage)?
         .unwrap_or_default();
-    pot.amount_0 = pot.amount_0.checked_add(clipped_0)?;
-    pot.amount_1 = pot.amount_1.checked_add(clipped_1)?;
+    pot.amount_0 = pot
+        .amount_0
+        .checked_add(clipped_0)?
+        .checked_add(preserved_clip_0)?;
+    pot.amount_1 = pot
+        .amount_1
+        .checked_add(clipped_1)?
+        .checked_add(preserved_clip_1)?;
     CREATOR_FEE_POT.save(deps.storage, &pot)?;
 
     pool_state.total_liquidity = pool_state

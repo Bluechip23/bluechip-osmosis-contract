@@ -74,6 +74,18 @@ pub const CREATOR_EXCESS_POSITION: Item<CreatorExcessLiquidity> = Item::new("cre
 /// Timestamp of the most recent threshold-crossing attempt; used by stuck-state recovery.
 pub const LAST_THRESHOLD_ATTEMPT: Item<Timestamp> = Item::new("last_threshold_attempt");
 
+/// `env.block.time` snapshotted at the moment threshold flipped (set
+/// inside `trigger_threshold_payout` immediately after
+/// `IS_THRESHOLD_HIT.save(true)`). MEDIUM-2: threaded into the
+/// `NotifyThresholdCrossed` SubMsg payload so the factory's bluechip-
+/// mint decay formula uses the ORIGINAL crossing time, not the time
+/// the (possibly retried-after-failure) notify finally lands. Read by
+/// `execute_retry_factory_notify` to keep retries deterministic in mint
+/// amount regardless of delay.
+///
+/// Storage key is `"threshold_crossed_at"`.
+pub const THRESHOLD_CROSSED_AT: Item<Timestamp> = Item::new("threshold_crossed_at");
+
 /// Set to `true` when `NotifyThresholdCrossed` to the factory failed
 /// via the `reply_on_error` path during a threshold-crossing commit.
 ///

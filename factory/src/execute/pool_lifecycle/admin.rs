@@ -169,11 +169,18 @@ pub fn execute_sweep_unclaimed_emergency_shares_pool(
 /// the bluechip mint for this pool (only once per pool — the
 /// `POOL_THRESHOLD_MINTED` gate prevents a malicious pool from calling
 /// back repeatedly).
+///
+/// `crossed_at` is the pool's `env.block.time` at the moment the
+/// threshold flipped. MEDIUM-2: the mint formula uses this timestamp so
+/// the amount reflects when the pool actually crossed, not when a
+/// (possibly retried-after-failure) notify finally lands. `None` falls
+/// back to `env.block.time` here for wire-format backward compatibility.
 pub fn execute_notify_threshold_crossed(
     mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
     pool_id: u64,
+    crossed_at: Option<cosmwasm_std::Timestamp>,
 ) -> Result<Response, ContractError> {
     // Single load covers both the caller-address check and the standard-pool
     // defense-in-depth gate below.
@@ -212,10 +219,41 @@ pub fn execute_notify_threshold_crossed(
 
     POOL_THRESHOLD_MINTED.save(deps.storage, pool_id, &true)?;
 
-    let mint_messages = calculate_and_mint_bluechip(&mut deps, env, pool_id)?;
+    // Use the pool-supplied crossed_at when present (MEDIUM-2: anchors
+    // the decay formula to the original crossing time so a retried
+    // notify after a long delay doesn't get a smaller mint than the
+    // original crossing was entitled to). Fall back to env.block.time
+    // for legacy wire-format compat (no field) — that path matches the
+    // pre-MEDIUM-2 behaviour.
+    //
+    // Reject pool-supplied timestamps that are in the future relative
+    // to the current block. A pool can in principle send any value
+    // here; clamping to (..= env.block.time) keeps `seconds_elapsed`
+    // non-negative in `calculate_mint_amount` and prevents a buggy /
+    // adversarial pool from claiming a "negative elapsed" (which would
+    // inflate the mint). Reject explicitly rather than silently
+    // clamping so a buggy caller surfaces.
+    let effective_crossed_at = match crossed_at {
+        Some(ts) => {
+            if ts > env.block.time {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "Pool-supplied crossed_at ({}) is in the future relative to \
+                     current block.time ({}). Pool should snapshot env.block.time \
+                     at threshold-cross and not advance it on retries.",
+                    ts, env.block.time
+                ))));
+            }
+            ts
+        }
+        None => env.block.time,
+    };
+
+    let mint_messages =
+        calculate_and_mint_bluechip(&mut deps, env, pool_id, effective_crossed_at)?;
 
     Ok(Response::new()
         .add_messages(mint_messages)
         .add_attribute("action", "threshold_crossed_mint")
-        .add_attribute("pool_id", pool_id.to_string()))
+        .add_attribute("pool_id", pool_id.to_string())
+        .add_attribute("crossed_at", effective_crossed_at.to_string()))
 }

@@ -95,7 +95,7 @@ fn test_notify_threshold_crossed_unauthorized_caller() {
 
     // A random address tries to notify - should fail
     let hacker_info = message_info(&Addr::unchecked("hacker"), &[]);
-    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1 };
+    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1, crossed_at: None };
 
     let err = execute(deps.as_mut(), env, hacker_info, msg).unwrap_err();
     assert!(
@@ -124,7 +124,7 @@ fn test_notify_threshold_crossed_double_call_prevention() {
 
     let env = mock_env();
     let pool_info = message_info(&Addr::unchecked("pool_contract_1"), &[]);
-    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1 };
+    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1, crossed_at: None };
 
     let err = execute(deps.as_mut(), env, pool_info, msg).unwrap_err();
     assert!(
@@ -143,7 +143,7 @@ fn test_notify_threshold_crossed_unregistered_pool() {
 
     let env = mock_env();
     let pool_info = message_info(&Addr::unchecked("pool_contract_1"), &[]);
-    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 999 };
+    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 999, crossed_at: None };
 
     let err = execute(deps.as_mut(), env, pool_info, msg).unwrap_err();
     assert!(
