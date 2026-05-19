@@ -5378,3 +5378,87 @@ mod post_reset_buffer_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// HIGH-2: cache writes store Pyth publish_time, not on-chain current_time
+// ---------------------------------------------------------------------------
+//
+// The cache-fallback path rejects a cached value once its age exceeds
+// `MAX_PRICE_AGE_SECONDS_BEFORE_STALE`. The age is computed as
+// `current_time - cached_pyth_timestamp`. HIGH-2 pinned that
+// `cached_pyth_timestamp` must store Pyth's `publish_time` (publisher
+// signing time), not the on-chain block.time at which we wrote the
+// cache. Otherwise a price read at the edge of its 300s
+// live-staleness budget would get another 300s of fallback validity,
+// effectively doubling the documented policy to ~600s.
+//
+// Verify the wiring at the query-helper boundary: with
+// MOCK_PYTH_PUBLISH_TIME distinct from env.block.time, the helper
+// returns the publish_time as the 3rd tuple element. The full
+// end-to-end behavior (cache stores publish_time, fallback rejects
+// at the publish-time boundary) is covered by the existing
+// `pyth_cache_*` boundary tests, whose `setup_oracle_with_cached_pyth`
+// fixture has always seeded cached_pyth_timestamp as
+// "env.block.time − age" — which IS the new publish-time semantic.
+#[cfg(test)]
+mod pyth_cache_publish_time_tests {
+    use super::*;
+    use crate::internal_bluechip_price_oracle::{
+        query_pyth_atom_usd_price_with_conf, MOCK_PYTH_PRICE, MOCK_PYTH_PUBLISH_TIME,
+    };
+
+    /// The mock branch of `query_pyth_atom_usd_price_with_conf` honors
+    /// `MOCK_PYTH_PUBLISH_TIME` when set, returning it as the 3rd tuple
+    /// element. This is the wiring that lets HIGH-2's cache-write
+    /// paths store Pyth's publisher signing time instead of the
+    /// on-chain block.time.
+    #[test]
+    fn query_pyth_returns_configured_publish_time() {
+        let mut deps = mock_dependencies(&[]);
+        let env = mock_env();
+        let current_time = env.block.time.seconds();
+
+        // publish_time distinct from current_time. Choose 200s in the
+        // past — a publish that's well inside live-staleness but not
+        // freshly stamped.
+        let mock_publish_time = current_time - 200;
+        MOCK_PYTH_PRICE
+            .save(&mut deps.storage, &Uint128::new(12_000_000))
+            .unwrap();
+        MOCK_PYTH_PUBLISH_TIME
+            .save(&mut deps.storage, &mock_publish_time)
+            .unwrap();
+
+        let (price, _conf, publish_time) =
+            query_pyth_atom_usd_price_with_conf(deps.as_ref(), &env).unwrap();
+        assert_eq!(price, Uint128::new(12_000_000));
+        assert_eq!(
+            publish_time, mock_publish_time,
+            "HIGH-2: query must surface publish_time so callers can \
+             cache it instead of current_time"
+        );
+        assert_ne!(
+            publish_time, current_time,
+            "HIGH-2 regression: query must not return current_time as \
+             publish_time"
+        );
+    }
+
+    /// When `MOCK_PYTH_PUBLISH_TIME` is unset, the mock falls back to
+    /// `env.block.time.seconds()` — keeps existing tests unaffected by
+    /// the HIGH-2 wiring change (publish_time defaults to current_time
+    /// only in the test mock, which is the conservative pre-fix
+    /// equivalent for fixtures that don't care).
+    #[test]
+    fn query_pyth_defaults_publish_time_to_env_block_time() {
+        let mut deps = mock_dependencies(&[]);
+        let env = mock_env();
+        MOCK_PYTH_PRICE
+            .save(&mut deps.storage, &Uint128::new(10_000_000))
+            .unwrap();
+        // MOCK_PYTH_PUBLISH_TIME unset.
+        let (_price, _conf, publish_time) =
+            query_pyth_atom_usd_price_with_conf(deps.as_ref(), &env).unwrap();
+        assert_eq!(publish_time, env.block.time.seconds());
+    }
+}

@@ -76,7 +76,9 @@ keepers will earn anything, the admin has to:
 1. Send bluechip from the main wallet to the factory contract address. This
    is a normal `BankMsg::Send`. Size the reserve for your expected keeper
    throughput; $100 of bluechip covers roughly 20k oracle updates at a
-   $0.005 bounty.
+   $0.005 bounty. Note that with the tightened 60s `UPDATE_INTERVAL`, the
+   keeper fires ~1440 times/day per pool instead of ~288 times/day, so plan
+   reserves for 5× the call volume relative to the pre-audit cadence.
 
 2. Enable the bounties by calling the factory as the admin:
 
@@ -92,8 +94,12 @@ keepers will earn anything, the admin has to:
      --from admin ...
    ```
 
-Caps are $1 per call for both (6-decimal USD = 1_000_000). Above-cap values
-are rejected by the contract.
+Caps are **$0.02 per call for oracle updates** (6-decimal USD = 20_000) and
+**$0.10 per batch for distribution** (6-decimal USD = 100_000). The oracle-
+update cap was lowered from $0.10 alongside the `UPDATE_INTERVAL: 300 → 60`
+cadence change so the daily admin-compromise drain budget stays unchanged
+(5× more calls × 1/5 the per-call payout = same $28.80/day worst-case).
+Above-cap values are rejected by the contract.
 
 ## Funding the keeper wallets (one-time, per deployment)
 
@@ -107,7 +113,8 @@ as long as bounty > gas cost.
 ### Oracle keeper
 
 ```
-every ORACLE_POLL_INTERVAL_MS (default 5.5 min):
+every ORACLE_POLL_INTERVAL_MS (default 70 s — tracks the on-chain
+                               UPDATE_INTERVAL=60s plus headroom):
   submit factory.UpdateOraclePrice {}
   classify response:
     paid      → log success, bluechip received
@@ -237,8 +244,11 @@ against a testnet:
   kept `MIN_KEEPER_BALANCE_UBLUECHIP` set to something sane.
 
 - **Both your keeper instances crash simultaneously.** Oracle goes stale
-  after ~10 minutes (pool's `MAX_ORACLE_STALENESS_SECONDS`), commits
-  start rejecting. Running on two separate VPS's is the cheapest defense.
+  after **~2 minutes** (pool's `MAX_ORACLE_STALENESS_SECONDS = 120s`,
+  tightened from 360s in the pre-launch audit), commits start rejecting.
+  Running on two separate VPS's is the cheapest defense; with the
+  tightened window the recovery budget for a keeper outage is now ~2 min
+  instead of ~6 min.
 
 ## Layout
 

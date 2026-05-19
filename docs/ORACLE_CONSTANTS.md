@@ -47,39 +47,46 @@ every gate listed above is deliberately weakened.
 
 | Constant | Value | Location |
 |---|---|---|
-| `TWAP_WINDOW` | 3600 s (1 h) | `factory/src/internal_bluechip_price_oracle.rs:110` |
-| `UPDATE_INTERVAL` | 300 s (5 min) | `factory/src/internal_bluechip_price_oracle.rs:111` |
-| `ROTATION_INTERVAL` | 3600 s (1 h) | `factory/src/internal_bluechip_price_oracle.rs:112` |
-| `MAX_TWAP_DRIFT_BPS` | 3000 (30 %) | `factory/src/internal_bluechip_price_oracle.rs:261` |
-| `ANCHOR_CHANGE_WARMUP_OBSERVATIONS` | 5 rounds | `factory/src/internal_bluechip_price_oracle.rs:423` |
-| `ORACLE_BASKET_ENABLED` | `false` | `factory/src/internal_bluechip_price_oracle.rs:68` |
-| `MIN_POOL_LIQUIDITY_USD` | 5_000_000_000 (~$5k) | `factory/src/internal_bluechip_price_oracle.rs:108` |
-| `MIN_POOL_LIQUIDITY_FALLBACK_BLUECHIP_PER_SIDE` | 5_000_000_000 ubluechip | `factory/src/internal_bluechip_price_oracle.rs:81` |
-| `MAX_PRICE_AGE_SECONDS_BEFORE_STALE` | 300 s | `factory/src/state.rs:93` |
-| `MAX_ORACLE_STALENESS_SECONDS` | 360 s | `creator-pool/src/swap_helper.rs:33` |
-| `ORACLE_POOL_COUNT` | 75 pools/round | `factory/src/internal_bluechip_price_oracle.rs:37` |
+| `TWAP_WINDOW` | 3600 s (1 h) | `factory/src/internal_bluechip_price_oracle.rs` |
+| `UPDATE_INTERVAL` | 60 s (1 min) | `factory/src/internal_bluechip_price_oracle.rs` |
+| `ROTATION_INTERVAL` | 3600 s (1 h) | `factory/src/internal_bluechip_price_oracle.rs` |
+| `MAX_TWAP_DRIFT_BPS` | 3000 (30 %) | `factory/src/internal_bluechip_price_oracle.rs` |
+| `ANCHOR_CHANGE_WARMUP_OBSERVATIONS` | 5 rounds | `factory/src/internal_bluechip_price_oracle.rs` |
+| `ORACLE_BASKET_ENABLED` | `false` | `factory/src/internal_bluechip_price_oracle.rs` |
+| `MIN_POOL_LIQUIDITY_USD` | 5_000_000_000 (~$5k) | `factory/src/internal_bluechip_price_oracle.rs` |
+| `MIN_POOL_LIQUIDITY_FALLBACK_BLUECHIP_PER_SIDE` | 5_000_000_000 ubluechip | `factory/src/internal_bluechip_price_oracle.rs` |
+| `MAX_PRICE_AGE_SECONDS_BEFORE_STALE` | 300 s | `factory/src/state.rs` |
+| `MIN_PYTH_AGE_SECONDS` | 10 s | `factory/src/internal_bluechip_price_oracle.rs::query_pyth_with_feed` |
+| `MAX_ORACLE_STALENESS_SECONDS` | 120 s | `creator-pool/src/swap_helper.rs` |
+| `ORACLE_POOL_COUNT` | 75 pools/round | `factory/src/internal_bluechip_price_oracle.rs` |
+| `MAX_ORACLE_UPDATE_BOUNTY_USD` | 20_000 (= $0.02) | `factory/src/state.rs` |
 
-## Update cadence: `UPDATE_INTERVAL = 300s`, `TWAP_WINDOW = 3600s`
+## Update cadence: `UPDATE_INTERVAL = 60s`, `TWAP_WINDOW = 3600s`
 
 `UPDATE_INTERVAL` is the **minimum** gap a keeper must wait before its
 next `UpdateOraclePrice {}` call is accepted. `TWAP_WINDOW` is the
 trailing observation window the keeper-published prices are averaged
 over.
 
-- **5-minute update floor** balances keeper gas cost against price
-  responsiveness. Tighter than 5 min would compound keeper costs on a
-  block-time chain (e.g. Osmosis ~6 s) without improving the TWAP enough
-  to matter; looser than 5 min lets short-window manipulation slip in
-  before the breaker can see it.
+- **60-second update floor** lets the pool-side staleness gate stay
+  tight (`MAX_ORACLE_STALENESS_SECONDS = 120s = UPDATE_INTERVAL +
+  60s grace`) so stale-oracle commit-valuation arbitrage during fast
+  market moves is bounded at ~1 update-cycle of mispricing instead of
+  the ~5-minute window the pre-tightening `UPDATE_INTERVAL = 300s`
+  allowed. Tightened from 300s as part of the HIGH-3 fix (commit-
+  valuation MEV) together with the pool-side staleness and bounty cap.
 - **60-minute TWAP** is wide enough that a sophisticated attacker
   cannot single-block-manipulate the average enough to clear the
   `MAX_TWAP_DRIFT_BPS` breaker (the breaker fires on *aggregate-round*
-  drift), and narrow enough that genuine 1-hour price moves register
-  promptly.
+  drift). With the 60s cadence, each TWAP_WINDOW holds ~60 observations
+  instead of ~12, so individual observations carry less weight and the
+  per-block manipulation cost rises proportionally.
 
 **Retune if** the deployment chain has block times significantly slower
-than Osmosis (e.g. >30 s blocks), or if the trading population is so
-illiquid that 60-minute TWAPs lag real prices unacceptably.
+than Osmosis (e.g. >30 s blocks make a 60s cadence impractical), or if
+the trading population is so illiquid that 60-minute TWAPs lag real
+prices unacceptably. Always retune `UPDATE_INTERVAL` in lockstep with
+`MAX_ORACLE_STALENESS_SECONDS` and `MAX_ORACLE_UPDATE_BOUNTY_USD`.
 
 ## TWAP drift breaker: `MAX_TWAP_DRIFT_BPS = 3000`
 
@@ -111,15 +118,17 @@ change inside `ProposeConfigUpdate`, or `ForceRotateOraclePools`), the
 oracle refuses to publish a price downstream until this many successful
 TWAP rounds have accumulated.
 
-- 5 rounds × 300 s = **~25 minutes** of warm-up before the oracle is
-  considered authoritative again.
+- 5 rounds × 60 s = **~5 minutes** of warm-up before the oracle is
+  considered authoritative again. (Tightened from ~25 minutes alongside
+  the `UPDATE_INTERVAL` reduction; the post-rotation security window
+  shrinks proportionally with the keeper cadence.)
 - Sized to make single-block reserve manipulation at the *moment* of
   anchor change unprofitable: the manipulated first observation must
   stay within `MAX_TWAP_DRIFT_BPS` of the post-manipulation buffered
   candidate across 5 successive rounds before it lands as the canonical
   price. That's roughly 5 × 30 % = 150 % cumulative drift budget, which
-  exceeds the cost of sustaining a price across 25 minutes for any
-  realistic attacker.
+  exceeds the cost of sustaining a price across the warm-up window for
+  any realistic attacker.
 - Warmup is **strict** for commit valuations (`get_bluechip_usd_price`)
   and **best-effort** for fee-priced callers
   (`usd_to_bluechip_best_effort`, with `pre_reset_last_price` fallback).
@@ -176,24 +185,58 @@ should keep $5k as the lower bound.
 
 Maximum acceptable age for the Pyth ATOM/USD price. Applies both to
 the live query path AND to the cached fallback used when the live query
-fails. Matched to `UPDATE_INTERVAL` so a healthy keeper schedule
-always covers the staleness window.
+fails.
 
-**Retune in lockstep with `UPDATE_INTERVAL` only.** Loosening this
-independently lets stale Pyth values leak into commits; tightening
-without also tightening `UPDATE_INTERVAL` causes routine commit
-freezes between keeper rounds.
+**Cache stores publish_time, not write time** (HIGH-2 fix). The
+fallback path computes `current_time - cached_pyth_timestamp` to
+measure age. `cached_pyth_timestamp` is Pyth's `publish_time` (publisher
+signing time), so the 300s bound applies to the TRUE age of the cached
+price. Pre-fix, the cache stored on-chain block.time at the moment of
+write, which allowed a price read at the edge of its 300s live-staleness
+window to get another 300s of fallback validity — effectively doubling
+the bound to ~600s.
 
-## Pool-side staleness: `MAX_ORACLE_STALENESS_SECONDS = 360s`
+**Retune carefully.** Loosening this independently lets stale Pyth
+values leak into commits; tightening below the keeper cadence
+(`UPDATE_INTERVAL` + 60s grace) causes routine commit freezes when
+keepers haven't refreshed.
+
+## Pyth minimum age: `MIN_PYTH_AGE_SECONDS = 10s`
+
+Minimum acceptable age for a Pyth `publish_time` relative to the
+current block.time, enforced inside `query_pyth_with_feed`. A Pyth read
+is rejected if `publish_time + 10s > block.time`.
+
+- Forces `pyth.UpdatePriceFeeds` and the consuming `Commit` to land in
+  different blocks on chains with ≤10s block times. Eliminates the
+  same-block bundled-update MEV where an attacker submits
+    tx1: pyth.UpdatePriceFeeds(favorable_signed_price)
+    tx2: pool.Commit(...)
+  in one block to inject a freshly-favorable conversion rate at
+  threshold-crossing time (MEDIUM-1 fix).
+- Honest users on a 5-7s block chain see at most one extra block of
+  latency; frontends that need a fresh quote can pre-warm by pushing
+  the Pyth update before broadcasting their commit.
+- The bot still has the (10..300)s window of Pyth signed-price
+  optionality to pick a favorable value from, so MEV is reduced
+  (no same-block bundle) but not eliminated.
+
+**Retune if** the deployment chain has block times >10s (raise the
+floor to `block_time + small_margin`).
+
+## Pool-side staleness: `MAX_ORACLE_STALENESS_SECONDS = 120s`
 
 Pool-side acceptance window for the factory oracle's
-`ConversionResponse.timestamp`. Sized to `UPDATE_INTERVAL` (300 s) plus
+`ConversionResponse.timestamp`. Sized to `UPDATE_INTERVAL` (60 s) plus
 a 60 s grace buffer for keeper scheduling jitter.
 
-- With a strict 90 s window against a 300 s update cadence, ~70 % of
-  every 5-minute cycle would reject every commit with "Oracle price is
-  stale" even on a fully healthy system. The 60 s grace prevents
-  routine keeper jitter from triggering false-positive freezes.
+- Tightened from 360s alongside the `UPDATE_INTERVAL: 300 → 60`
+  cadence change (HIGH-3 fix). Reduces the stale-oracle commit-
+  valuation arbitrage window by ~3×.
+- With a strict 30s window against the 60s update cadence, ~50 % of
+  every cycle would reject commits with "Oracle price is stale" even
+  on a fully healthy system. The 60s grace covers keeper jitter and
+  pyth-update latency without leaving a meaningful MEV window.
 - Boundary semantics (accept at exactly `ts + window`, reject one
   second past) pinned by `oracle_staleness_boundary_tests` in
   `creator-pool/src/testing/audit_regression_tests.rs`.
@@ -202,6 +245,19 @@ a 60 s grace buffer for keeper scheduling jitter.
 `MAX_PRICE_AGE_SECONDS_BEFORE_STALE` only.** Drift between any of
 these three creates dead bands where one check is tight and another
 is loose, which manifests as intermittent commit failures.
+
+## Oracle update bounty cap: `MAX_ORACLE_UPDATE_BOUNTY_USD = 20_000 (= $0.02)`
+
+Hard cap on the per-call USD value the admin can configure via
+`SetOracleUpdateBounty`. Lowered from $0.10 alongside the
+`UPDATE_INTERVAL: 300 → 60` change so the daily admin-compromise drain
+budget stays constant: 5× more keeper calls per day at 1/5 the per-call
+payout = the same ~$28.80/day = ~$10.5k/year worst-case.
+
+**Retune in lockstep with `UPDATE_INTERVAL`.** Raising the cap without
+shrinking `UPDATE_INTERVAL` (or vice versa) breaks the daily-drain
+invariant — the per-call cap × calls-per-day product is the
+admin-compromise budget; any retune must preserve that product.
 
 ## Rotation cadence: `ROTATION_INTERVAL = 3600s`,  `ORACLE_POOL_COUNT = 75`
 
