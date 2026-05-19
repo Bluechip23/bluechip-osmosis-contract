@@ -500,6 +500,23 @@ pub fn execute_simple_swap(
             until_block: cooldown_until,
         });
     }
+    // MEDIUM-4 Option B: per-tx swap cap ramp. After the cooldown ends,
+    // each swap is capped at a fraction of the offer-side reserve, ramping
+    // from 0.5% up to "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS
+    // blocks. Bounds per-tx MEV on the freshly-seeded pool while still
+    // allowing legitimate first traders to participate. Returns None
+    // (skips the check) for standard pools (cooldown_until == 0) and
+    // for creator pools past the ramp window.
+    if let Some(cap) =
+        crate::state::post_threshold_swap_cap(deps.storage, env.block.height, offer_pool)?
+    {
+        if offer_asset.amount > cap {
+            return Err(ContractError::PostThresholdSwapCapExceeded {
+                offer: offer_asset.amount,
+                cap,
+            });
+        }
+    }
     // Drain guard: reject swaps when either side is below MINIMUM_LIQUIDITY.
     // Don't try to persist POOL_PAUSED here — returning Err would revert the
     // save, so it's dead state. The reserve check alone is sufficient to

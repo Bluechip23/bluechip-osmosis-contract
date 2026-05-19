@@ -2430,15 +2430,20 @@ fn test_concurrent_commits_both_recorded() {
     // reserve increase for Bob's bluechip — confirms the cooldown is
     // a temporary gate, not a permanent block.
     //
-    // MEDIUM-4: the cooldown now includes a randomized 0-7 block
-    // offset on top of POST_THRESHOLD_COOLDOWN_BLOCKS. Read the actual
-    // until-block from storage and advance the env to it, rather than
-    // assuming the pre-fix deterministic base+1 was enough.
+    // MEDIUM-4 Option B: a per-tx swap cap ramps from 0.5% of reserve
+    // up to "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks
+    // AFTER the cooldown ends. To exercise the post-cooldown commit
+    // path with Bob's full 4.7M-bluechip offer (much larger than 0.5%
+    // of the seeded reserve), advance past the full ramp window so no
+    // per-tx cap applies. Tests that verify the ramp behaviour
+    // themselves live in `ramp_cap_tests` (pool-core/state.rs) and
+    // exercise the cap at boundary blocks directly.
     let cooldown_until = pool_core::state::POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
         .load(&deps.storage)
         .expect("cooldown must be armed after threshold cross");
     let mut env_after_cooldown = env.clone();
-    env_after_cooldown.block.height = cooldown_until;
+    env_after_cooldown.block.height =
+        cooldown_until + pool_core::state::POST_THRESHOLD_SWAP_RAMP_BLOCKS;
     // Advance time too so the per-user `min_commit_interval` rate-limit
     // (13s) doesn't reject the retry under the same-block timestamp.
     env_after_cooldown.block.time = env_after_cooldown.block.time.plus_seconds(60);

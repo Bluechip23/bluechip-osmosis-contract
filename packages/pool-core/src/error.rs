@@ -130,6 +130,14 @@ pub enum ContractError {
     #[error("Post-threshold cooldown active: trades resume at block {until_block}")]
     PostThresholdCooldownActive { until_block: u64 },
 
+    #[error(
+        "Post-threshold swap cap exceeded: offer {offer} exceeds the \
+         current ramp cap of {cap} (offer-side reserve × cap_bps). \
+         Reduce the trade size or wait for the ramp to widen further \
+         (POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks past cooldown end)."
+    )]
+    PostThresholdSwapCapExceeded { offer: Uint128, cap: Uint128 },
+
     #[error("Cannot remove locked liquidity (this position has {locked} locked)")]
     LockedLiquidity { locked: Uint128 },
 
