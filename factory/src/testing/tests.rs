@@ -530,7 +530,7 @@ fn test_create_pair_with_custom_params() {
     let info = message_info(&admin_addr(), &[]);
     instantiate(deps.as_mut(), env, info, msg).unwrap();
 
-    // (custom_params field on CreatePool was removed in the audit refactor —
+    // (custom_params field on CreatePool was removed in the refactor —
     // see `pool_struct::CreatePool` doc-comment. Caller-supplied threshold
     // params are no longer honored; the factory config is the single source
     // of truth. This test now exercises the simplified shape.)
@@ -1573,7 +1573,7 @@ fn test_oracle_anchor_only_when_basket_disabled() {
         POOLS_BY_ID
             .save(&mut deps.storage, pool_id, &pool_details)
             .unwrap();
-        // Faithful fixture (audits L-2 + M-5): reverse-index + counter
+        // Faithful fixture: reverse-index + counter
         // upper bound mirror what `state::register_pool` writes.
         crate::state::POOL_ID_BY_ADDRESS
             .save(&mut deps.storage, creator_pool_addr_clone, &pool_id)
@@ -2350,11 +2350,10 @@ fn test_bluechip_minting_on_threshold_crossing() {
     assert_eq!(pool_count, 1);
 }
 
-/// Regression test for the HIGH-1 audit fix:
-/// `commit_pool_ordinal` (and the `COMMIT_POOL_COUNTER` it's allocated from)
-/// must advance ONLY on threshold-cross, never on pool creation. This
-/// prevents paid junk-create spam from inflating the mint-decay formula's
-/// `x` input for legitimate future crossings.
+/// Regression test: `commit_pool_ordinal` (and the `COMMIT_POOL_COUNTER` it's
+/// allocated from) must advance ONLY on threshold-cross, never on pool
+/// creation. This prevents paid junk-create spam from inflating the
+/// mint-decay formula's `x` input for legitimate future crossings.
 ///
 /// The test:
 /// 1. Calls `ExecuteMsg::Create` and asserts `COMMIT_POOL_COUNTER` stays at
@@ -2404,8 +2403,8 @@ fn test_commit_pool_ordinal_advances_on_threshold_cross_not_create() {
         .unwrap_or(0);
     assert_eq!(counter_before_create, 0);
 
-    // Phase 1: Create the commit pool. After the M-1 fix this must NOT bump
-    // COMMIT_POOL_COUNTER — the counter is now allocated at threshold-cross
+    // Phase 1: Create the commit pool. This must NOT bump
+    // COMMIT_POOL_COUNTER — the counter is allocated at threshold-cross
     // time inside `execute_notify_threshold_crossed`.
     let create_msg = ExecuteMsg::Create {
         pool_msg: create_test_pool_msg(),
@@ -2458,7 +2457,7 @@ fn test_commit_pool_ordinal_advances_on_threshold_cross_not_create() {
         .unwrap();
 
     // Phase 3: Notify threshold crossed. This is the call that allocates the
-    // ordinal under the M-1 fix.
+    // ordinal.
     let notify_msg = ExecuteMsg::NotifyThresholdCrossed {
         pool_id: 1,
         crossed_at: None,
@@ -2487,14 +2486,13 @@ fn test_commit_pool_ordinal_advances_on_threshold_cross_not_create() {
     );
 }
 
-/// Regression test for the HIGH-1 audit fix:
-/// Junk pools that are created but never threshold-cross MUST NOT consume
-/// ordinal slots. A legitimate pool created AFTER N junk creates and then
-/// crossed must receive ordinal 1 (not N+1), so the mint formula treats it
-/// as the first real crossing.
+/// Regression test: junk pools that are created but never threshold-cross
+/// MUST NOT consume ordinal slots. A legitimate pool created AFTER N junk
+/// creates and then crossed must receive ordinal 1 (not N+1), so the mint
+/// formula treats it as the first real crossing.
 ///
-/// This is the economic invariant the fix protects: paid create-spam can't
-/// decay the bluechip mint stream for honest creators.
+/// This is the economic invariant: paid create-spam can't decay the bluechip
+/// mint stream for honest creators.
 #[test]
 fn test_junk_creates_do_not_inflate_ordinal_for_legitimate_crosser() {
     let mut deps = mock_dependencies(&[]);
@@ -2529,9 +2527,9 @@ fn test_junk_creates_do_not_inflate_ordinal_for_legitimate_crosser() {
     prime_oracle_for_first_update(&mut deps);
 
     // Simulate 3 junk creates from 3 distinct attacker addresses. Each
-    // ExecuteMsg::Create bumps POOL_COUNTER but, under the M-1 fix, must
-    // NOT bump COMMIT_POOL_COUNTER. We advance block time past the per-
-    // address rate-limit between creates (each address has a 1h cooldown).
+    // ExecuteMsg::Create bumps POOL_COUNTER but must NOT bump
+    // COMMIT_POOL_COUNTER. We advance block time past the per-address
+    // rate-limit between creates (each address has a 1h cooldown).
     for i in 0..3 {
         let attacker = MockApi::default().addr_make(&format!("attacker_{i}"));
         let create_msg = ExecuteMsg::Create {

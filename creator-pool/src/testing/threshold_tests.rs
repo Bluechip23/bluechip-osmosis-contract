@@ -345,8 +345,8 @@ fn check_correct_factory(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>
             },
         )
         .unwrap();
-    // POST-audit consolidation: post-instantiate admin gates read
-    // from POOL_INFO.factory_addr now (one source of truth — see
+    // Post-consolidation: post-instantiate admin gates read from
+    // POOL_INFO.factory_addr now (one source of truth — see
     // `pool_core::state::ExpectedFactory` doc). Mirror the override
     // here so tests using `factory_address` as info.sender still pass.
     use pool_core::state::POOL_INFO;
@@ -541,9 +541,9 @@ fn test_commit_exact_threshold() {
         .unwrap();
     // Pre-test USD_RAISED is $5 below the $25k threshold so that a
     // minimum-size ($5) commit lands exactly at $25k. The $5 minimum
-    // commit (MIN_COMMIT_USD_PRE_THRESHOLD) was added post-audit; this
-    // test was originally written with a $1 commit hitting the threshold
-    // from $24,999. Updated to respect the current minimum.
+    // commit (MIN_COMMIT_USD_PRE_THRESHOLD); this test was originally written
+    // with a $1 commit hitting the threshold from $24,999. Updated to respect
+    // the current minimum.
     USD_RAISED_FROM_COMMIT
         .save(&mut deps.storage, &Uint128::new(24_995_000_000))
         .unwrap();
@@ -972,7 +972,7 @@ fn test_concurrent_threshold_crossing_race_condition() {
         .unwrap();
     // At $1/bluechip, $24,995 of NET-of-fees bluechip has entered the
     // pool's bank balance (NATIVE_RAISED_FROM_COMMIT is post-fee after
-    // the gross→net audit refactor). The test asserts threshold-phase
+    // the gross→net refactor). The test asserts threshold-phase
     // semantics, not seed arithmetic, so the exact amount is just a
     // realistic placeholder.
     crate::state::NATIVE_RAISED_FROM_COMMIT
@@ -1191,7 +1191,7 @@ fn test_unpaused_pool_accepts_commit_after_previously_paused() {
 }
 
 // ===========================================================================
-// Audit b8b0bcb: per-pool min commit floors — CommitTooSmall coverage
+// Per-pool min commit floors — CommitTooSmall coverage
 // ===========================================================================
 //
 // `commit::execute_commit_logic` rejects any commit whose oracle-priced USD
@@ -1801,7 +1801,7 @@ mod native_raised_net_semantics_tests {
 }
 
 // ---------------------------------------------------------------------------
-// MEDIUM-2: threshold-crossing timestamp snapshotting for retry mint amount
+// Threshold-crossing timestamp snapshotting for retry mint amount
 // ---------------------------------------------------------------------------
 //
 // trigger_threshold_payout snapshots env.block.time into THRESHOLD_CROSSED_AT

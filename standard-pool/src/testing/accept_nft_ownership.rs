@@ -111,7 +111,7 @@ fn accept_nft_ownership_rejects_attached_funds() {
     // the call still succeeds and the funds stay in the pool's bank
     // balance until rescued by an admin op.
     assert!(res.is_ok(), "current behaviour: funds quietly accepted");
-    // (If a future audit upgrades this to a hard reject, flip this
+    // (If a future change upgrades this to a hard reject, flip this
     // assertion and the handler will need an explicit funds-empty
     // check.)
 }

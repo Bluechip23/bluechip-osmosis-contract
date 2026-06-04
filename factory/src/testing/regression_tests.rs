@@ -515,7 +515,7 @@ fn test_m_new_3_rotation_skips_pools_without_prior_snapshot() {
         .save(&mut deps.storage, atom_addr_obj, &atom_state)
         .unwrap();
 
-    // After the audit refactor `calculate_weighted_price_with_atom` reads
+    // After the refactor `calculate_weighted_price_with_atom` reads
     // each non-anchor pool's bluechip-side index from
     // `ELIGIBLE_POOL_SNAPSHOT.bluechip_indices` rather than from the
     // legacy POOLS_BY_ID linear scan. Populate the snapshot in this
@@ -1043,7 +1043,7 @@ fn test_propose_config_update_rejects_empty_pyth_feed_id() {
 // `PayDistributionBounty` must reject standard pools, even though the
 // standard-pool wasm doesn't currently emit the message. Defense-in-depth
 // so a future pool-wasm migration can't drain the bounty reserve without
-// going through the audited commit-pool path.
+// going through the commit-pool path.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_pay_distribution_bounty_rejects_standard_pool() {
@@ -1317,8 +1317,8 @@ fn test_h2_warmup_only_decrements_on_price_publishing_updates() {
 }
 
 // ---------------------------------------------------------------------------
-// Warm-up gate must bifurcate strict vs. best-effort callers (audit
-// hardening property test). During the warm-up window
+// Warm-up gate must bifurcate strict vs. best-effort callers.
+// During the warm-up window
 // (`warmup_remaining > 0`) immediately after an anchor reset:
 // - `get_bluechip_usd_price` (strict, used by commits) MUST always err
 // regardless of `pre_reset_last_price`.
@@ -1891,7 +1891,7 @@ fn test_i6_commit_pool_create_rate_limit_per_address() {
 }
 
 // ===========================================================================
-// Audit-fix follow-up tests (round 2)
+// Follow-up regression tests (round 2)
 //
 // Coverage for the four standard-pool / oracle / accounting fixes that
 // previously had only implicit (existing-test passes) verification.
@@ -3125,7 +3125,7 @@ mod anchor_validation_failure_tests {
 }
 
 // ===========================================================================
-// M-3: oracle eligibility curation
+// Oracle eligibility curation
 //
 // Allowlist (any pool kind) + global commit-pool auto-include flag, both
 // behind a 48h timelock for adds / flips. Removes are immediate.
@@ -3179,7 +3179,7 @@ mod oracle_eligibility_tests {
             commit_pool_ordinal: 0,
         };
         POOLS_BY_ID.save(deps.as_mut().storage, 1, &pool_details).unwrap();
-        // Faithful fixture (audits L-2 + M-5): keep reverse-index and
+        // Faithful fixture: keep reverse-index and
         // POOL_COUNTER in sync with POOLS_BY_ID. Without these, the
         // random-sampling auto-eligible loop never picks this pool
         // (POOL_COUNTER == 0), and `lookup_pool_by_addr` falls back
@@ -3234,7 +3234,7 @@ mod oracle_eligibility_tests {
         );
     }
 
-    /// Same as `register_standard_pool` but with explicit reserves so M-4
+    /// Same as `register_standard_pool` but with explicit reserves so
     /// liquidity-floor tests can dial in pool-state edges.
     pub(super) fn register_standard_pool_with_reserves(
         deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQuerier>,

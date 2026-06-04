@@ -185,7 +185,7 @@ fn retry_factory_notify_dispatches_submsg_when_pending() {
     // Arm the pending flag (production flow sets this from the
     // reply_on_error handler when the initial factory notify fails).
     PENDING_FACTORY_NOTIFY.save(&mut deps.storage, &true).unwrap();
-    // MEDIUM-2: production flow sets THRESHOLD_CROSSED_AT inside
+    // Production flow sets THRESHOLD_CROSSED_AT inside
     // `trigger_threshold_payout` alongside IS_THRESHOLD_HIT. The retry
     // handler `load`s it (not `may_load`) so the snapshot must be
     // present whenever PENDING_FACTORY_NOTIFY is true. Seed it here to
@@ -405,8 +405,8 @@ mod reply_handler_tests {
 
     // -- Cross-storage atomicity ------------------------------------------
     //
-    // The audit flagged threshold-crossing state-coupling as the main
-    // residual maintenance risk: the crossing flow mutates COMMIT_LEDGER,
+    // Threshold-crossing state-coupling is the main residual maintenance
+    // risk: the crossing flow mutates COMMIT_LEDGER,
     // raised totals, pool state, fee growth, cooldown, payout/notify in a
     // single path, and a factory-notify failure leaves all those writes
     // committed while only the notify must be retried.
@@ -466,7 +466,7 @@ mod reply_handler_tests {
             )
             .unwrap();
 
-        // Pre-snapshot every storage the audit called out for crossing.
+        // Pre-snapshot every storage mutated by the threshold-crossing flow.
         let snap_pool_state = POOL_STATE.load(&deps.storage).unwrap();
         let snap_pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
         let snap_is_threshold_hit = IS_THRESHOLD_HIT.load(&deps.storage).unwrap();

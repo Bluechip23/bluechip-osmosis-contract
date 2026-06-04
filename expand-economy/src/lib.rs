@@ -11,7 +11,7 @@ pub mod state;
 pub mod timelock;
 
 #[cfg(test)]
-mod audit_tests;
+mod regression_tests;
 #[cfg(test)]
 mod tests;
 
