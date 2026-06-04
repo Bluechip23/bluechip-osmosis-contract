@@ -203,7 +203,7 @@ fn add_to_position_internal(
     // don't touch CW20 balances and are excluded here. Without this
     // accounting, the verify reply's strict `delta == actual_amount`
     // check would falsely reject every add-to-position on a CW20-side
-    // pool whose position has any prior fee accrual (Finding 12.1) —
+    // pool whose position has any prior fee accrual —
     // post-balance reflects `pre + deposited - fee_out`, not
     // `pre + deposited`.
     let outgoing_cw20_0 = if matches!(

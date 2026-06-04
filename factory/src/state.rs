@@ -271,7 +271,7 @@ pub const ORACLE_UPDATE_BOUNTY_USD: Item<Uint128> = Item::new("oracle_update_bou
 // compromised. $0.02 USD per successful update (6 decimals).
 //
 // Lowered from $0.10 alongside the `UPDATE_INTERVAL: 300 → 60` change
-// (HIGH-3 Option B) so the daily admin-compromise drain stays
+// so the daily admin-compromise drain stays
 // approximately constant: 5× more keeper calls × 1/5 the per-call
 // payout = same total. Worst-case daily drain at full cap remains
 // ~$28.80/day ≈ $10.5k/year (= 86400/60 × $0.02), unchanged from the
@@ -645,7 +645,7 @@ pub const ELIGIBLE_POOL_REFRESH_BLOCKS: u64 = 72_000;
 /// re-scan of `POOLS_BY_ID`. The same index is mirrored into
 /// `ELIGIBLE_POOL_SNAPSHOT.bluechip_indices` on every refresh.
 ///
-/// `added_at` is for observability only — operators can audit the age
+/// `added_at` is for observability only — operators can inspect the age
 /// of every allowlist entry without scanning logs.
 #[cw_serde]
 pub struct AllowlistedOraclePool {

@@ -332,7 +332,6 @@ mod threshold_payout_validate_tests {
     //! coverage: every non-canonical perturbation of the
     //! four threshold-payout components is rejected with an error message
     //! that names the offending field. The canonical Default() must pass.
-    //! Closes the C-3 test-coverage gap from the meta-audit.
     use super::*;
 
     /// The canonical splits round-trip validate cleanly.
@@ -412,12 +411,12 @@ mod threshold_payout_validate_tests {
         );
     }
 
-    /// All-zero payload — pre-audit validator accepted this if every
-    /// component happened to be zero (the old non-zero check) but now
-    /// rejects on the first per-component equality. Pins the regression
-    /// vector: a misconfig that sets every component to zero (e.g., a
-    /// silent serde default at the wrong layer) is caught at propose
-    /// time rather than landing as a no-op mint at threshold-cross.
+    /// All-zero payload — the old non-zero check accepted this if every
+    /// component happened to be zero, but now rejects on the first
+    /// per-component equality. A misconfig that sets every component to
+    /// zero (e.g., a silent serde default at the wrong layer) is caught
+    /// at propose time rather than landing as a no-op mint at
+    /// threshold-cross.
     #[test]
     fn rejects_all_zero_payload() {
         let payout = ThresholdPayoutAmounts {

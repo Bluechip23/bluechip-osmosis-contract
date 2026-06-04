@@ -64,7 +64,7 @@ pub(super) fn process_post_threshold_commit(
     let offer_pool = pool_state.reserve0;
     let ask_pool = pool_state.reserve1;
 
-    // MEDIUM-4 Option B: per-tx swap cap ramp. After the cooldown ends,
+    // Per-tx swap cap ramp. After the cooldown ends,
     // each post-threshold commit (which IS a swap) is capped at a
     // fraction of the offer-side reserve, ramping from 0.5% up to
     // "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks.

@@ -56,7 +56,7 @@ pub fn migrate(
 
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    // M-3.3 migration shim: convert any prior single-bucket
+    // Migration shim: convert any prior single-bucket
     // EXPANSION_WINDOW Item ("expansion_window") into a one-entry
     // sliding-window EXPANSION_LOG. The legacy bucket carried
     // `(window_start, spent_in_window)`; the equivalent log shape is

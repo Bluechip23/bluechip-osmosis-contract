@@ -182,8 +182,7 @@ pub struct PoolFeeState {
 /// `msg.used_factory_addr` at instantiate, so they cannot drift unless a
 /// future migration writes one without the other — but if they ever do,
 /// auth checks split across the two storage slots would yield
-/// inconsistent results. Audit-driven consolidation: as of the
-/// pre-launch audit fix, every post-instantiate read uses
+/// inconsistent results. Every post-instantiate read therefore uses
 /// `POOL_INFO.factory_addr` (see `creator-pool::admin::execute_recover_stuck_states`
 /// and `execute_skip_distribution_user`).
 #[cw_serde]
@@ -327,7 +326,7 @@ pub const POOL_PAUSED: Item<bool> = Item::new("pool_paused");
 /// hard-paused (the safe default), and admin Pause / Unpause continues
 /// to work unchanged.
 pub const POOL_PAUSED_AUTO: Item<bool> = Item::new("pool_paused_auto");
-/// Audit record written on completed emergency withdraw (Phase 2 drain).
+/// Record written on completed emergency withdraw (Phase 2 drain).
 pub const EMERGENCY_WITHDRAWAL: Item<EmergencyWithdrawalInfo> = Item::new("emergency_withdrawal");
 /// Effective-after timestamp armed by Phase 1 (initiate); cleared by
 /// Phase 2 (drain) or by cancel.
@@ -528,7 +527,7 @@ pub const MINIMUM_LIQUIDITY: Uint128 = Uint128::new(1000);
 pub const POST_THRESHOLD_COOLDOWN_BLOCKS: u64 = 2;
 
 // ---------------------------------------------------------------------------
-// MEDIUM-4 Option B: per-tx swap cap ramp.
+// Per-tx swap cap ramp.
 //
 // After the post-threshold cooldown ends, each swap (simple_swap,
 // execute_swap_cw20, process_post_threshold_commit) is capped at a

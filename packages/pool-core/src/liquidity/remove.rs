@@ -358,10 +358,10 @@ pub fn remove_partial_liquidity(
         .checked_sub(preserved_clip_1)?;
 
     // Route BOTH clip slices to the creator pot. The removed slice's
-    // clip mirrors the prior behaviour. The preserved slice's clip is
-    // the new path (MEDIUM-3) — previously orphaned in fee_reserve, now
-    // flows to the creator wallet via ClaimCreatorFees (creator-pool)
-    // or to bluechip_wallet at emergency drain (both paths).
+    // clip mirrors the prior behaviour. The preserved slice's clip —
+    // previously orphaned in fee_reserve — now flows to the creator
+    // wallet via ClaimCreatorFees (creator-pool) or to bluechip_wallet
+    // at emergency drain (both paths).
     let mut pot = CREATOR_FEE_POT
         .may_load(deps.storage)?
         .unwrap_or_default();

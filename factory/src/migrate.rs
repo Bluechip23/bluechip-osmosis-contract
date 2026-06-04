@@ -28,7 +28,7 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
         });
     }
 
-    // M-3 migration shim. Existing deployments ran with "every threshold-
+    // Migration shim. Existing deployments ran with "every threshold-
     // crossed commit pool is automatically oracle-eligible" baked into the
     // code path. The new build moves that behaviour behind the
     // `COMMIT_POOLS_AUTO_ELIGIBLE` flag (default false on fresh

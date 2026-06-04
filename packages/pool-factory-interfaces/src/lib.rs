@@ -146,7 +146,7 @@ pub enum FactoryExecuteMsg {
     // legacy callers (no field) deserialize with `crossed_at = None`,
     // and the factory falls back to `env.block.time` (the prior
     // behaviour). Production callers in this workspace always supply
-    // the field after MEDIUM-2.
+    // the field.
     NotifyThresholdCrossed {
         pool_id: u64,
         #[serde(default)]

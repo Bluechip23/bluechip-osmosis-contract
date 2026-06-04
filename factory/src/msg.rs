@@ -68,10 +68,10 @@ pub enum ExecuteMsg {
     // Triggers the bluechip mint for this pool (only fires once per pool).
     //
     // `crossed_at` is the pool's `env.block.time` at the moment threshold
-    // flipped. MEDIUM-2: the mint formula uses this timestamp so the
-    // amount reflects when the pool actually crossed, not when a
-    // (possibly retried) notify finally lands. `serde(default)` keeps the
-    // legacy wire shape working — None falls back to `env.block.time`.
+    // flipped. The mint formula uses this timestamp so the amount reflects
+    // when the pool actually crossed, not when a (possibly retried) notify
+    // finally lands. `serde(default)` keeps the legacy wire shape working —
+    // None falls back to `env.block.time`.
     NotifyThresholdCrossed {
         pool_id: u64,
         #[serde(default)]

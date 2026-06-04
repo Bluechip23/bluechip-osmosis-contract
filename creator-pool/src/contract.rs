@@ -738,7 +738,7 @@ pub fn execute_retry_factory_notify(
     }
 
     let pool_info = POOL_INFO.load(deps.storage)?;
-    // MEDIUM-2: re-supply the ORIGINAL threshold-crossing time so the
+    // Re-supply the ORIGINAL threshold-crossing time so the
     // factory's bluechip-mint decay formula uses the same `s` reference
     // as it would have at first-attempt. Without this, a retry after a
     // long delay would receive a smaller mint than the pool was
@@ -814,7 +814,7 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
             }
         },
         // route the deposit balance-verify reply through
-        // the shared pool-core handler. Listed BEFORE the H6 distribution-
+        // the shared pool-core handler. Listed BEFORE the distribution-
         // mint guard arm because `DEPOSIT_VERIFY_REPLY_ID` (0xD550_0000)
         // is numerically above `REPLY_ID_DISTRIBUTION_MINT_BASE` and the
         // guard arm would otherwise match it; literal arms before guard

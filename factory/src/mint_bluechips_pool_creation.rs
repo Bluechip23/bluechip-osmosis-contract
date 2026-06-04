@@ -4,8 +4,8 @@ use crate::{
 };
 use cosmwasm_std::{BankMsg, Coin, CosmosMsg, DepsMut, Env, StdError, StdResult, Uint128};
 
-/// Saturating cap on the mint-decay polynomial input (audit
-/// fix). Two concentric bounds are at play:
+/// Saturating cap on the mint-decay polynomial input. Two concentric
+/// bounds are at play:
 ///
 /// 1. **Polynomial-is-zero bound (≈ 33,300):** `(5x²+x) / (s/6 + 333x)`
 /// crosses the 500e6 base around `x ≈ 33,300` at s == 0, so the

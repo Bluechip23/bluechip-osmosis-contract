@@ -46,7 +46,7 @@ use cosmwasm_std::{
 /// - Pre-threshold rejection (committed funds are untracked in
 /// reserves; draining would strand them).
 /// - CREATOR_EXCESS_POSITION sweep on Phase 2 — fold its amounts into
-/// `accumulation_drain_{0,1}` so pool-core's single audit record
+/// `accumulation_drain_{0,1}` so pool-core's single drain record
 /// captures the grand total and the two transfer messages carry it.
 /// - DISTRIBUTION_STATE halt on Phase 2 so future
 /// ContinueDistribution calls reject cleanly.
@@ -140,8 +140,7 @@ pub fn execute_recover_stuck_states(
     // creator-pool wrappers — see `creator-pool::admin::execute_emergency_withdraw`
     // and `pool-core::admin::*`). Earlier revisions of this handler
     // read `EXPECTED_FACTORY` which is set at instantiate from the same
-    // source; consolidating eliminates the two-source-of-truth drift
-    // vector flagged in the launch audit.
+    // source; consolidating eliminates the two-source-of-truth drift.
     let pool_info = POOL_INFO.load(deps.storage)?;
     if info.sender != pool_info.factory_addr {
         return Err(ContractError::Unauthorized {});
@@ -301,15 +300,14 @@ fn recover_reentrancy_guard(
 // surgically remove a single poison row without resetting the cursor).
 // ---------------------------------------------------------------------------
 
-// `SkipDistributionUser` was removed pre-launch (audit fix §6.1). The
-// handler was factory-only by auth but the factory never carried a
-// matching forward, so the recovery path was unreachable; it existed
-// for an exceptional "corrupt ledger row that range(..) cannot
-// deserialize" scenario that cw_storage_plus's static typing makes
-// practically impossible. Per-mint reply isolation
-// (FAILED_MINTS / ClaimFailedDistribution) handles every realistic
-// "one recipient can't be minted to" case automatically without admin
-// intervention. The remaining recovery levers
+// `SkipDistributionUser` was removed pre-launch. The handler was
+// factory-only by auth but the factory never carried a matching forward,
+// so the recovery path was unreachable; it existed for an exceptional
+// "corrupt ledger row that range(..) cannot deserialize" scenario that
+// cw_storage_plus's static typing makes practically impossible. Per-mint
+// reply isolation (FAILED_MINTS / ClaimFailedDistribution) handles every
+// realistic "one recipient can't be minted to" case automatically without
+// admin intervention. The remaining recovery levers
 // (`RecoverPoolStuckStates::StuckDistribution` after 1h,
 // `SelfRecoverDistribution` after 7d) reset the cursor for stalls that
 // aren't caused by a specific poisoned row. If the corrupt-ledger-row

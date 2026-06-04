@@ -32,10 +32,10 @@ pub const MOCK_PYTH_SHOULD_FAIL: Item<bool> = Item::new("mock_pyth_should_fail")
 /// mock of `query_pyth_atom_usd_price_with_conf`. When unset, the mock
 /// returns `env.block.time.seconds()` (publish_time == current_time,
 /// which is fine for tests that don't care about the publisher
-/// signing time). Tests that exercise HIGH-2 — i.e., that the cache
-/// write stores publish_time rather than current_time — set this to
-/// a value distinct from env.block.time and then assert the cache
-/// stored exactly this value.
+/// signing time). Tests that verify the cache write stores
+/// publish_time rather than current_time set this to a value distinct
+/// from env.block.time and then assert the cache stored exactly this
+/// value.
 #[cfg(test)]
 pub const MOCK_PYTH_PUBLISH_TIME: Item<u64> = Item::new("mock_pyth_publish_time");
 
@@ -481,7 +481,7 @@ pub struct PriceCache {
     /// Pyth's publisher signing time (`publish_time`) for the cached
     /// price — NOT the on-chain block time at which we wrote the cache.
     ///
-    /// HIGH-2: the cache-fallback staleness check computes
+    /// The cache-fallback staleness check computes
     /// `current_time - cached_pyth_timestamp` and rejects when the
     /// result exceeds `MAX_PRICE_AGE_SECONDS_BEFORE_STALE` (300s).
     /// Storing the publish_time here bounds the served price's TRUE
@@ -1077,12 +1077,12 @@ pub fn update_internal_oracle_price(
     #[cfg(feature = "integration_short_timing")]
     let _ = next_update;
 
-    // Integration-test-only: unconditional warmup clear. The audit H-2/H-3
-    // warm-up gate exists to prevent single-block manipulation of a fresh
-    // anchor. The integration-test build assumes a trusted environment, so
-    // the gate adds friction (25+ min to drain naturally on testnet)
-    // without protective value. Production AND unit-test builds still
-    // enforce the gate as designed.
+    // Integration-test-only: unconditional warmup clear. The warm-up gate
+    // exists to prevent single-block manipulation of a fresh anchor. The
+    // integration-test build assumes a trusted environment, so the gate
+    // adds friction (25+ min to drain naturally on testnet) without
+    // protective value. Production AND unit-test builds still enforce the
+    // gate as designed.
     #[cfg(feature = "integration_short_timing")]
     {
         oracle.warmup_remaining = 0;
@@ -1108,8 +1108,8 @@ pub fn update_internal_oracle_price(
             });
         // Mock mode reads prices from a trusted mock contract, not from
         // an on-chain anchor that could be single-block-manipulated; the
-        // warm-up gate (audit H-2/H-3) serves no purpose here, so clear
-        // it so commits aren't frozen for ~25 min on every fresh deploy.
+        // warm-up gate serves no purpose here, so clear it so commits
+        // aren't frozen for ~25 min on every fresh deploy.
         // Gated behind `integration_short_timing` (not bare `mock`) so
         // unit tests built with just `--features mock` still observe the
         // designed gate behavior.
@@ -1302,14 +1302,14 @@ pub fn update_internal_oracle_price(
     // it can skip the bounty — force-accept is a liveness escape valve,
     // not a regular publishing event, mirroring the pre-refactor handler.
     //
-    // HIGH-2: cache `pyth_publish_time` (Pyth's publisher signing time)
-    // rather than `current_time` (our on-chain read time). The fallback
-    // staleness check (`current_time - cached_pyth_timestamp >
-    // MAX_PRICE_AGE_SECONDS_BEFORE_STALE`) then bounds the TRUE age of
-    // the served price at 300s, matching the documented policy. With
-    // current_time, a price read at the edge of the live-Pyth window
-    // got another full 300s of fallback validity (~600s of effective
-    // staleness in worst case).
+    // Cache `pyth_publish_time` (Pyth's publisher signing time) rather than
+    // `current_time` (our on-chain read time). The fallback staleness check
+    // (`current_time - cached_pyth_timestamp >
+    // MAX_PRICE_AGE_SECONDS_BEFORE_STALE`) then bounds the TRUE age of the
+    // served price at 300s, matching the documented policy. With
+    // current_time, a price read at the edge of the live-Pyth window got
+    // another full 300s of fallback validity (~600s of effective staleness
+    // in worst case).
     if let Ok((pyth_price, pyth_conf, pyth_publish_time)) =
         query_pyth_atom_usd_price_with_conf(deps.as_ref(), &env)
     {
@@ -1723,8 +1723,8 @@ pub fn calculate_weighted_price_with_atom(
                     continue;
                 };
 
-                // M-4 liquidity-floor gate. Resolves the bluechip-side
-                // index first so the floor can be applied per-side
+                // Liquidity-floor gate. Resolves the bluechip-side index
+                // first so the floor can be applied per-side
                 // (USD-denominated; falls back to a hardcoded bluechip
                 // value when the oracle has no price yet). Replaces the
                 // legacy `reserve0 + reserve1 >= MIN_POOL_LIQUIDITY`
@@ -1931,7 +1931,7 @@ pub fn query_pyth_atom_usd_price(deps: Deps, env: &Env) -> StdResult<Uint128> {
 /// so the cached entry can record the publisher-signing time rather
 /// than the on-chain read time — `current_time -
 /// cached_pyth_timestamp` then bounds the TRUE age of the cached
-/// price at `MAX_PRICE_AGE_SECONDS_BEFORE_STALE` (HIGH-2 fix).
+/// price at `MAX_PRICE_AGE_SECONDS_BEFORE_STALE`.
 pub fn query_pyth_atom_usd_price_with_conf(
     deps: Deps,
     env: &Env,
@@ -1964,9 +1964,10 @@ pub fn query_pyth_atom_usd_price_with_conf(
         // `not(test)` branch above. Mock publish_time defaults to
         // `env.block.time.seconds()` (publish_time == current_time)
         // which is fine for tests that don't care about the publisher
-        // signing time. HIGH-2 tests set `MOCK_PYTH_PUBLISH_TIME` to a
-        // value distinct from env.block.time to verify the cache
-        // write stores publish_time, not current_time.
+        // signing time. Tests that check the cache write set
+        // `MOCK_PYTH_PUBLISH_TIME` to a value distinct from
+        // env.block.time to verify the cache stores publish_time,
+        // not current_time.
         let mock_publish_time = MOCK_PYTH_PUBLISH_TIME
             .may_load(deps.storage)?
             .unwrap_or(env.block.time.seconds());
@@ -2088,8 +2089,8 @@ pub fn query_pyth_with_feed(
             return Err(StdError::generic_err("ATOM price is stale"));
         }
 
-        // MEDIUM-1: require Pyth price to be at least MIN_PYTH_AGE_SECONDS
-        // old. Forces the Pyth update (`pyth.UpdatePriceFeeds`) and our
+        // Require Pyth price to be at least MIN_PYTH_AGE_SECONDS old.
+        // Forces the Pyth update (`pyth.UpdatePriceFeeds`) and our
         // consumption to be in DIFFERENT blocks, removing the same-block
         // bundle attack where an MEV bot submits
         //   tx1: UpdatePriceFeeds(favorable_price)
@@ -2205,14 +2206,14 @@ pub fn query_pyth_with_feed(
         // future change that would relax that gate.
         let normalized_conf_u64 = normalized_conf_u128.min(u64::MAX as u128) as u64;
 
-    // HIGH-2: surface `publish_time_u64` so callers that cache the price
-    // can store the PUBLISHER signing time instead of the on-chain read
-    // time. The cache-fallback `current_time - cached_pyth_timestamp >
-    // MAX_PRICE_AGE` check then bounds the cached price's TRUE age at
-    // 300s. Without this, a price read at the edge of the live-Pyth
-    // staleness window (current_time - publish_time ~= 300s) gets
-    // another full 300s of fallback validity after the cache write —
-    // effectively doubling the documented policy to ~600s.
+    // Surface `publish_time_u64` so callers that cache the price can store
+    // the PUBLISHER signing time instead of the on-chain read time. The
+    // cache-fallback `current_time - cached_pyth_timestamp > MAX_PRICE_AGE`
+    // check then bounds the cached price's TRUE age at 300s. Without this,
+    // a price read at the edge of the live-Pyth staleness window
+    // (current_time - publish_time ~= 300s) gets another full 300s of
+    // fallback validity after the cache write — effectively doubling the
+    // documented policy to ~600s.
     Ok((normalized_price, normalized_conf_u64, publish_time_u64))
 }
 
@@ -2803,10 +2804,10 @@ pub fn execute_confirm_bootstrap_price(
     // re-check (in `get_bluechip_usd_price_with_meta`) can validate
     // the cached price against its sampling-time confidence interval.
     //
-    // HIGH-2: cache `pyth_publish_time` instead of `current_time` so
-    // the fallback staleness check bounds the served price's TRUE age
-    // at MAX_PRICE_AGE_SECONDS_BEFORE_STALE. See the matching comment
-    // in `update_internal_oracle_price` for full rationale.
+    // Cache `pyth_publish_time` instead of `current_time` so the fallback
+    // staleness check bounds the served price's TRUE age at
+    // MAX_PRICE_AGE_SECONDS_BEFORE_STALE. See the matching comment in
+    // `update_internal_oracle_price` for full rationale.
     if let Ok((pyth_price, pyth_conf, pyth_publish_time)) =
         query_pyth_atom_usd_price_with_conf(deps.as_ref(), &env)
     {

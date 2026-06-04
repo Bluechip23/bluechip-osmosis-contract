@@ -171,10 +171,10 @@ pub fn execute_sweep_unclaimed_emergency_shares_pool(
 /// back repeatedly).
 ///
 /// `crossed_at` is the pool's `env.block.time` at the moment the
-/// threshold flipped. MEDIUM-2: the mint formula uses this timestamp so
-/// the amount reflects when the pool actually crossed, not when a
-/// (possibly retried-after-failure) notify finally lands. `None` falls
-/// back to `env.block.time` here for wire-format backward compatibility.
+/// threshold flipped. The mint formula uses this timestamp so the amount
+/// reflects when the pool actually crossed, not when a (possibly
+/// retried-after-failure) notify finally lands. `None` falls back to
+/// `env.block.time` here for wire-format backward compatibility.
 pub fn execute_notify_threshold_crossed(
     mut deps: DepsMut,
     env: Env,
@@ -245,12 +245,11 @@ pub fn execute_notify_threshold_crossed(
     pool_details.commit_pool_ordinal = new_ordinal;
     POOLS_BY_ID.save(deps.storage, pool_id, &pool_details)?;
 
-    // Use the pool-supplied crossed_at when present (MEDIUM-2: anchors
-    // the decay formula to the original crossing time so a retried
-    // notify after a long delay doesn't get a smaller mint than the
-    // original crossing was entitled to). Fall back to env.block.time
-    // for legacy wire-format compat (no field) — that path matches the
-    // pre-MEDIUM-2 behaviour.
+    // Use the pool-supplied crossed_at when present (anchors the decay
+    // formula to the original crossing time so a retried notify after a
+    // long delay doesn't get a smaller mint than the original crossing
+    // was entitled to). Fall back to env.block.time for legacy
+    // wire-format compat (no field).
     //
     // Reject pool-supplied timestamps that are in the future relative
     // to the current block. A pool can in principle send any value

@@ -224,12 +224,12 @@ pub fn execute_update_factory_config(
     let new_denom = pending.new_config.bluechip_denom.clone();
     let denom_changed = prior_denom.as_ref() != Some(&new_denom);
 
-    // HIGH-5: bluechip_denom drift between factory and expand-economy
-    // bricks every `RequestExpansion` (and therefore every threshold-
-    // crossing's bluechip mint reward) until both sides re-align. Each
-    // contract has its own independent 48h timelock; without an
-    // apply-time cross-check, an operator who applies factory's update
-    // first leaves expand-economy stuck at the old denom, and every
+    // Bluechip_denom drift between factory and expand-economy bricks
+    // every `RequestExpansion` (and therefore every threshold-crossing's
+    // bluechip mint reward) until both sides re-align. Each contract has
+    // its own independent 48h timelock; without an apply-time
+    // cross-check, an operator who applies factory's update first leaves
+    // expand-economy stuck at the old denom, and every
     // RetryFactoryNotify fails with BluechipDenomMismatch until the
     // matching expand-economy apply runs (up to 48h later).
     //
