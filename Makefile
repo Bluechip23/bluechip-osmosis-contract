@@ -17,19 +17,26 @@ SEI_FROM          := taku
 WASM_TARGET       := wasm32-unknown-unknown
 ARTIFACTS         := artifacts
 
-# ─── Build (local testing — mock oracle + factory mock feature enabled) ──────
-# Factory is built with --features mock so the keeper-pushes-fresh-price
-# oracle path activates. Oracle mock uses --features testing for entry points.
+# ─── Build (local, non-optimized cargo build — local testing only) ──────────
+# Canonical artifact names (factory.wasm, expand_economy.wasm) are the
+# PRODUCTION default-feature builds: real Pyth oracle, real 48h timelocks.
+# The mock factory is emitted under the explicit factory-mock.wasm name so a
+# test binary can never be mistaken for the deployable artifact. Deployable,
+# reproducible, gas-optimized artifacts come from `make optimize-*`.
 build:
 	@mkdir -p $(ARTIFACTS)
+	# Workspace default-feature build → PRODUCTION factory + expand-economy.
 	RUSTFLAGS="-C link-arg=-s" cargo build --release --target $(WASM_TARGET)
-	RUSTFLAGS="-C link-arg=-s" cargo build --release --target $(WASM_TARGET) -p oracle --features testing
-	RUSTFLAGS="-C link-arg=-s" cargo build --release --target $(WASM_TARGET) -p factory --features mock
 	cp target/$(WASM_TARGET)/release/creator_pool.wasm $(ARTIFACTS)/creator_pool.wasm
 	cp target/$(WASM_TARGET)/release/standard_pool.wasm $(ARTIFACTS)/standard_pool.wasm
 	cp target/$(WASM_TARGET)/release/factory.wasm $(ARTIFACTS)/factory.wasm
 	cp target/$(WASM_TARGET)/release/expand_economy.wasm $(ARTIFACTS)/expand_economy.wasm
+	# Mockoracle helper contract (test-only entry points).
+	RUSTFLAGS="-C link-arg=-s" cargo build --release --target $(WASM_TARGET) -p oracle --features testing
 	cp target/$(WASM_TARGET)/release/oracle.wasm $(ARTIFACTS)/oracle.wasm
+	# Mock factory for LOCAL mock-oracle testing only → explicit -mock name (NEVER ship).
+	RUSTFLAGS="-C link-arg=-s" cargo build --release --target $(WASM_TARGET) -p factory --features mock
+	cp target/$(WASM_TARGET)/release/factory.wasm $(ARTIFACTS)/factory-mock.wasm
 
 test:
 	cargo test
@@ -59,15 +66,19 @@ optimize-factory:
 	  --mount type=volume,source=factory_cache,target=/target \
 	  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
 	  cosmwasm/optimizer:0.16.0 ./factory
-	@# factory has two optimizer build variants:
-	@# - name="mock"      → factory-mock.wasm      (mock + integration_short_timing)
-	@# - name="mock_only" → factory-mock_only.wasm (mock only, prod timing constants)
-	@# The shell-test toolchain expects artifacts/factory.wasm to be the
-	@# mock+integration_short_timing variant (fast shell tests). The
-	@# mock_only variant gets renamed to factory-mock_only.wasm and is
-	@# consumed by verify_oracle_gates.sh.
-	@if [ -f $(ARTIFACTS)/factory-mock.wasm ]; then \
-	  mv $(ARTIFACTS)/factory-mock.wasm $(ARTIFACTS)/factory.wasm; \
+	@# factory declares THREE optimizer build variants:
+	@#   name="prod"      → factory-prod.wasm      (NO features: real oracle + 48h timing) ← DEPLOY THIS
+	@#   name="mock"      → factory-mock.wasm      (mock + integration_short_timing; shell tests; NEVER ship)
+	@#   name="mock_only" → factory-mock_only.wasm (mock only, prod timing; verify_oracle_gates.sh)
+	@# The canonical artifacts/factory.wasm that deploy tooling loads is the
+	@# PROD build. The mock builds keep their explicit -mock names so a test
+	@# binary can never masquerade as the deployable artifact. Hard-fail if the
+	@# prod artifact is missing rather than leave a stale/mock factory.wasm.
+	@if [ -f $(ARTIFACTS)/factory-prod.wasm ]; then \
+	  cp $(ARTIFACTS)/factory-prod.wasm $(ARTIFACTS)/factory.wasm; \
+	else \
+	  echo "ERROR: factory-prod.wasm not produced by optimizer; refusing to leave a stale/mock factory.wasm" >&2; \
+	  exit 1; \
 	fi
 
 optimize-expand-economy:
@@ -75,24 +86,18 @@ optimize-expand-economy:
 	  --mount type=volume,source=expand_economy_cache,target=/target \
 	  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
 	  cosmwasm/optimizer:0.16.0 ./expand-economy
-	@# expand-economy now has [[package.metadata.optimizer.builds]] name="mock"
-	@# (timelock shortening). The optimizer emits expand-economy-mock.wasm;
-	@# rename to the canonical expand_economy.wasm/expand-economy.wasm names
-	@# the deploy + test scripts load.
-	@# cosmwasm/optimizer produces `<crate-snake>-mock.wasm` (the
-	@# crate's `name = "expand-economy"` gets normalized to underscores
-	@# in the output filename). Sync both legacy filenames the test
-	@# scripts look for.
-	@if [ -f $(ARTIFACTS)/expand_economy-mock.wasm ]; then \
-	  cp $(ARTIFACTS)/expand_economy-mock.wasm $(ARTIFACTS)/expand_economy.wasm; \
-	  cp $(ARTIFACTS)/expand_economy-mock.wasm $(ARTIFACTS)/expand-economy.wasm; \
-	  rm $(ARTIFACTS)/expand_economy-mock.wasm; \
-	fi
-	@# mock_only variant (prod timing). Kept under a distinct filename so
-	@# verify_oracle_gates.sh can find it without clobbering the fast
-	@# shell-test artifact above.
-	@if [ -f $(ARTIFACTS)/expand_economy-mock_only.wasm ]; then \
-	  : ; \
+	@# expand-economy declares prod / mock / mock_only optimizer builds.
+	@# The canonical artifacts/expand_economy.wasm (+ legacy expand-economy.wasm)
+	@# that deploy tooling loads is the PROD build (no features). The mock
+	@# builds keep their explicit -mock / -mock_only names. cosmwasm/optimizer
+	@# normalizes the crate name to underscores in the output filename. Hard-fail
+	@# if the prod artifact is missing rather than leave a stale/mock artifact.
+	@if [ -f $(ARTIFACTS)/expand_economy-prod.wasm ]; then \
+	  cp $(ARTIFACTS)/expand_economy-prod.wasm $(ARTIFACTS)/expand_economy.wasm; \
+	  cp $(ARTIFACTS)/expand_economy-prod.wasm $(ARTIFACTS)/expand-economy.wasm; \
+	else \
+	  echo "ERROR: expand_economy-prod.wasm not produced by optimizer; refusing to leave a stale/mock expand_economy.wasm" >&2; \
+	  exit 1; \
 	fi
 
 optimize-mockoracle:

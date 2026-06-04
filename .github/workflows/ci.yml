@@ -66,3 +66,24 @@ jobs:
           cargo build --target wasm32-unknown-unknown --release -p factory
           cargo build --target wasm32-unknown-unknown --release -p expand-economy
           cargo build --target wasm32-unknown-unknown --release -p router
+
+  # Gate against shipping a test-weakened wasm (SECURITY_REVIEW_PREAUDIT.md H-1).
+  # The canonical artifacts/factory.wasm + expand_economy.wasm that deploy
+  # tooling loads are produced by the optimizer build named "prod", which MUST
+  # have empty features. This job fails if that build ever gains `mock` or
+  # `integration_short_timing`, and proves the no-features config compiles.
+  prod-artifact-guard:
+    name: Prod Artifact Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Assert the deployable 'prod' optimizer build has no test features
+        run: python3 ci/check_prod_build.py
+      - name: Prove the production (no-features) wasm compiles
+        run: |
+          cargo build --target wasm32-unknown-unknown --release -p factory --no-default-features
+          cargo build --target wasm32-unknown-unknown --release -p expand-economy --no-default-features

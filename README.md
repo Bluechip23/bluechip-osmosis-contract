@@ -918,15 +918,19 @@ The optimizer is driven by each crate's `[[package.metadata.optimizer.builds]]`
 entries (see `factory/Cargo.toml` and `expand-economy/Cargo.toml`) and emits
 three variants per build:
 
-| Artifact suffix | Cargo features | Use |
+| Optimizer output | Cargo features | Use |
 |---|---|---|
-| `<crate>.wasm` | none (default) | **Production.** Real 48h timelocks, full warmup gate, $5k liquidity floor, 300s keeper cooldown, anchor-only oracle. |
-| `<crate>-mock.wasm` | `mock, integration_short_timing` | Shell-script integration tests. 120s timelocks, warmup cleared per call, UpdateTooSoon bypassed, lowered floors, basket oracle on. Mockoracle queries enabled. NEVER ship. |
-| `<crate>-mock_only.wasm` | `mock` only | Mockoracle queries enabled but every timing constant pinned to production values. Used for end-to-end verification that prod-timing gates fire correctly on a real chain. |
+| `<crate>-prod.wasm` → `<crate>.wasm` | none (empty) | **Production — the only deployable artifact.** Real Pyth oracle, real 48h timelocks, full warmup gate, $5k liquidity floor, 300s keeper cooldown, anchor-only oracle. |
+| `<crate>-mock.wasm` | `mock, integration_short_timing` | Shell-script integration tests. 120s timelocks, warmup cleared per call, UpdateTooSoon bypassed, lowered floors, basket oracle on. Mockoracle queries enabled. **NEVER ship.** |
+| `<crate>-mock_only.wasm` | `mock` only | Mockoracle queries enabled but every timing constant pinned to production values. Used for end-to-end verification that prod-timing gates fire correctly on a real chain. **Not for production** (still mock-priced). |
 
-The Makefile's `optimize-factory`/`optimize-expand-economy` targets rename the
-`-mock` artifact onto `<crate>.wasm` so the test-deploy toolchain finds it
-unchanged; the `-mock_only` artifact keeps its suffix.
+The Makefile's `optimize-factory` / `optimize-expand-economy` targets copy the
+**`-prod`** artifact onto the canonical `<crate>.wasm` that deploy tooling loads
+— and hard-fail if the `-prod` build is missing, rather than leave a stale or
+mock artifact under that name. The `-mock` / `-mock_only` artifacts keep their
+explicit suffixes so a test binary can never masquerade as the deployable wasm.
+The `prod-artifact-guard` CI job fails the build if the `prod` optimizer build
+ever gains `mock` or `integration_short_timing`.
 
 ### Cargo features (factory and expand-economy)
 
