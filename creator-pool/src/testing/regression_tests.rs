@@ -70,7 +70,7 @@ fn test_swap_reserve_deducts_return_and_commission() {
             amount: swap_amount,
         },
         None,
-        // Wide-as-allowed slippage: post-audit hard cap is 10% with
+        // Wide-as-allowed slippage: the hard cap is 10% with
         // `allow_high_max_spread = Some(true)`. The test swap is small
         // enough relative to the post-threshold pool reserves that the
         // realised spread fits comfortably under that bound.
@@ -1650,13 +1650,12 @@ mod distribution_liveness_tests {
                 },
             )
             .unwrap();
-        // POST-audit consolidation: every post-instantiate admin gate
-        // now reads from POOL_INFO.factory_addr rather than EXPECTED_FACTORY
-        // (one source of truth — see the doc-comment on
-        // `pool_core::state::ExpectedFactory`). Test fixtures that
-        // previously overrode only EXPECTED_FACTORY must update
-        // POOL_INFO too so the new auth path sees the test's chosen
-        // factory address.
+        // Post-instantiate admin gates now read from POOL_INFO.factory_addr
+        // rather than EXPECTED_FACTORY (one source of truth — see the
+        // doc-comment on `pool_core::state::ExpectedFactory`). Test
+        // fixtures that previously overrode only EXPECTED_FACTORY must
+        // update POOL_INFO too so the new auth path sees the test's
+        // chosen factory address.
         use pool_core::state::POOL_INFO;
         let mut pool_info = POOL_INFO.load(&deps.storage).unwrap();
         pool_info.factory_addr = factory_addr();
@@ -1840,11 +1839,11 @@ mod distribution_liveness_tests {
         );
     }
 
-    // SkipDistributionUser tests removed pre-launch (audit fix §6.1) —
-    // the handler was unreachable (no factory-side forward) and the
-    // recovery scenario it targeted (corrupt ledger row that
-    // `range(..)` cannot deserialize) is practically unreachable with
-    // `cw_storage_plus` static typing. Per-mint reply isolation
+    // SkipDistributionUser tests removed pre-launch — the handler was
+    // unreachable (no factory-side forward) and the recovery scenario
+    // it targeted (corrupt ledger row that `range(..)` cannot
+    // deserialize) is practically unreachable with `cw_storage_plus`
+    // static typing. Per-mint reply isolation
     // (FAILED_MINTS / ClaimFailedDistribution) handles every
     // realistic "one recipient can't be minted to" case automatically.
 
@@ -2168,7 +2167,7 @@ mod distribution_liveness_tests {
         install_factory(&mut deps);
         EMERGENCY_DRAINED.save(&mut deps.storage, &true).unwrap();
 
-        // (SkipDistributionUser was removed pre-launch — audit fix §6.1.
+        // (SkipDistributionUser was removed pre-launch.
         // Its drained-pool rejection is no longer applicable.)
 
         // Self-recover
@@ -2376,7 +2375,7 @@ mod deposit_verify_tests {
     /// `ExecuteMsg::AddToPosition` must also route through the verify
     /// path. Without this assertion, a future refactor that flips just
     /// one of the two dispatcher arms back to the unverified variant
-    /// would silently regress the H1 invariant on add-to-position.
+    /// would silently regress the balance-verify invariant on add-to-position.
     #[test]
     fn add_to_position_through_dispatcher_emits_verify_reply_anchor() {
         let mut deps = mock_dependencies();
@@ -3561,11 +3560,10 @@ mod emergency_claim_escrow_tests {
     }
 }
 
-/// Pool-side oracle staleness boundary tests. The audit flagged
-/// `MAX_ORACLE_STALENESS_SECONDS = 360s` as a "watch item" (DoS-by-policy
-/// if keeper cadence drifts). These pin the boundary semantics so a
-/// constant change can't silently flip strict ≤ → strict < or vice
-/// versa, and prove the staleness gate triggers exactly where intended.
+/// Pool-side oracle staleness boundary tests. These pin the boundary
+/// semantics of `MAX_ORACLE_STALENESS_SECONDS = 360s` so a constant
+/// change can't silently flip strict ≤ → strict < or vice versa, and
+/// prove the staleness gate triggers exactly where intended.
 #[cfg(test)]
 mod oracle_staleness_boundary_tests {
     use crate::swap_helper::{get_oracle_conversion_with_staleness, MAX_ORACLE_STALENESS_SECONDS};

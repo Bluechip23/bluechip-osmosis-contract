@@ -716,7 +716,7 @@ fn test_adaptive_batch_sizing_with_history() {
     // but ledger sums to 2_000, so per-user floor(100 * 1_000_000 /
     // 1_000_000) = 100; 20 * 100 = 2_000 vs total_to_distribute =
     // 1_000_000, leaving a 998_000-base-unit residual that the final
-    // batch settles to the creator wallet ( H2).
+    // batch settles to the creator wallet.
     assert_eq!(
         res.messages.len(),
         actually_processed + 2,
@@ -884,7 +884,7 @@ fn test_final_batch_completes_distribution() {
     // factory bounty WasmMsg. With 3 committers each paying 100 USD
     // and total_to_distribute = 1_000_000, per-user reward floors to
     // 333_333; 3 * 333_333 = 999_999, leaving 1 base unit of dust the
-    // final batch settles to the creator wallet ( H2).
+    // final batch settles to the creator wallet.
     assert_eq!(
         res.messages.len(),
         5,
@@ -1163,7 +1163,7 @@ fn test_swap_cw20_via_hook() {
     assert!(pool_state.reserve1 > Uint128::new(350_000_000_000)); // CW20 increased
 }
 
-/// audit: a hostile CW20 cannot dispatch a Receive hook with a
+/// A hostile CW20 cannot dispatch a Receive hook with a
 /// fabricated `amount` and drain the opposite reserve. The pool
 /// queries the CW20's balance, compares to `reserve + fee_reserve +
 /// creator_pot + claimed_amount`, and rejects on shortfall.
@@ -1499,7 +1499,7 @@ fn test_oracle_conversion_precision_various_prices() {
     }
 
     // Every case targets $5 USD — MIN_COMMIT_USD_PRE_THRESHOLD is $5,
-    // so $1 test cases from pre-audit wouldn't reach the validator any
+    // so $1 test cases wouldn't reach the validator any
     // more. Scaling token_amounts by 5x preserves the cross-price
     // equivalence the test is really checking.
     let test_cases = vec![
@@ -2430,14 +2430,13 @@ fn test_concurrent_commits_both_recorded() {
     // reserve increase for Bob's bluechip — confirms the cooldown is
     // a temporary gate, not a permanent block.
     //
-    // MEDIUM-4 Option B: a per-tx swap cap ramps from 0.5% of reserve
-    // up to "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks
-    // AFTER the cooldown ends. To exercise the post-cooldown commit
-    // path with Bob's full 4.7M-bluechip offer (much larger than 0.5%
-    // of the seeded reserve), advance past the full ramp window so no
-    // per-tx cap applies. Tests that verify the ramp behaviour
-    // themselves live in `ramp_cap_tests` (pool-core/state.rs) and
-    // exercise the cap at boundary blocks directly.
+    // A per-tx swap cap ramps from 0.5% of reserve up to "unrestricted"
+    // over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks AFTER the cooldown ends.
+    // To exercise the post-cooldown commit path with Bob's full
+    // 4.7M-bluechip offer (much larger than 0.5% of the seeded reserve),
+    // advance past the full ramp window so no per-tx cap applies. Tests
+    // that verify the ramp behaviour themselves live in `ramp_cap_tests`
+    // (pool-core/state.rs) and exercise the cap at boundary blocks directly.
     let cooldown_until = pool_core::state::POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
         .load(&deps.storage)
         .expect("cooldown must be armed after threshold cross");
@@ -2694,14 +2693,13 @@ fn test_swap_prevented_if_would_deplete_below_minimum() {
         None,
     );
 
-    // Pre-audit this test asserted `InsufficientReserves` on a swap that
-    // would deplete reserves below `MINIMUM_LIQUIDITY`. The audit's
-    // 10%-with-override hard cap on realised slippage now fires first
-    // for any swap large enough to deplete reserves to that floor — the
-    // pre-cap arithmetic that surfaced the InsufficientReserves error
-    // is structurally unreachable. Re-purpose this regression test to
-    // confirm the audit's slippage gate IS the now-binding guard for
-    // depletion-bordering swaps. The MIN-reserve guard is still
+    // This test originally asserted `InsufficientReserves` on a swap that
+    // would deplete reserves below `MINIMUM_LIQUIDITY`. The 10%-with-override
+    // hard cap on realised slippage now fires first for any swap large enough
+    // to deplete reserves to that floor — the pre-cap arithmetic that surfaced
+    // the InsufficientReserves error is structurally unreachable. Re-purpose
+    // this regression test to confirm the slippage gate IS the now-binding
+    // guard for depletion-bordering swaps. The MIN-reserve guard is still
     // exercised from `liquidity_tests` via direct AMM math.
     assert!(
         matches!(result, Err(ContractError::MaxSpreadAssertion {})),
@@ -2969,13 +2967,13 @@ fn test_pause_state_persistence() {
 
 #[test]
 fn test_swap_lopsided_pool_after_threshold() {
-    // Post-audit: a swap whose realised spread exceeds 10% is rejected
-    // even with `allow_high_max_spread = Some(true)`. This test
-    // previously validated that a 50%-of-reserve swap (extreme spread)
-    // *succeeded*; under the new hard cap it must instead be rejected
-    // with `MaxSpreadAssertion`. Re-purposed as a regression test for
-    // the audit's slippage cap, preserving the lopsided-pool setup so
-    // the cap's behaviour is exercised in the same scenario.
+    // A swap whose realised spread exceeds 10% is rejected even with
+    // `allow_high_max_spread = Some(true)`. This test previously validated
+    // that a 50%-of-reserve swap (extreme spread) *succeeded*; under the
+    // hard cap it must instead be rejected with `MaxSpreadAssertion`.
+    // Re-purposed as a regression test for the 10% slippage cap, preserving
+    // the lopsided-pool setup so the cap's behaviour is exercised in the
+    // same scenario.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 

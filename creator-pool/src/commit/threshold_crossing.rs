@@ -101,14 +101,14 @@ pub(crate) fn process_threshold_crossing_with_excess(
         Ok(v.unwrap_or_default().checked_add(usd_to_threshold)?)
     })?;
     USD_RAISED_FROM_COMMIT.save(deps.storage, &commit_config.commit_amount_for_threshold_usd)?;
-    // Audit fix: NATIVE_RAISED_FROM_COMMIT now stores the *net* bluechip
-    // entering the threshold-pool side of the contract's bank balance —
-    // i.e. the threshold-portion-after-fees, not the gross
-    // `bluechip_to_threshold`. The excess (post-fee) goes through the
-    // AMM swap inline and lands directly in `pool_state.reserve0` via
-    // the swap accounting below; it does not enter NATIVE_RAISED.
-    // This makes `pools_bluechip_seed = NATIVE_RAISED_FROM_COMMIT` exact
-    // in `trigger_threshold_payout`, no `(1 - fee_rate)` recovery
+    // NATIVE_RAISED_FROM_COMMIT stores the *net* bluechip entering the
+    // threshold-pool side of the contract's bank balance — i.e. the
+    // threshold-portion-after-fees, not the gross `bluechip_to_threshold`.
+    // The excess (post-fee) goes through the AMM swap inline and lands
+    // directly in `pool_state.reserve0` via the swap accounting below;
+    // it does not enter NATIVE_RAISED. This makes
+    // `pools_bluechip_seed = NATIVE_RAISED_FROM_COMMIT` exact in
+    // `trigger_threshold_payout`, no `(1 - fee_rate)` recovery
     // multiply needed.
     NATIVE_RAISED_FROM_COMMIT
         .update::<_, ContractError>(deps.storage, |r| {
@@ -130,8 +130,8 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // while every follower trade in this block plus the next
     // POST_THRESHOLD_COOLDOWN_BLOCKS blocks is rejected with
     // PostThresholdCooldownActive. Once the cooldown ends, the
-    // post-threshold swap-cap ramp (MEDIUM-4 Option B) bounds per-tx
-    // MEV for POST_THRESHOLD_SWAP_RAMP_BLOCKS additional blocks.
+    // post-threshold swap-cap ramp bounds per-tx MEV for
+    // POST_THRESHOLD_SWAP_RAMP_BLOCKS additional blocks.
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK.save(
         deps.storage,
         &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
@@ -401,8 +401,8 @@ pub(crate) fn process_threshold_hit_exact(
     // sandwich the freshly-seeded pool in the same block (or the next
     // two). Crossing tx itself is unaffected — the writes here land
     // before the next tx ever runs the cooldown check. After cooldown
-    // ends, the post-threshold swap-cap ramp (MEDIUM-4 Option B) caps
-    // per-tx MEV for POST_THRESHOLD_SWAP_RAMP_BLOCKS additional blocks.
+    // ends, the post-threshold swap-cap ramp caps per-tx MEV for
+    // POST_THRESHOLD_SWAP_RAMP_BLOCKS additional blocks.
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK.save(
         deps.storage,
         &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),

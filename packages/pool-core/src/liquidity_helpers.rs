@@ -87,10 +87,10 @@ pub fn calculate_fees_owed_split(
 /// - `preserved_adj`  : multiplier-applied earned fees on the preserved
 ///   slice, stored as `unclaimed_fees_*` and paid on next collect.
 /// - `preserved_clip` : creator-pot debit from the preserved slice
-///   (`preserved_base - preserved_adj`). MEDIUM-3 fix — previously
-///   dropped, which silently orphaned the multiplier-clipped portion in
-///   `fee_reserve_*`. The caller is now responsible for routing both
-///   clips into `CREATOR_FEE_POT` and debiting both from `fee_reserve_*`.
+///   (`preserved_base - preserved_adj`). Previously this was dropped,
+///   silently orphaning the multiplier-clipped portion in `fee_reserve_*`.
+///   The caller is now responsible for routing both clips into
+///   `CREATOR_FEE_POT` and debiting both from `fee_reserve_*`.
 pub fn calculate_fees_owed_split_pair(
     liquidity_removed: Uint128,
     liquidity_preserved: Uint128,
@@ -702,10 +702,10 @@ mod tests {
         assert!(r.is_ok());
     }
 
-    /// MEDIUM-3: `calculate_fees_owed_split_pair` returns the
-    /// preserved-clip slice as the 4th tuple element. Previously it was
-    /// dropped, silently orphaning the multiplier-clipped portion of
-    /// fees on the preserved liquidity.
+    /// `calculate_fees_owed_split_pair` returns the preserved-clip slice
+    /// as the 4th tuple element. Previously it was dropped, silently
+    /// orphaning the multiplier-clipped portion of fees on the preserved
+    /// liquidity.
     #[test]
     fn calculate_fees_owed_split_pair_returns_preserved_clip() {
         // fee_growth_delta = 10%, multiplier = 0.3 → 70% clip on both sides.
@@ -737,7 +737,7 @@ mod tests {
     /// At multiplier = 1.0 (no clipping), both `removed_clip` and
     /// `preserved_clip` must be zero. Confirms standard-pool semantics
     /// (APPLY_DUST_MULTIPLIER=false → multiplier always 1.0) are
-    /// unaffected by the MEDIUM-3 fix.
+    /// unaffected by the preserved-clip routing change.
     #[test]
     fn calculate_fees_owed_split_pair_zero_clip_at_full_multiplier() {
         let (_, removed_clip, _, preserved_clip) = calculate_fees_owed_split_pair(

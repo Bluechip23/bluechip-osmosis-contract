@@ -375,8 +375,8 @@ fn execute_commit_logic(
                         &asset,
                         usd_value,
                         // Net-of-fees bluechip that actually enters the
-                        // contract bank balance from this commit (audit
-                        // fix; see pre_threshold.rs).
+                        // contract bank balance from this commit
+                        // (see pre_threshold.rs).
                         amount_after_fees,
                         messages,
                         &pool_state,

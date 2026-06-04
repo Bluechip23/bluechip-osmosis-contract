@@ -110,7 +110,7 @@ pub(crate) fn build_distribution_mint_submsg(
 /// `build_distribution_mint_submsg`). A failing mint is captured by the
 /// contract's reply handler and folded into `FAILED_MINTS`, leaving the
 /// rest of the batch's storage writes (cursor advance, ledger removal,
-/// other successful mints) intact. This is the H6 fix: pre-isolation,
+/// other successful mints) intact. Pre-isolation,
 /// any single failing recipient would have reverted the entire batch.
 pub fn process_distribution_batch(
     storage: &mut dyn Storage,

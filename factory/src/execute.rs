@@ -29,7 +29,7 @@ pub mod pool_lifecycle;
 pub mod upgrades;
 
 // Explicit re-exports keep the public surface of `crate::execute::*`
-// auditable from this file rather than implicitly extending whenever a
+// traceable from this file rather than implicitly extending whenever a
 // submodule adds a new `pub fn`. Adding a handler now requires touching
 // the dispatcher in this file, which keeps the two in step.
 pub use config::{

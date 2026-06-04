@@ -113,7 +113,7 @@ pub fn execute_apply_config_update(
     CONFIG.save(deps.storage, &config)?;
     PENDING_CONFIG_UPDATE.remove(deps.storage);
 
-    // M-3.1: when ownership transfers, drop any PENDING_WITHDRAWAL that
+    // When ownership transfers, drop any PENDING_WITHDRAWAL that
     // the outgoing owner staged. PENDING_WITHDRAWAL.recipient is locked
     // in at propose time, so without this clear the incoming owner
     // would inherit an in-flight payout to whichever address the

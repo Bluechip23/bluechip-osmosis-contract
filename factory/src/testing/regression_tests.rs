@@ -515,7 +515,7 @@ fn test_m_new_3_rotation_skips_pools_without_prior_snapshot() {
         .save(&mut deps.storage, atom_addr_obj, &atom_state)
         .unwrap();
 
-    // After the audit refactor `calculate_weighted_price_with_atom` reads
+    // After the refactor `calculate_weighted_price_with_atom` reads
     // each non-anchor pool's bluechip-side index from
     // `ELIGIBLE_POOL_SNAPSHOT.bluechip_indices` rather than from the
     // legacy POOLS_BY_ID linear scan. Populate the snapshot in this
@@ -1043,7 +1043,7 @@ fn test_propose_config_update_rejects_empty_pyth_feed_id() {
 // `PayDistributionBounty` must reject standard pools, even though the
 // standard-pool wasm doesn't currently emit the message. Defense-in-depth
 // so a future pool-wasm migration can't drain the bounty reserve without
-// going through the audited commit-pool path.
+// going through the commit-pool path.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_pay_distribution_bounty_rejects_standard_pool() {
@@ -1317,8 +1317,8 @@ fn test_h2_warmup_only_decrements_on_price_publishing_updates() {
 }
 
 // ---------------------------------------------------------------------------
-// Warm-up gate must bifurcate strict vs. best-effort callers (audit
-// hardening property test). During the warm-up window
+// Warm-up gate must bifurcate strict vs. best-effort callers.
+// During the warm-up window
 // (`warmup_remaining > 0`) immediately after an anchor reset:
 // - `get_bluechip_usd_price` (strict, used by commits) MUST always err
 // regardless of `pre_reset_last_price`.
@@ -1891,7 +1891,7 @@ fn test_i6_commit_pool_create_rate_limit_per_address() {
 }
 
 // ===========================================================================
-// Audit-fix follow-up tests (round 2)
+// Follow-up regression tests (round 2)
 //
 // Coverage for the four standard-pool / oracle / accounting fixes that
 // previously had only implicit (existing-test passes) verification.
@@ -3125,7 +3125,7 @@ mod anchor_validation_failure_tests {
 }
 
 // ===========================================================================
-// M-3: oracle eligibility curation
+// Oracle eligibility curation
 //
 // Allowlist (any pool kind) + global commit-pool auto-include flag, both
 // behind a 48h timelock for adds / flips. Removes are immediate.
@@ -3179,7 +3179,7 @@ mod oracle_eligibility_tests {
             commit_pool_ordinal: 0,
         };
         POOLS_BY_ID.save(deps.as_mut().storage, 1, &pool_details).unwrap();
-        // Faithful fixture (audits L-2 + M-5): keep reverse-index and
+        // Faithful fixture: keep reverse-index and
         // POOL_COUNTER in sync with POOLS_BY_ID. Without these, the
         // random-sampling auto-eligible loop never picks this pool
         // (POOL_COUNTER == 0), and `lookup_pool_by_addr` falls back
@@ -3234,7 +3234,7 @@ mod oracle_eligibility_tests {
         );
     }
 
-    /// Same as `register_standard_pool` but with explicit reserves so M-4
+    /// Same as `register_standard_pool` but with explicit reserves so
     /// liquidity-floor tests can dial in pool-state edges.
     pub(super) fn register_standard_pool_with_reserves(
         deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQuerier>,
@@ -3848,7 +3848,7 @@ mod oracle_eligibility_tests {
 }
 
 // ===========================================================================
-// M-4: USD-denominated liquidity floor + per-side floor
+// USD-denominated liquidity floor + per-side floor
 //
 // Replaces the legacy `reserve0 + reserve1 >= MIN_POOL_LIQUIDITY` check
 // (which conflated units across asymmetric pairs) with a single
@@ -3951,7 +3951,7 @@ mod liquidity_floor_tests {
 
     /// Fallback path: lopsided pool whose SUMMED reserves clear the legacy
     /// MIN_POOL_LIQUIDITY (10 BC) but whose BLUECHIP SIDE is far below
-    /// must fail. This is the exact pre-M-4 false-pass case.
+    /// must fail. This is the exact false-pass case the per-side floor closes.
     #[test]
     fn fallback_rejects_lopsided_pool_that_old_check_passed() {
         let mut deps = mock_deps_with_querier(&[]);
@@ -4054,13 +4054,13 @@ mod liquidity_floor_tests {
     // reserves for every contract address, so it can't distinguish
     // drained / lopsided pools at the cross-contract query layer; the
     // helper-level tests above pin the actual gate semantics directly,
-    // which is the only thing M-4 changes.
+    // which is what the USD-denominated floor changes.
 }
 
 // ===========================================================================
 // Pre-testnet oracle coverage backfill.
 //
-// Targets the highest-priority gaps identified in the coverage audit
+// Targets the highest-priority coverage gaps
 // (drift_bps saturating math, bootstrap exact-boundary timestamp,
 // best-effort warmup fallback combinations, zero-amount conversions).
 // These cover paths whose breakage would either silently corrupt the
@@ -4296,7 +4296,7 @@ mod oracle_coverage_backfill {
     }
 
     // -----------------------------------------------------------------------
-    // Best-effort conversion warmup fallback combinations (audit P0/P1).
+    // Best-effort conversion warmup fallback combinations.
     //
     // `usd_to_bluechip_best_effort` is supposed to keep the
     // CreateStandardPool fee + PayDistributionBounty paths functional
@@ -4461,8 +4461,8 @@ mod oracle_coverage_backfill {
 }
 
 // ===========================================================================
-// Cross-pool integration tests for M-3 (allowlist + auto-flag) and M-4
-// (USD-denominated liquidity floor).
+// Cross-pool integration tests for allowlist + auto-flag and the
+// USD-denominated liquidity floor.
 //
 // These exercise the full `get_eligible_creator_pools` path end-to-end
 // with DISTINCT reserves on each pool — only possible after the
@@ -4629,8 +4629,8 @@ mod cross_pool_integration_tests {
             .unwrap();
     }
 
-    /// M-4 integration. Auto-flag OFF; three allowlisted standard pools
-    /// with very different shapes. Only the healthy one survives.
+    /// Liquidity-floor integration. Auto-flag OFF; three allowlisted standard
+    /// pools with very different shapes. Only the healthy one survives.
     /// Reserves are well above the fallback floor (no oracle price yet
     /// in this fresh deployment), so the comparison happens against
     /// `MIN_POOL_LIQUIDITY_FALLBACK_BLUECHIP_PER_SIDE`.
@@ -4669,7 +4669,7 @@ mod cross_pool_integration_tests {
         // Lopsided: 100 ubluechip on the bluechip side (dust) but 1M BC
         // on the other side. Legacy summed check would PASS this; the
         // new per-side check must REJECT it. This is the exact
-        // false-pass case M-4 closes.
+        // false-pass case the per-side floor closes.
         register_pool(
             &mut deps,
             12,
@@ -4700,7 +4700,7 @@ mod cross_pool_integration_tests {
         assert_eq!(indices, vec![0u8]);
     }
 
-    /// M-4 integration with the USD-denominated path. Seed the oracle
+    /// USD-denominated liquidity floor integration. Seed the oracle
     /// price so the helper computes the floor from
     /// `MIN_POOL_LIQUIDITY_USD` instead of the fallback. Pool exactly at
     /// the computed floor passes; one ubluechip below fails.
@@ -4754,7 +4754,7 @@ mod cross_pool_integration_tests {
         assert_eq!(eligible, vec![at_floor.to_string()]);
     }
 
-    /// M-4 integration where the bluechip side is on `index = 1`.
+    /// Liquidity-floor integration where the bluechip side is on `index = 1`.
     /// Confirms the helper consults the recorded bluechip_index (rather
     /// than always reading reserve0) — the lopsided pool here would pass
     /// any "look at reserve0" implementation.

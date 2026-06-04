@@ -135,7 +135,7 @@ fn phase2_escrows_lp_funds_and_records_snapshot() {
     )
     .unwrap();
 
-    // Audit record reports ONLY the swept (non-LP) totals. Standard
+    // On-chain record reports ONLY the swept (non-LP) totals. Standard
     // pools have CREATOR_FEE_POT empty AND accumulation_drain == 0, so
     // both totals are zero — the wallet receives nothing at drain time.
     let audit = EMERGENCY_WITHDRAWAL.load(&deps.storage).unwrap();
@@ -188,7 +188,7 @@ fn phase2_escrows_lp_funds_and_records_snapshot() {
 
     // Recipient regression fence (from the pre-fix test): if
     // SOMETHING WERE swept, it must go to the configured bluechip
-    // wallet, NEVER to the factory contract. The audit record's
+    // wallet, NEVER to the factory contract. The on-chain record's
     // recipient field is the canonical source of truth here.
     assert_ne!(
         audit.recipient, addrs.factory,
@@ -260,7 +260,7 @@ fn drain_recipient_is_bluechip_wallet_not_factory() {
         }
     }
 
-    // Audit record locks in the wallet-routed recipient too.
+    // On-chain record locks in the wallet-routed recipient too.
     let audit = EMERGENCY_WITHDRAWAL.load(&deps.storage).unwrap();
     assert_eq!(audit.recipient, addrs.bluechip_wallet);
     assert_ne!(audit.recipient, addrs.factory);

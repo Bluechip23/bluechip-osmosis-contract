@@ -27,9 +27,9 @@ enum FactoryQueryWrapper {
 // interval; under fast-moving bluechip markets the 300s+grace combination
 // admitted commit valuations against ~5-10% stale prices, enabling an
 // attacker to over-claim their distribution share on the threshold-
-// crossing commit (HIGH-3). The 120s window cuts the mispricing
-// arbitrage roughly 3× and stays one update-cycle behind the keeper so
-// healthy commits don't reject.
+// crossing commit. The 120s window cuts the mispricing arbitrage roughly
+// 3× and stays one update-cycle behind the keeper so healthy commits
+// don't reject.
 //
 // The acceptable Pyth staleness is enforced separately on the factory side
 // via `MAX_PRICE_AGE_SECONDS_BEFORE_STALE`; that check guards the upstream

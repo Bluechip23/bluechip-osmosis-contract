@@ -530,7 +530,7 @@ fn test_create_pair_with_custom_params() {
     let info = message_info(&admin_addr(), &[]);
     instantiate(deps.as_mut(), env, info, msg).unwrap();
 
-    // (custom_params field on CreatePool was removed in the audit refactor —
+    // (custom_params field on CreatePool was removed in the refactor —
     // see `pool_struct::CreatePool` doc-comment. Caller-supplied threshold
     // params are no longer honored; the factory config is the single source
     // of truth. This test now exercises the simplified shape.)
@@ -1573,7 +1573,7 @@ fn test_oracle_anchor_only_when_basket_disabled() {
         POOLS_BY_ID
             .save(&mut deps.storage, pool_id, &pool_details)
             .unwrap();
-        // Faithful fixture (audits L-2 + M-5): reverse-index + counter
+        // Faithful fixture: reverse-index + counter
         // upper bound mirror what `state::register_pool` writes.
         crate::state::POOL_ID_BY_ADDRESS
             .save(&mut deps.storage, creator_pool_addr_clone, &pool_id)
@@ -2350,11 +2350,10 @@ fn test_bluechip_minting_on_threshold_crossing() {
     assert_eq!(pool_count, 1);
 }
 
-/// Regression test for the HIGH-1 audit fix:
-/// `commit_pool_ordinal` (and the `COMMIT_POOL_COUNTER` it's allocated from)
-/// must advance ONLY on threshold-cross, never on pool creation. This
-/// prevents paid junk-create spam from inflating the mint-decay formula's
-/// `x` input for legitimate future crossings.
+/// Regression test: `commit_pool_ordinal` (and the `COMMIT_POOL_COUNTER` it's
+/// allocated from) must advance ONLY on threshold-cross, never on pool
+/// creation. This prevents paid junk-create spam from inflating the
+/// mint-decay formula's `x` input for legitimate future crossings.
 ///
 /// The test:
 /// 1. Calls `ExecuteMsg::Create` and asserts `COMMIT_POOL_COUNTER` stays at
@@ -2404,8 +2403,8 @@ fn test_commit_pool_ordinal_advances_on_threshold_cross_not_create() {
         .unwrap_or(0);
     assert_eq!(counter_before_create, 0);
 
-    // Phase 1: Create the commit pool. After the M-1 fix this must NOT bump
-    // COMMIT_POOL_COUNTER — the counter is now allocated at threshold-cross
+    // Phase 1: Create the commit pool. This must NOT bump
+    // COMMIT_POOL_COUNTER — the counter is allocated at threshold-cross
     // time inside `execute_notify_threshold_crossed`.
     let create_msg = ExecuteMsg::Create {
         pool_msg: create_test_pool_msg(),
@@ -2458,7 +2457,7 @@ fn test_commit_pool_ordinal_advances_on_threshold_cross_not_create() {
         .unwrap();
 
     // Phase 3: Notify threshold crossed. This is the call that allocates the
-    // ordinal under the M-1 fix.
+    // ordinal.
     let notify_msg = ExecuteMsg::NotifyThresholdCrossed {
         pool_id: 1,
         crossed_at: None,
@@ -2487,14 +2486,13 @@ fn test_commit_pool_ordinal_advances_on_threshold_cross_not_create() {
     );
 }
 
-/// Regression test for the HIGH-1 audit fix:
-/// Junk pools that are created but never threshold-cross MUST NOT consume
-/// ordinal slots. A legitimate pool created AFTER N junk creates and then
-/// crossed must receive ordinal 1 (not N+1), so the mint formula treats it
-/// as the first real crossing.
+/// Regression test: junk pools that are created but never threshold-cross
+/// MUST NOT consume ordinal slots. A legitimate pool created AFTER N junk
+/// creates and then crossed must receive ordinal 1 (not N+1), so the mint
+/// formula treats it as the first real crossing.
 ///
-/// This is the economic invariant the fix protects: paid create-spam can't
-/// decay the bluechip mint stream for honest creators.
+/// This is the economic invariant: paid create-spam can't decay the bluechip
+/// mint stream for honest creators.
 #[test]
 fn test_junk_creates_do_not_inflate_ordinal_for_legitimate_crosser() {
     let mut deps = mock_dependencies(&[]);
@@ -2529,9 +2527,9 @@ fn test_junk_creates_do_not_inflate_ordinal_for_legitimate_crosser() {
     prime_oracle_for_first_update(&mut deps);
 
     // Simulate 3 junk creates from 3 distinct attacker addresses. Each
-    // ExecuteMsg::Create bumps POOL_COUNTER but, under the M-1 fix, must
-    // NOT bump COMMIT_POOL_COUNTER. We advance block time past the per-
-    // address rate-limit between creates (each address has a 1h cooldown).
+    // ExecuteMsg::Create bumps POOL_COUNTER but must NOT bump
+    // COMMIT_POOL_COUNTER. We advance block time past the per-address
+    // rate-limit between creates (each address has a 1h cooldown).
     for i in 0..3 {
         let attacker = MockApi::default().addr_make(&format!("attacker_{i}"));
         let create_msg = ExecuteMsg::Create {
@@ -2696,7 +2694,7 @@ fn test_no_mint_when_amount_is_zero() {
     let info = message_info(&admin_addr(), &creation_fee_funds());
     let res = execute(deps.as_mut(), env, info, create_msg).unwrap();
 
-    // The post-audit code path always emits a fee BankMsg to the configured
+    // The current code path always emits a fee BankMsg to the configured
     // bluechip wallet (and an optional surplus refund to the sender) — those
     // are the creation-fee gate, NOT a threshold mint. Filter by reading the
     // wallet address from the stored config so the assertion still proves
@@ -3353,7 +3351,7 @@ fn test_oracle_ignores_pools_without_threshold_crossed() {
         POOLS_BY_ID
             .save(&mut deps.storage, 1, &pool_details)
             .unwrap();
-        // Faithful fixture (audits L-2 + M-5).
+        // Faithful fixture: reverse-index + threshold-minted flag wired up.
         crate::state::POOL_ID_BY_ADDRESS
             .save(&mut deps.storage, pool_addr.clone(), &1u64)
             .unwrap();
@@ -3397,9 +3395,9 @@ fn test_oracle_ignores_pools_without_threshold_crossed() {
         POOLS_BY_ID
             .save(&mut deps.storage, 2, &pool_details)
             .unwrap();
-        // Faithful fixture (audits L-2 + M-5). POOL_COUNTER bumped to 2
-        // here so the random-sampler at `get_eligible_creator_pools`
-        // ranges `[1, 2]` and gets a real chance to pick both pools.
+        // Faithful fixture: POOL_COUNTER bumped to 2 here so the
+        // random-sampler at `get_eligible_creator_pools` ranges `[1, 2]`
+        // and gets a real chance to pick both pools.
         crate::state::POOL_ID_BY_ADDRESS
             .save(&mut deps.storage, pool_addr.clone(), &2u64)
             .unwrap();
@@ -3983,13 +3981,13 @@ fn setup_oracle_with_cached_pyth(
     oracle.bluechip_price_cache.last_update = env.block.time.seconds();
     oracle.bluechip_price_cache.cached_pyth_price = cached_pyth_price;
     oracle.bluechip_price_cache.cached_pyth_timestamp = cached_ts;
-    // Audit fix H7.1: the cache-fallback path re-validates the cached
-    // price against its sampling-time confidence interval. Tests that
-    // exercise the cache fallback need to seed a non-zero conf inside
-    // the bps gate so the re-check passes; the value here corresponds
-    // to ~50 bps of `cached_pyth_price` (well inside the 200 bps
-    // default), letting these tests model a healthy Pyth sample rather
-    // than the pre-upgrade "conf unknown" record.
+    // The cache-fallback path re-validates the cached price against its
+    // sampling-time confidence interval. Tests that exercise the cache
+    // fallback need to seed a non-zero conf inside the bps gate so the
+    // re-check passes; the value here corresponds to ~50 bps of
+    // `cached_pyth_price` (well inside the 200 bps default), letting
+    // these tests model a healthy Pyth sample rather than a "conf
+    // unknown" record.
     oracle.bluechip_price_cache.cached_pyth_conf =
         ((cached_pyth_price.u128() / 200) as u64).max(1);
     // Tests bypass UpdateOraclePrice and seed last_price directly — clear
@@ -4618,7 +4616,7 @@ fn test_distribution_bounty_converts_via_oracle_price() {
     // At seeded mock price (1 bluechip = $1), $0.05 = 50_000 ubluechip.
     assert_eq!(paid_bluechip, Uint128::new(50_000));
 
-    // Both attributes must be present so operators can audit conversion.
+    // Both attributes must be present so operators can inspect conversion.
     assert!(res
         .attributes
         .iter()
@@ -5672,13 +5670,13 @@ mod post_reset_buffer_tests {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH-2: cache writes store Pyth publish_time, not on-chain current_time
+// Cache writes store Pyth publish_time, not on-chain current_time
 // ---------------------------------------------------------------------------
 //
 // The cache-fallback path rejects a cached value once its age exceeds
 // `MAX_PRICE_AGE_SECONDS_BEFORE_STALE`. The age is computed as
-// `current_time - cached_pyth_timestamp`. HIGH-2 pinned that
-// `cached_pyth_timestamp` must store Pyth's `publish_time` (publisher
+// `current_time - cached_pyth_timestamp`. The requirement is that
+// `cached_pyth_timestamp` stores Pyth's `publish_time` (publisher
 // signing time), not the on-chain block.time at which we wrote the
 // cache. Otherwise a price read at the edge of its 300s
 // live-staleness budget would get another 300s of fallback validity,
@@ -5691,7 +5689,7 @@ mod post_reset_buffer_tests {
 // at the publish-time boundary) is covered by the existing
 // `pyth_cache_*` boundary tests, whose `setup_oracle_with_cached_pyth`
 // fixture has always seeded cached_pyth_timestamp as
-// "env.block.time − age" — which IS the new publish-time semantic.
+// "env.block.time − age" — which IS the publish-time semantic.
 #[cfg(test)]
 mod pyth_cache_publish_time_tests {
     use super::*;
@@ -5701,9 +5699,8 @@ mod pyth_cache_publish_time_tests {
 
     /// The mock branch of `query_pyth_atom_usd_price_with_conf` honors
     /// `MOCK_PYTH_PUBLISH_TIME` when set, returning it as the 3rd tuple
-    /// element. This is the wiring that lets HIGH-2's cache-write
-    /// paths store Pyth's publisher signing time instead of the
-    /// on-chain block.time.
+    /// element. This is the wiring that lets cache-write paths store
+    /// Pyth's publisher signing time instead of the on-chain block.time.
     #[test]
     fn query_pyth_returns_configured_publish_time() {
         let mut deps = mock_dependencies(&[]);
@@ -5737,10 +5734,10 @@ mod pyth_cache_publish_time_tests {
     }
 
     /// When `MOCK_PYTH_PUBLISH_TIME` is unset, the mock falls back to
-    /// `env.block.time.seconds()` — keeps existing tests unaffected by
-    /// the HIGH-2 wiring change (publish_time defaults to current_time
-    /// only in the test mock, which is the conservative pre-fix
-    /// equivalent for fixtures that don't care).
+    /// `env.block.time.seconds()` — keeps existing tests unaffected
+    /// (publish_time defaults to current_time only in the test mock,
+    /// which is the conservative equivalent for fixtures that don't
+    /// care about the publish-time distinction).
     #[test]
     fn query_pyth_defaults_publish_time_to_env_block_time() {
         let mut deps = mock_dependencies(&[]);

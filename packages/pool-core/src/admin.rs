@@ -4,7 +4,7 @@
 //! `execute_emergency_withdraw` is factored into
 //! `execute_emergency_withdraw_initiate` (Phase 1: pause + arm the 24h
 //! timelock) and `execute_emergency_withdraw_core_drain` (Phase 2: drain
-//! reserves+fee_reserves+CREATOR_FEE_POT, write the audit record, flip
+//! reserves+fee_reserves+CREATOR_FEE_POT, write the drain record, flip
 //! EMERGENCY_DRAINED). The creator-pool crate wraps these with its
 //! commit-only bookkeeping (pre-threshold rejection, CREATOR_EXCESS_POSITION
 //! sweep, DISTRIBUTION_STATE halt); standard-pool calls them directly
@@ -265,10 +265,10 @@ pub fn execute_emergency_withdraw_core_drain(
         Err(_) => fee_info.bluechip_wallet_address.clone(),
     };
 
-    // Audit record reflects ONLY the funds actually swept to the
+    // The drain record reflects ONLY the funds actually swept to the
     // bluechip wallet at drain time. LP-claimable shares are recorded
     // separately on the EMERGENCY_DRAIN_SNAPSHOT and are NOT counted
-    // here — that's the load-bearing semantic of the fix.
+    // here — that's the load-bearing semantic of this separation.
     let withdrawal_info = EmergencyWithdrawalInfo {
         withdrawn_at: env.block.time.seconds(),
         recipient: recipient.clone(),
@@ -777,7 +777,7 @@ pub fn execute_update_config_from_factory(
 /// amounts the caller's pool-kind-specific bookkeeping wants folded
 /// into the drain transfer messages (creator-pool passes its excess
 /// position; standard-pool passes zero). They are forwarded to the
-/// core drain so the pool-core audit record captures the grand total.
+/// core drain so the drain record captures the grand total.
 pub fn execute_emergency_withdraw_dispatch(
     deps: DepsMut,
     env: Env,

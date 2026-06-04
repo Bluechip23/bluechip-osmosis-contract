@@ -54,7 +54,7 @@ fn test_pool_update_config_from_factory() {
     assert!(matches!(err, ContractError::Unauthorized {}));
 }
 
-/// Audit b8b0bcb: per-pool commit floors are tunable but must be > 0 and
+/// Per-pool commit floors are tunable but must be > 0 and
 /// <= `MAX_MIN_COMMIT_USD`. The apply-side guard rejects zero on
 /// `min_commit_usd_pre_threshold` (defense-in-depth — factory's
 /// `PoolConfigUpdate::validate()` rejects the same at propose time, but

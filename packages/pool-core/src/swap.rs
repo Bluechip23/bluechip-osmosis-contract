@@ -300,22 +300,22 @@ pub fn execute_swap_cw20(
             to,
             transaction_deadline,
         }) => {
-            // enforce the transaction deadline BEFORE
-            // the M-7 cross-contract balance query. Previously the
-            // deadline was first checked inside `simple_swap` (called
-            // at the very end of this function), so an expired
-            // Receive-hook tx still paid for a `query_token_balance_strict`
-            // round-trip before reverting. Checking here saves one
-            // cross-contract query on the rejected path; `simple_swap`
-            // re-checks the deadline as defense-in-depth so any future
-            // entry point that bypasses this gate still rejects.
+            // Enforce the transaction deadline BEFORE the cross-contract
+            // balance query. Previously the deadline was first checked
+            // inside `simple_swap` (called at the very end of this
+            // function), so an expired Receive-hook tx still paid for a
+            // `query_token_balance_strict` round-trip before reverting.
+            // Checking here saves one cross-contract query on the
+            // rejected path; `simple_swap` re-checks the deadline as
+            // defense-in-depth so any future entry point that bypasses
+            // this gate still rejects.
             enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
             let pool_info: PoolInfo = POOL_INFO.load(deps.storage)?;
             // Authorisation + offer-side lookup in one pass. Folded
-            // together (vs. the prior `.any()` boolean) so the M-7 verify
-            // step below can use the same index without re-scanning the
-            // pair.
+            // together (vs. the prior `.any()` boolean) so the balance
+            // verify step below can use the same index without re-scanning
+            // the pair.
             let offer_index = pool_info
                 .pool_info
                 .asset_infos
@@ -500,13 +500,13 @@ pub fn execute_simple_swap(
             until_block: cooldown_until,
         });
     }
-    // MEDIUM-4 Option B: per-tx swap cap ramp. After the cooldown ends,
-    // each swap is capped at a fraction of the offer-side reserve, ramping
-    // from 0.5% up to "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS
-    // blocks. Bounds per-tx MEV on the freshly-seeded pool while still
-    // allowing legitimate first traders to participate. Returns None
-    // (skips the check) for standard pools (cooldown_until == 0) and
-    // for creator pools past the ramp window.
+    // Per-tx swap cap ramp. After the cooldown ends, each swap is capped
+    // at a fraction of the offer-side reserve, ramping from 0.5% up to
+    // "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks. Bounds
+    // per-tx MEV on the freshly-seeded pool while still allowing
+    // legitimate first traders to participate. Returns None (skips the
+    // check) for standard pools (cooldown_until == 0) and for creator
+    // pools past the ramp window.
     if let Some(cap) =
         crate::state::post_threshold_swap_cap(deps.storage, env.block.height, offer_pool)?
     {

@@ -35,9 +35,24 @@ mock = []
 integration_short_timing = []
 library = []
 
+# PRODUCTION deployment build. Empty feature set: real Pyth oracle, real
+# 48h timelocks, full warm-up gate, $5k liquidity floor, 300s keeper
+# cooldown, anchor-only (basket-disabled) oracle. This is the ONLY factory
+# artifact that is safe to deploy to a public chain. The optimizer emits it
+# as `factory-prod.wasm`; the Makefile copies that onto the canonical
+# `artifacts/factory.wasm` that deploy tooling loads. The `mock` builds
+# below keep their explicit `-mock` / `-mock_only` filenames so a test
+# binary can never masquerade as the deployable artifact. The CI
+# `prod-artifact-guard` job fails the build if this entry ever gains
+# `mock` or `integration_short_timing`.
+[[package.metadata.optimizer.builds]]
+name = "prod"
+features = []
+
 # Docker-built wasm for shell-script integration tests. Enables BOTH
 # `mock` (so mockoracle queries work) AND `integration_short_timing`
 # (so timelocks/rate-limits are short enough for an interactive test).
+# Produced as `factory-mock.wasm` (NOT the canonical name). NEVER ship.
 [[package.metadata.optimizer.builds]]
 name = "mock"
 features = ["mock", "integration_short_timing"]

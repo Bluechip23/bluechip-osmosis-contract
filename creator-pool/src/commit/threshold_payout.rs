@@ -159,7 +159,7 @@ pub fn trigger_threshold_payout(
     // tx overall still succeeds. See state::PENDING_FACTORY_NOTIFY.
     //
     // `crossed_at = env.block.time` is the original threshold-crossing
-    // time (MEDIUM-2). Snapshotted into THRESHOLD_CROSSED_AT below for
+    // time, snapshotted into THRESHOLD_CROSSED_AT below for
     // RetryFactoryNotify to read on later retries, so the factory's
     // bluechip-mint decay formula uses the same `s` regardless of when
     // the notify finally lands.
@@ -277,13 +277,13 @@ pub fn trigger_threshold_payout(
         DISTRIBUTION_STATE.save(storage, &dist_state)?;
     }
 
-    // Audit fix: NATIVE_RAISED_FROM_COMMIT is now stored as net-of-fees
-    // by every commit handler, so the seed amount is read out directly
-    // with no recovery math. Previously the field stored gross and was
-    // recovered via `gross * (1 - fee_rate)` floor here, which combined
-    // with the per-commit fee floor to leave up to ~2 units stranded
-    // per commit. The keeper bounty for distribution batches is paid
-    // by the factory from its own reserve, not skimmed from LP funds —
+    // NATIVE_RAISED_FROM_COMMIT is stored as net-of-fees by every commit
+    // handler, so the seed amount is read out directly with no recovery
+    // math. Previously the field stored gross and was recovered via
+    // `gross * (1 - fee_rate)` floor here, which combined with the
+    // per-commit fee floor to leave up to ~2 units stranded per commit.
+    // The keeper bounty for distribution batches is paid by the factory
+    // from its own reserve, not skimmed from LP funds —
     // see `factory::execute_pay_distribution_bounty`.
     let pools_bluechip_seed = crate::state::NATIVE_RAISED_FROM_COMMIT.load(storage)?;
 
@@ -342,12 +342,12 @@ pub fn trigger_threshold_payout(
     // invariant a clean "flag flips iff mint completed" statement.)
     IS_THRESHOLD_HIT.save(storage, &true)?;
 
-    // MEDIUM-2: snapshot the original crossing time so
-    // `execute_retry_factory_notify` can re-supply it on later retries.
-    // The factory's bluechip-mint decay formula uses this timestamp as
-    // its `s` reference, so a retried notify after a long delay still
-    // mints the amount the pool was entitled to at original crossing
-    // time. Paired with IS_THRESHOLD_HIT — both flip together atomically.
+    // Snapshot the original crossing time so `execute_retry_factory_notify`
+    // can re-supply it on later retries. The factory's bluechip-mint decay
+    // formula uses this timestamp as its `s` reference, so a retried notify
+    // after a long delay still mints the amount the pool was entitled to at
+    // original crossing time. Paired with IS_THRESHOLD_HIT — both flip
+    // together atomically.
     crate::state::THRESHOLD_CROSSED_AT.save(storage, &env.block.time)?;
 
     Ok(ThresholdPayoutMsgs {

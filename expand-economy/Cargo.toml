@@ -20,6 +20,17 @@ mock = []
 # NEVER ship to production. Unit tests do NOT enable this.
 integration_short_timing = []
 
+# PRODUCTION deployment build. Empty feature set: real 48h config /
+# withdrawal timelocks, no mock. The ONLY expand-economy artifact safe to
+# deploy. The optimizer emits `expand_economy-prod.wasm`; the Makefile
+# copies it onto the canonical `artifacts/expand_economy.wasm`. Guarded by
+# the CI `prod-artifact-guard` job (fails if this gains `mock` or
+# `integration_short_timing`).
+[[package.metadata.optimizer.builds]]
+name = "prod"
+features = []
+
+# Shell-test build (NEVER ship). Produced as `expand_economy-mock.wasm`.
 [[package.metadata.optimizer.builds]]
 name = "mock"
 features = ["mock", "integration_short_timing"]
@@ -39,9 +50,9 @@ thiserror = { workspace = true }
 cw2 = { workspace = true }
 cw-utils = { workspace = true }
 serde = { workspace = true }
-# C-EE-1: migrate handler parses cw2 stored version and current
+# Migrate handler parses cw2 stored version and current
 # CONTRACT_VERSION as semver to reject downgrades. Same crate the
-# pool / factory contracts already use for the same M-3 guard.
+# pool / factory contracts already use for the same guard.
 semver = { workspace = true }
 
 [dev-dependencies]

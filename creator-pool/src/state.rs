@@ -76,7 +76,7 @@ pub const LAST_THRESHOLD_ATTEMPT: Item<Timestamp> = Item::new("last_threshold_at
 
 /// `env.block.time` snapshotted at the moment threshold flipped (set
 /// inside `trigger_threshold_payout` immediately after
-/// `IS_THRESHOLD_HIT.save(true)`). MEDIUM-2: threaded into the
+/// `IS_THRESHOLD_HIT.save(true)`). Threaded into the
 /// `NotifyThresholdCrossed` SubMsg payload so the factory's bluechip-
 /// mint decay formula uses the ORIGINAL crossing time, not the time
 /// the (possibly retried-after-failure) notify finally lands. Read by

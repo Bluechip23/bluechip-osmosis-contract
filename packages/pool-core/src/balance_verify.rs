@@ -83,7 +83,7 @@ pub fn handle_deposit_verify_reply(
     // AND mint-mid-transfer inflation) while correctly handling
     // outflows dispatched as part of the same Response — see
     // `finalize_deposit_response::outgoing_amounts` for the
-    // `add_to_position` motivating case (Finding 12.1).
+    // `add_to_position` motivating case.
     //
     // Both sides of the equality are computed via `checked_add` so an
     // overflowing pre+actual (impossible at any plausible scale, but

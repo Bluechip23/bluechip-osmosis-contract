@@ -155,10 +155,10 @@ fn test_repro_token_sort_order_bug() {
         .unwrap();
 
     // Inverted shape: BC is now at index 1, so anchor_bluechip_index = 1.
-    // After the audit refactor the resolution is no longer at-query — it's
-    // pinned on `BlueChipPriceInternalOracle.anchor_bluechip_index` at the
-    // moment the anchor is set/changed. This test simulates an admin
-    // who has set the index correctly for the inverted pool shape.
+    // The resolution is no longer at-query — it's pinned on
+    // `BlueChipPriceInternalOracle.anchor_bluechip_index` at the moment
+    // the anchor is set/changed. This test simulates an admin who has
+    // set the index correctly for the inverted pool shape.
     let (price_inverted, _, _) =
         calculate_weighted_price_with_atom(deps.as_ref(), &pools, &prev_snapshots, 1).unwrap();
     let price_inverted =

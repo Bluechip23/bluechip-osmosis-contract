@@ -859,7 +859,7 @@ mod tests {
 
     /// Sum of all amounts currently in the expansion log. Tests
     /// previously asserted `EXPANSION_WINDOW.spent_in_window` directly;
-    /// after the M-3.3 sliding-window refactor the equivalent value
+    /// after the sliding-window refactor the equivalent value
     /// is "total of every non-pruned entry."
     fn log_spent(
         deps: &cosmwasm_std::OwnedDeps<
@@ -1169,7 +1169,7 @@ mod tests {
         assert_eq!(log[0].amount, amount);
     }
 
-    /// M-3.3 boundary-burst protection. The prior single-bucket cap
+    /// Boundary-burst protection. The prior single-bucket cap
     /// allowed an attacker to spend the full cap right before
     /// `window_start + 24h`, then spend the full cap again 1 second
     /// after the bucket flipped — 200k bluechip across a single
@@ -1269,7 +1269,7 @@ mod tests {
         assert_eq!(log[1].amount, big);
     }
 
-    /// M-3.3 sliding-window admit case. Once the prior big debit
+    /// Sliding-window admit case. Once the prior big debit
     /// itself ages out (>24h since its timestamp), a fresh full-cap
     /// debit is admitted.
     #[test]
@@ -1324,7 +1324,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // M-3.2 — factory cross-validation failure modes
+    // Factory cross-validation failure modes
     // ---------------------------------------------------------------
     //
     // `execute_expand_economy` cross-validates the factory's stored

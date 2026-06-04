@@ -1,7 +1,7 @@
 //! Coverage-gap tests for factory paths that had no Rust regression cover
 //! prior to this file. Groups:
 //!
-//! - `must_pay` surplus refund on commit-pool `Create` (audit f944e07).
+//! - `must_pay` surplus refund on commit-pool `Create`.
 //! - `SetPythConfThresholdBps` bounds + auth (range
 //!   `[PYTH_CONF_THRESHOLD_BPS_MIN, PYTH_CONF_THRESHOLD_BPS_MAX]` =
 //!   `[50, 500]`, admin-only).
@@ -85,7 +85,7 @@ fn fresh_factory() -> OwnedDeps<MockStorage, MockApi, WasmMockQuerier> {
 // must_pay surplus refund
 // ---------------------------------------------------------------------------
 
-/// Audit f944e07: commit-pool `Create` enforces `must_pay` on the bluechip
+/// Commit-pool `Create` enforces `must_pay` on the bluechip
 /// denom and the configured USD fee converted via the live oracle.
 /// Bootstrap state (no oracle warm-up yet) falls back to
 /// `STANDARD_POOL_CREATION_FEE_FALLBACK_BLUECHIP = 100_000_000 ubluechip`.
