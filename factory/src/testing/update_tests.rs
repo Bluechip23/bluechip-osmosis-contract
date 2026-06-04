@@ -779,11 +779,11 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
     }
 }
 
-/// Regression for audit-followup §2.2: when the retry batch (first 10
-/// entries of `pending_retry`) all remain paused, the queue rotates so
-/// later entries get their turn on subsequent retry calls. Pre-fix the
-/// head 10 stayed at positions 0-9 forever and tail entries never got
-/// processed without an admin Cancel + re-Propose.
+/// Regression: when the retry batch (first 10 entries of `pending_retry`)
+/// all remain paused, the queue rotates so later entries get their turn on
+/// subsequent retry calls. Pre-fix the head 10 stayed at positions 0-9
+/// forever and tail entries never got processed without an admin
+/// Cancel + re-Propose.
 #[test]
 fn test_upgrade_retry_queue_rotates_when_head_stays_paused() {
     let mut deps = mock_dependencies_2(&[]);
@@ -862,7 +862,7 @@ fn test_upgrade_retry_queue_rotates_when_head_stays_paused() {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH-5: bluechip_denom drift cross-check (factory ↔ expand-economy)
+// bluechip_denom drift cross-check (factory ↔ expand-economy)
 // ---------------------------------------------------------------------------
 //
 // `execute_update_factory_config` refuses to apply a `bluechip_denom`

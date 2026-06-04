@@ -38,13 +38,13 @@ pub struct WasmMockQuerier {
     // contract address; when present, the override is returned verbatim.
     // Falls back to the default 50B/10B reserves below if no override is
     // registered for the queried address. Used by integration tests that
-    // need different reserves on different pools (dedup, M-4
+    // need different reserves on different pools (dedup, USD-denominated
     // liquidity floor) — without this, every cross-contract pool query
     // returns the same numbers regardless of which pool was asked.
     pub pool_state_overrides:
         std::collections::HashMap<String, PoolStateResponseForFactory>,
     // When set, responds to `ExpandEconomyQuery::GetConfig {}` (sent by
-    // `execute_update_factory_config`'s denom cross-check, HIGH-5) with a
+    // `execute_update_factory_config`'s denom cross-check) with a
     // `ConfigResponse` carrying this `bluechip_denom`. The
     // `factory_address` / `owner` fields in the response are stubbed
     // with dummy addresses since the factory's cross-check only reads
@@ -146,7 +146,7 @@ impl WasmMockQuerier {
                     panic!("Unsupported factory query");
                 }
 
-                // Expand-economy `GetConfig {}` for the HIGH-5 cross-check.
+                // Expand-economy `GetConfig {}` for the bluechip_denom cross-check.
                 // Mirror of the locally-defined `ExpandEconomyQuery` enum
                 // in `execute_update_factory_config` — same snake_case
                 // wire format. Defined here as a test-only struct to avoid
