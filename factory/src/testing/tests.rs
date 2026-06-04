@@ -4616,7 +4616,7 @@ fn test_distribution_bounty_converts_via_oracle_price() {
     // At seeded mock price (1 bluechip = $1), $0.05 = 50_000 ubluechip.
     assert_eq!(paid_bluechip, Uint128::new(50_000));
 
-    // Both attributes must be present so operators can audit conversion.
+    // Both attributes must be present so operators can inspect conversion.
     assert!(res
         .attributes
         .iter()
