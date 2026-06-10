@@ -10,13 +10,15 @@
 pub use pool_core::query::*;
 
 use crate::msg::{
-    CommitStatus, CommitterInfo, DistributionStateResponse, FactoryNotifyStatusResponse,
-    LastCommittedResponse, PoolAnalyticsResponse, PoolCommitResponse, QueryMsg,
+    CommitStatus, CommitterInfo, CreatorEarningsResponse, CreatorExcessEarningsResponse,
+    DistributionStateResponse, FactoryNotifyStatusResponse, LastCommittedResponse,
+    PoolAnalyticsResponse, PoolCommitResponse, QueryMsg,
 };
 use crate::state::{
-    COMMIT_INFO, COMMIT_LIMIT_INFO, DISTRIBUTION_STALL_TIMEOUT_SECONDS, DISTRIBUTION_STATE,
-    IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY,
-    POOL_COMMITS_QUERY_DEFAULT_LIMIT, POOL_COMMITS_QUERY_MAX_LIMIT, USD_RAISED_FROM_COMMIT,
+    COMMITFEEINFO, COMMIT_INFO, COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION, CREATOR_FEE_POT,
+    DISTRIBUTION_STALL_TIMEOUT_SECONDS, DISTRIBUTION_STATE, IS_THRESHOLD_HIT,
+    NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY, POOL_COMMITS_QUERY_DEFAULT_LIMIT,
+    POOL_COMMITS_QUERY_MAX_LIMIT, THRESHOLD_CROSSED_AT, USD_RAISED_FROM_COMMIT,
 };
 use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Deps, Env, Order, StdResult, Uint128,
@@ -97,10 +99,38 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         )?),
         QueryMsg::FactoryNotifyStatus {} => to_json_binary(&query_factory_notify_status(deps)?),
         QueryMsg::DistributionState {} => to_json_binary(&query_distribution_state(deps, &env)?),
+        QueryMsg::CreatorEarnings {} => to_json_binary(&query_creator_earnings(deps, &env)?),
 
         // Hybrid — wrapper computes creator-only pieces, pool-core assembles
         QueryMsg::Analytics {} => to_json_binary(&query_analytics(deps)?),
     }
+}
+
+/// Creator-earnings rollup: claimable fee pot, locked excess-liquidity
+/// claim (with `claimable_now` computed against block time so dashboards
+/// don't re-implement the `PositionLocked` check), and threshold context.
+/// All reads are `may_load` with defaults so the query works on pools at
+/// any lifecycle stage, including pre-threshold pools where none of the
+/// earnings state exists yet.
+pub fn query_creator_earnings(deps: Deps, env: &Env) -> StdResult<CreatorEarningsResponse> {
+    let fee_info = COMMITFEEINFO.load(deps.storage)?;
+    let fee_pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
+    let excess =
+        CREATOR_EXCESS_POSITION
+            .may_load(deps.storage)?
+            .map(|e| CreatorExcessEarningsResponse {
+                bluechip_amount: e.bluechip_amount,
+                token_amount: e.token_amount,
+                unlock_time: e.unlock_time,
+                claimable_now: env.block.time >= e.unlock_time,
+            });
+    Ok(CreatorEarningsResponse {
+        creator_wallet_address: fee_info.creator_wallet_address,
+        fee_pot,
+        excess,
+        is_threshold_hit: IS_THRESHOLD_HIT.may_load(deps.storage)?.unwrap_or(false),
+        threshold_crossed_at: THRESHOLD_CROSSED_AT.may_load(deps.storage)?,
+    })
 }
 
 pub fn query_factory_notify_status(deps: Deps) -> StdResult<FactoryNotifyStatusResponse> {

@@ -13,7 +13,7 @@
 pub use pool_core::msg::*;
 
 use crate::asset::{TokenInfo, TokenType};
-use crate::state::RecoveryType;
+use crate::state::{CreatorFeePot, RecoveryType};
 // Schema-only refs: cited only by `#[returns(...)]` on QueryMsg
 // variants. The QueryResponses derive consumes them but rustc still
 // flags them as unused without this allow. Grouping them under one
@@ -289,6 +289,45 @@ pub enum QueryMsg {
     // elapsed since the last batch advanced).
     #[returns(Option<DistributionStateResponse>)]
     DistributionState {},
+    // Creator-earnings rollup for dashboards: the claimable clip-slice
+    // fee pot (emptied by `ExecuteMsg::ClaimCreatorFees`), the locked
+    // excess-liquidity claim if one exists (with a `claimable_now` flag
+    // computed against block time), and threshold-crossing context.
+    // Everything here is already public state — this just saves
+    // explorers a raw-storage crawl and gives the creator wallet one
+    // call to render an earnings panel.
+    #[returns(CreatorEarningsResponse)]
+    CreatorEarnings {},
+}
+
+#[cw_serde]
+pub struct CreatorEarningsResponse {
+    /// Creator wallet configured at instantiation — the recipient of
+    /// every claim path below.
+    pub creator_wallet_address: Addr,
+    /// Claimable-now clip-slice fee pot. `amount_0` is the native
+    /// bluechip leg, `amount_1` the creator-token leg. Emptied by
+    /// `ExecuteMsg::ClaimCreatorFees`; zero/zero when nothing accrued.
+    pub fee_pot: CreatorFeePot,
+    /// Locked excess-liquidity claim created at threshold crossing when
+    /// the seeded bluechip exceeded `max_bluechip_lock_per_pool`.
+    /// `None` when no excess exists or it was already claimed.
+    pub excess: Option<CreatorExcessEarningsResponse>,
+    pub is_threshold_hit: bool,
+    /// Block time at which the threshold flipped. `None` pre-threshold
+    /// (and on pools deployed before this timestamp was recorded).
+    pub threshold_crossed_at: Option<Timestamp>,
+}
+
+#[cw_serde]
+pub struct CreatorExcessEarningsResponse {
+    pub bluechip_amount: Uint128,
+    pub token_amount: Uint128,
+    pub unlock_time: Timestamp,
+    /// True once block time has reached `unlock_time` — i.e.
+    /// `ExecuteMsg::ClaimCreatorExcessLiquidity` would no longer reject
+    /// with `PositionLocked`.
+    pub claimable_now: bool,
 }
 
 #[cw_serde]

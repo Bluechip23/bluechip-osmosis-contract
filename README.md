@@ -531,6 +531,16 @@ The standard-pool reply handler will reject the transaction if the CW20 has a tr
 
 `last_commited { wallet }` (note the on-chain typo) returns the wallet's most recent commit timestamp and per-commit USD / bluechip amounts; useful for enforcing the 13-second per-wallet rate limit client-side before broadcasting. `pool_commits { pool_contract_address, min_payment_usd, after_timestamp, start_after, limit }` pages the full committer ledger for a pool — the response carries `committers` and a `page_count` (size of THIS page after filtering, not the pre-filter total).
 
+### Creator Earnings Rollup
+
+```json
+{
+  "creator_earnings": {}
+}
+```
+
+Creator-pool only. One call for earnings dashboards: returns the configured `creator_wallet_address`, the claimable clip-slice `fee_pot` (`amount_0` = bluechip, `amount_1` = creator token; emptied by `claim_creator_fees`), the locked `excess` liquidity claim if one exists (`bluechip_amount`, `token_amount`, `unlock_time`, plus a `claimable_now` flag computed against block time — mirrors the `PositionLocked` gate on `claim_creator_excess_liquidity`), `is_threshold_hit`, and `threshold_crossed_at` (`None` pre-threshold).
+
 ---
 
 ## Security Considerations
