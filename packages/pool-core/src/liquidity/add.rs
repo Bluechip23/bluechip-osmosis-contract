@@ -15,7 +15,9 @@ use cosmwasm_std::{
 };
 
 use crate::error::ContractError;
-use crate::generic::{check_rate_limit, enforce_transaction_deadline, with_reentrancy_guard};
+use crate::generic::{
+    check_liquidity_rate_limit, enforce_transaction_deadline, with_reentrancy_guard,
+};
 use crate::liquidity_helpers::{
     build_fee_transfer_msgs, calc_capped_fees_with_clip, effective_fee_size_multiplier,
     enforce_standard_pool_min_position, sync_position_on_transfer, verify_position_ownership,
@@ -318,7 +320,7 @@ fn execute_add_to_position_dispatch(
     // other path, and vice versa.
     with_reentrancy_guard(deps, move |mut deps| {
         let pool_specs: PoolSpecs = POOL_SPECS.load(deps.storage)?;
-        check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
+        check_liquidity_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
         add_to_position_internal(
             &mut deps,
             env,

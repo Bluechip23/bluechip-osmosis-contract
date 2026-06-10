@@ -422,6 +422,24 @@ pub const DEPOSIT_VERIFY_REPLY_ID: u64 = 0xD550_0000;
 /// `min_commit_interval` is safe to drop.
 pub const USER_LAST_COMMIT: Map<&Addr, u64> = Map::new("user_last_commit");
 
+/// Liquidity-operation rate-limit cooldown (deposit / add-to-position /
+/// remove), kept in a SEPARATE map from `USER_LAST_COMMIT` (which gates
+/// swaps and commits).
+///
+/// The decoupling is load-bearing security, not cosmetic. On standard
+/// pools the CW20 swap path (`pool_core::swap::execute_swap_cw20`) derives
+/// its rate-limit key from `cw20_msg.sender`, a field the *token contract*
+/// constructs in its `Receive` hook. A hostile CW20 (standard pools accept
+/// arbitrary third-party tokens) can therefore set that key to any address.
+/// If swaps and liquidity ops shared one cooldown map, a hostile token
+/// could stamp a victim LP's key via spoofed swaps and indefinitely block
+/// the victim's `RemoveLiquidity` (their only exit) with
+/// `TooFrequentCommits`. Liquidity ops are always keyed on the real
+/// `info.sender` of the depositing/removing LP — never spoofable — so a
+/// separate map guarantees no swap, spoofed or not, can ever block a
+/// withdrawal or deposit.
+pub const USER_LAST_LIQUIDITY_OP: Map<&Addr, u64> = Map::new("user_last_liquidity_op");
+
 /// Standard pool writes `true` at instantiate (no threshold gate); creator
 /// pool flips it in the threshold-crossing commit path. Shared handlers
 /// read via `query_check_commit`.

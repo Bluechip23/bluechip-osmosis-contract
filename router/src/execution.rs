@@ -35,16 +35,19 @@
 
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
-    from_json, to_json_binary, Addr, Binary, Coin, CosmosMsg, DepsMut, Env, MessageInfo, Reply,
-    ReplyOn, Response, StdError, SubMsg, SubMsgResult, Timestamp, Uint128, WasmMsg,
+    from_json, to_json_binary, Addr, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
+    Reply, ReplyOn, Response, StdError, SubMsg, SubMsgResult, Timestamp, Uint128, WasmMsg,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use pool_factory_interfaces::asset::{TokenInfo, TokenType};
-use pool_factory_interfaces::routing::{PoolSwapCw20HookMsg, PoolSwapExecuteMsg, SwapOperation};
+use pool_factory_interfaces::routing::{
+    FactoryRouteQueryMsg, PoolSwapCw20HookMsg, PoolSwapExecuteMsg, SwapOperation,
+};
+use pool_factory_interfaces::RegisteredPoolResponse;
 
 use crate::error::RouterError;
 use crate::msg::{Cw20HookMsg, ExecuteMsg};
-use crate::state::MAX_HOPS;
+use crate::state::{CONFIG, MAX_HOPS};
 
 /// Reply IDs are offset by this base so that future router features can
 /// claim a different range without colliding with hop replies.
@@ -167,6 +170,18 @@ fn start_multi_hop(
         }
     }
     validate_route(&operations)?;
+
+    // Validate every hop's pool address against the factory registry BEFORE
+    // any funds move. `validate_route` only checks the route's internal
+    // consistency (shape, continuity, hop count) — it cannot tell a genuine
+    // pool from an arbitrary caller-supplied contract. Without this step the
+    // router would forward the user's offer to whatever address the
+    // (possibly malicious) frontend placed in `pool_addr`, with
+    // `minimum_receive` as the only backstop. Querying the factory makes the
+    // stored `factory_addr` load-bearing and bounds a hostile route to
+    // genuine, registered pools.
+    let factory_addr = CONFIG.load(deps.storage)?.factory_addr;
+    validate_route_pools_registered(deps.as_ref(), &factory_addr, &operations)?;
 
     let recipient_addr = match recipient {
         Some(r) => deps.api.addr_validate(&r)?,
@@ -364,6 +379,48 @@ pub fn handle_reply(_deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, R
         pool_addr,
         reason,
     })
+}
+
+/// Validate every hop's `pool_addr` against the factory registry.
+///
+/// Chain-state counterpart to [`validate_route`] (which only checks the
+/// route's internal shape). For each hop it asks the configured factory
+/// whether `pool_addr` is a registered Bluechip pool and, if so, confirms
+/// the hop's declared `(offer, ask)` are that pool's two real sides.
+/// Rejecting here — before any funds move and atomically with the rest of
+/// the route — prevents a malicious frontend from steering user funds
+/// through an arbitrary contract or a real pool with a mislabeled pair.
+fn validate_route_pools_registered(
+    deps: Deps,
+    factory_addr: &Addr,
+    operations: &[SwapOperation],
+) -> Result<(), RouterError> {
+    for (idx, op) in operations.iter().enumerate() {
+        let registered: Option<RegisteredPoolResponse> = deps.querier.query_wasm_smart(
+            factory_addr,
+            &FactoryRouteQueryMsg::PoolByAddress {
+                pool_addr: op.pool_addr.clone(),
+            },
+        )?;
+        let pool = registered.ok_or_else(|| RouterError::PoolNotRegistered {
+            hop_index: idx,
+            pool_addr: op.pool_addr.clone(),
+        })?;
+        // Confirm the hop's declared offer and ask are exactly the two
+        // sides of the registered pool. `validate_route` already rejects
+        // offer == ask, so requiring each to match a distinct registered
+        // side is equivalent to set-equality with the pool's pair.
+        let sides = &pool.pool_token_info;
+        let offer_ok = sides.iter().any(|s| s.equal(&op.offer_asset_info));
+        let ask_ok = sides.iter().any(|s| s.equal(&op.ask_asset_info));
+        if !offer_ok || !ask_ok {
+            return Err(RouterError::HopPairMismatch {
+                hop_index: idx,
+                pool_addr: op.pool_addr.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Validates a candidate route in isolation -- no chain state is read.
