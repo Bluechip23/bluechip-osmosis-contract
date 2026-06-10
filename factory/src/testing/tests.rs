@@ -5751,3 +5751,146 @@ mod pyth_cache_publish_time_tests {
         assert_eq!(publish_time, env.block.time.seconds());
     }
 }
+
+#[test]
+fn create_pair_sets_marketing_admin_to_creator() {
+    let mut deps = mock_dependencies(&[]);
+    setup_atom_pool(&mut deps);
+
+    let the_admin = addr0000();
+    let msg = FactoryInstantiate {
+        factory_admin_address: the_admin.clone(),
+        cw721_nft_contract_id: 58,
+        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        pyth_contract_addr_for_conversions: MockApi::default().addr_make("oracle0000").to_string(),
+        pyth_atom_usd_price_feed_id: "BLUECHIP".to_string(),
+        cw20_token_contract_id: 10,
+        create_pool_wasm_contract_id: 11,
+        standard_pool_wasm_contract_id: 0,
+        bluechip_wallet_address: ubluechip_addr(),
+        commit_fee_bluechip: Decimal::percent(1),
+        commit_fee_creator: Decimal::percent(5),
+        max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
+        creator_excess_liquidity_lock_days: 7,
+        atom_bluechip_anchor_pool_address: atom_bluechip_pool_addr(),
+        bluechip_mint_contract_address: None,
+        bluechip_denom: "ubluechip".to_string(),
+        atom_denom: "uatom".to_string(),
+        standard_pool_creation_fee_usd: cosmwasm_std::Uint128::new(1_000_000),
+        threshold_payout_amounts: Default::default(),
+        emergency_withdraw_delay_seconds: 86_400,
+    };
+    instantiate(deps.as_mut(), mock_env(), message_info(&the_admin, &[]), msg).unwrap();
+
+    let creator = make_addr("creator0001");
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&creator, &creation_fee_funds()),
+        ExecuteMsg::Create {
+            pool_msg: CreatePool {
+                pool_token_info: [
+                    TokenType::Native {
+                        denom: "ubluechip".to_string(),
+                    },
+                    TokenType::CreatorToken {
+                        contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
+                    },
+                ],
+            },
+            token_info: CreatorTokenInfo {
+                name: "Brand Token".to_string(),
+                symbol: "BRAND".to_string(),
+                decimal: 6,
+            },
+        },
+    )
+    .unwrap();
+
+    // The CW20 instantiate submessage must carry a marketing block with
+    // the creator as marketing admin — cw20-base permanently locks
+    // marketing (no logo / description / project, ever) when this is
+    // None at instantiation.
+    let token_init = res
+        .messages
+        .iter()
+        .find_map(|sub| match &sub.msg {
+            cosmwasm_std::CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Instantiate {
+                code_id, msg, ..
+            }) if *code_id == 10 => {
+                Some(cosmwasm_std::from_json::<crate::msg::TokenInstantiateMsg>(msg).unwrap())
+            }
+            _ => None,
+        })
+        .expect("create must instantiate the creator token CW20");
+
+    let marketing = token_init
+        .marketing
+        .expect("marketing must be set at instantiate or it is locked forever");
+    assert_eq!(marketing.marketing, Some(creator.to_string()));
+    assert_eq!(marketing.project, None);
+    assert_eq!(marketing.description, None);
+    assert!(marketing.logo.is_none());
+}
+
+#[test]
+fn pools_query_paginates_registry_in_pool_id_order() {
+    let mut deps = mock_dependencies(&[]);
+
+    for pool_id in 1u64..=5 {
+        let details = PoolDetails {
+            pool_id,
+            pool_token_info: [
+                TokenType::Native {
+                    denom: "ubluechip".to_string(),
+                },
+                TokenType::CreatorToken {
+                    contract_addr: Addr::unchecked(format!("token_{pool_id}")),
+                },
+            ],
+            creator_pool_addr: Addr::unchecked(format!("pool_{pool_id}")),
+            pool_kind: if pool_id % 2 == 0 {
+                pool_factory_interfaces::PoolKind::Standard
+            } else {
+                pool_factory_interfaces::PoolKind::Commit
+            },
+            commit_pool_ordinal: 0,
+        };
+        POOLS_BY_ID
+            .save(deps.as_mut().storage, pool_id, &details)
+            .unwrap();
+    }
+
+    // Full enumeration, ascending by pool_id.
+    let all = crate::query::query_pools(deps.as_ref(), None, None).unwrap();
+    assert_eq!(all.pools.len(), 5);
+    assert_eq!(
+        all.pools.iter().map(|p| p.pool_id).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5]
+    );
+    assert_eq!(all.pools[0].pool_addr, Addr::unchecked("pool_1"));
+    assert_eq!(
+        all.pools[1].pool_kind,
+        pool_factory_interfaces::PoolKind::Standard
+    );
+
+    // Page 1.
+    let page1 = crate::query::query_pools(deps.as_ref(), None, Some(2)).unwrap();
+    assert_eq!(
+        page1.pools.iter().map(|p| p.pool_id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    // Page 2 resumes after the last seen id.
+    let page2 = crate::query::query_pools(deps.as_ref(), Some(2), Some(2)).unwrap();
+    assert_eq!(
+        page2.pools.iter().map(|p| p.pool_id).collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    // Past the end: empty page signals end-of-data.
+    let page4 = crate::query::query_pools(deps.as_ref(), Some(5), Some(2)).unwrap();
+    assert!(page4.pools.is_empty());
+
+    // Limit is clamped to the max page size.
+    let clamped = crate::query::query_pools(deps.as_ref(), None, Some(10_000)).unwrap();
+    assert_eq!(clamped.pools.len(), 5);
+}

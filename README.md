@@ -531,6 +531,27 @@ The standard-pool reply handler will reject the transaction if the CW20 has a tr
 
 `last_commited { wallet }` (note the on-chain typo) returns the wallet's most recent commit timestamp and per-commit USD / bluechip amounts; useful for enforcing the 13-second per-wallet rate limit client-side before broadcasting. `pool_commits { pool_contract_address, min_payment_usd, after_timestamp, start_after, limit }` pages the full committer ledger for a pool — the response carries `committers` and a `page_count` (size of THIS page after filtering, not the pre-filter total).
 
+### Enumerating Pools
+
+```json
+{
+  "pools": { "start_after": null, "limit": 30 }
+}
+```
+
+Factory query. Paginated registry enumeration ordered by `pool_id` ascending — the way for explorers and integrators to answer "what pools exist?" without an event indexer. Each entry carries `pool_id`, `pool_addr`, `pool_token_info`, and `pool_kind` (`commit` | `standard`). Page with `start_after = <last pool_id>`; default page size 30, max 100; a page shorter than `limit` signals end-of-data.
+
+### Creator Token Branding
+
+The factory instantiates every creator token with cw20-base's `marketing` block set and the **pool creator as marketing admin**. (cw20-base permanently locks marketing when that field is omitted at instantiation — no logo, description, or project URL could ever be set.) Creators attach branding by executing on their token contract:
+
+```json
+{ "update_marketing": { "project": "https://...", "description": "...", "marketing": null } }
+{ "upload_logo": { "url": "https://.../logo.png" } }
+```
+
+Explorers can read it back via the standard cw20 `marketing_info {}` and `download_logo {}` queries.
+
 ### Creator Earnings Rollup
 
 ```json

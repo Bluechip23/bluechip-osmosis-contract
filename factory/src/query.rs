@@ -11,11 +11,12 @@ use cosmwasm_schema::{cw_serde, QueryResponses};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_json_binary, Addr, Binary, Deps, Env, QueryRequest, StdResult, Timestamp, Uint128,
+    to_json_binary, Addr, Binary, Deps, Env, Order, QueryRequest, StdResult, Timestamp, Uint128,
     WasmQuery,
 };
 use cw20::{Cw20QueryMsg, TokenInfoResponse};
-use pool_factory_interfaces::FactoryQueryMsg;
+use cw_storage_plus::Bound;
+use pool_factory_interfaces::{FactoryQueryMsg, PoolKind};
 
 #[cw_serde]
 pub struct CreatorTokenInfoResponse {
@@ -58,6 +59,26 @@ pub struct PoolCreationStatusResponse {
     pub status: CreationStatus,
 }
 
+/// Default / maximum page sizes for `QueryMsg::Pools`. Mirrors the
+/// bounds pattern used by the pool-side `PoolCommits` query so a single
+/// call can't walk an unbounded range.
+pub const POOLS_QUERY_DEFAULT_LIMIT: u32 = 30;
+pub const POOLS_QUERY_MAX_LIMIT: u32 = 100;
+
+/// One registry entry from `QueryMsg::Pools`.
+#[cw_serde]
+pub struct PoolListEntry {
+    pub pool_id: u64,
+    pub pool_addr: Addr,
+    pub pool_token_info: [TokenType; 2],
+    pub pool_kind: PoolKind,
+}
+
+#[cw_serde]
+pub struct PoolsResponse {
+    pub pools: Vec<PoolListEntry>,
+}
+
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
@@ -82,6 +103,16 @@ pub enum QueryMsg {
     /// the authoritative registry before sending funds to it.
     #[returns(Option<pool_factory_interfaces::RegisteredPoolResponse>)]
     PoolByAddress { pool_addr: String },
+    /// Paginated registry enumeration, ordered by pool_id ascending.
+    /// THE way for explorers and integrators to answer "what pools
+    /// exist?" without an event indexer. Page with
+    /// `start_after = last_entry.pool_id`; a page shorter than `limit`
+    /// (default 30, max 100) signals end-of-data.
+    #[returns(PoolsResponse)]
+    Pools {
+        start_after: Option<u64>,
+        limit: Option<u32>,
+    },
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -102,7 +133,35 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::PoolByAddress { pool_addr } => {
             to_json_binary(&query_pool_by_address(deps, pool_addr)?)
         }
+        QueryMsg::Pools { start_after, limit } => {
+            to_json_binary(&query_pools(deps, start_after, limit)?)
+        }
     }
+}
+
+pub fn query_pools(
+    deps: Deps,
+    start_after: Option<u64>,
+    limit: Option<u32>,
+) -> StdResult<PoolsResponse> {
+    let limit = limit
+        .unwrap_or(POOLS_QUERY_DEFAULT_LIMIT)
+        .min(POOLS_QUERY_MAX_LIMIT) as usize;
+    let start = start_after.map(Bound::exclusive);
+    let pools = POOLS_BY_ID
+        .range(deps.storage, start, None, Order::Ascending)
+        .take(limit)
+        .map(|item| {
+            let (pool_id, details) = item?;
+            Ok(PoolListEntry {
+                pool_id,
+                pool_addr: details.creator_pool_addr,
+                pool_token_info: details.pool_token_info,
+                pool_kind: details.pool_kind,
+            })
+        })
+        .collect::<StdResult<Vec<_>>>()?;
+    Ok(PoolsResponse { pools })
 }
 
 /// Resolve a pool *contract address* against the registry. Returns the
