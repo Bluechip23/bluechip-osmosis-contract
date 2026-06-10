@@ -362,6 +362,18 @@ pub(crate) fn execute_create_creator_pool(
                 // additional supply be created.
                 cap: Some(factory_cw20.threshold_payout_amounts.total_mint()?),
             }),
+            // Marketing admin = the pool creator. cw20-base permanently
+            // locks marketing when this is None at instantiation, which
+            // would leave every creator token unable to ever set a logo,
+            // description, or project URL. Project/description/logo start
+            // empty; the creator fills them in via UpdateMarketing /
+            // UploadLogo on the token contract.
+            marketing: Some(crate::msg::InstantiateMarketingInfo {
+                project: None,
+                description: None,
+                marketing: Some(info.sender.to_string()),
+                logo: None,
+            }),
         })?,
         //no initial balance. waits until threshold is crossed to mint creator tokens.
         funds: vec![],

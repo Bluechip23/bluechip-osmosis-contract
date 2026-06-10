@@ -264,7 +264,12 @@ pub enum QueryMsg {
         start_after: Option<String>,
         limit: Option<u32>,
     },
+    // NOTE: the canonical wire name carries an on-chain typo
+    // ("last_commited"). The serde alias also accepts the correct
+    // spelling so new clients don't have to ship the typo; renaming
+    // outright would break every deployed integration.
     #[returns(LastCommittedResponse)]
+    #[serde(alias = "last_committed")]
     LastCommited { wallet: String },
     #[returns(PoolInfoResponse)]
     PoolInfo {},

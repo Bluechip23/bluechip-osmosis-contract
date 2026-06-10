@@ -1,7 +1,7 @@
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Binary, Uint128};
 
-use cw20::{Cw20Coin, MinterResponse};
+use cw20::{Cw20Coin, Logo, MinterResponse};
 
 use crate::asset::TokenType;
 use crate::pool_struct::{CommitFeeInfo, CreatePool, PoolConfigUpdate, RecoveryType};
@@ -265,6 +265,18 @@ pub struct FactoryInstantiateResponse {
     pub factory: FactoryInstantiate,
 }
 
+/// Mirrors cw20-base's `InstantiateMarketingInfo`. Defined locally so the
+/// factory doesn't need a cw20-base dependency just for one wire struct.
+#[cw_serde]
+pub struct InstantiateMarketingInfo {
+    pub project: Option<String>,
+    pub description: Option<String>,
+    /// Address allowed to call `UpdateMarketing` / `UploadLogo` on the
+    /// token after instantiation.
+    pub marketing: Option<String>,
+    pub logo: Option<Logo>,
+}
+
 #[cw_serde]
 pub struct TokenInstantiateMsg {
     pub name: String,
@@ -272,6 +284,12 @@ pub struct TokenInstantiateMsg {
     pub decimals: u8,
     pub initial_balances: Vec<Cw20Coin>,
     pub mint: Option<MinterResponse>,
+    /// cw20-base locks marketing forever when this is `None` at
+    /// instantiation (`UpdateMarketing`/`UploadLogo` check the marketing
+    /// admin, which can never be set later). The factory always passes
+    /// `Some` with the pool creator as marketing admin so creators can
+    /// attach a logo, description, and project URL to their token.
+    pub marketing: Option<InstantiateMarketingInfo>,
 }
 
 #[cw_serde]

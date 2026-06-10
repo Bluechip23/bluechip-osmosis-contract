@@ -674,3 +674,19 @@ fn test_query_creator_earnings_pot_and_locked_excess() {
     let resp: CreatorEarningsResponse = from_json(res).unwrap();
     assert!(resp.excess.expect("excess still unclaimed").claimable_now);
 }
+
+#[test]
+fn last_commited_query_accepts_both_spellings() {
+    // The canonical wire name has a typo ("last_commited"); the serde
+    // alias must also accept the correct spelling so new integrations
+    // don't have to reproduce it.
+    let typo: QueryMsg = from_json(br#"{"last_commited": {"wallet": "bluechip1fan"}}"#).unwrap();
+    let correct: QueryMsg =
+        from_json(br#"{"last_committed": {"wallet": "bluechip1fan"}}"#).unwrap();
+    for msg in [typo, correct] {
+        match msg {
+            QueryMsg::LastCommited { wallet } => assert_eq!(wallet, "bluechip1fan"),
+            other => panic!("expected LastCommited, got {other:?}"),
+        }
+    }
+}
