@@ -6,6 +6,7 @@
 //! into every test setup. `integration_tests` contains the actual
 //! end-to-end test cases driven by `cw-multi-test`.
 
+pub mod mock_factory;
 pub mod mock_pool;
 
 #[cfg(test)]

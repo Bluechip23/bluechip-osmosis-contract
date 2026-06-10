@@ -47,6 +47,21 @@ pub enum RouterError {
         reason: String,
     },
 
+    /// Hop `pool_addr` is not a pool registered with the configured
+    /// factory. Routing funds to an unregistered (caller-supplied) address
+    /// is refused: it is the primary defense against a malicious frontend
+    /// pointing a hop at a fund-stealing contract.
+    #[error("Hop {hop_index} targets pool {pool_addr}, which is not registered with the factory")]
+    PoolNotRegistered { hop_index: usize, pool_addr: String },
+
+    /// Hop's declared (offer, ask) pair does not match the registered
+    /// pool's two assets. Caught before any funds move so a route cannot
+    /// be steered through a real pool with a mislabeled pair.
+    #[error(
+        "Hop {hop_index} on pool {pool_addr} declares an offer/ask pair that is not this pool's pair"
+    )]
+    HopPairMismatch { hop_index: usize, pool_addr: String },
+
     #[error(
         "Pool {pool_addr} at hop {hop_index} is still in its commit phase \
          (raised {raised}, target {target})"

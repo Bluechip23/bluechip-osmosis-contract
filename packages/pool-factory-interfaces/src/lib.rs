@@ -52,6 +52,25 @@ impl Default for PoolKind {
         Self::Commit
     }
 }
+
+/// Registry-membership + canonical-pair record for a pool *contract
+/// address*, returned by the factory's `PoolByAddress` query. The factory
+/// returns `Some(..)` only for an address it created and registered, and
+/// `None` for any other address.
+///
+/// Consumed by the router to validate caller-supplied hop `pool_addr`s
+/// against the factory's authoritative registry before routing user funds
+/// through them. Without this, the router would forward funds to whatever
+/// contract address a (possibly malicious) frontend supplied, with
+/// `minimum_receive` as the only guard. `pool_token_info` lets the caller
+/// additionally confirm the hop's declared (offer, ask) are the pool's two
+/// real sides.
+#[cw_serde]
+pub struct RegisteredPoolResponse {
+    pub pool_id: u64,
+    pub pool_token_info: [TokenType; 2],
+    pub pool_kind: PoolKind,
+}
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum FactoryQueryMsg {

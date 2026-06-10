@@ -117,3 +117,17 @@ pub enum RouterPoolCommitStatus {
     InProgress { raised: Uint128, target: Uint128 },
     FullyCommitted,
 }
+
+/// Subset of the *factory's* `QueryMsg` the router needs to validate that a
+/// caller-supplied hop address is a genuine, registered Bluechip pool.
+///
+/// Like the pool-query mirrors above, this is intentionally byte-identical
+/// to the matching variant of `factory::query::QueryMsg` so the router can
+/// query the factory without depending on the factory crate. The variant
+/// name and field MUST stay in lockstep with that enum; the factory returns
+/// `Option<crate::RegisteredPoolResponse>` for this query.
+#[cw_serde]
+pub enum FactoryRouteQueryMsg {
+    /// Mirrors `factory::query::QueryMsg::PoolByAddress`.
+    PoolByAddress { pool_addr: String },
+}

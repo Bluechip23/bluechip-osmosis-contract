@@ -8,11 +8,14 @@
 //! `validate_pool_threshold_payments` — stay in the creator-pool crate.
 
 use crate::error::ContractError;
-use crate::state::{PoolFeeState, PoolSpecs, PoolState, REENTRANCY_LOCK, USER_LAST_COMMIT};
+use crate::state::{
+    PoolFeeState, PoolSpecs, PoolState, REENTRANCY_LOCK, USER_LAST_COMMIT, USER_LAST_LIQUIDITY_OP,
+};
 use cosmwasm_std::{
     Addr, BankMsg, Coin, CosmosMsg, Decimal, Decimal256, DepsMut, Env, StdError, StdResult,
     Timestamp, Uint128,
 };
+use cw_storage_plus::Map;
 
 /// Run `body` under the contract-wide `REENTRANCY_LOCK`.
 ///
@@ -85,14 +88,48 @@ pub fn update_pool_fee_growth(
     Ok(())
 }
 
+/// Swap / commit rate limit. Keyed in `USER_LAST_COMMIT`.
+///
+/// On the CW20 swap path `sender` may be attacker-influenced (a hostile
+/// standard-pool token controls `cw20_msg.sender`). That is tolerable here
+/// because this map gates only swaps/commits — never liquidity withdrawals,
+/// which live in the separate `USER_LAST_LIQUIDITY_OP` map. See
+/// `check_liquidity_rate_limit` and the `USER_LAST_LIQUIDITY_OP` doc.
 pub fn check_rate_limit(
     deps: &mut DepsMut,
     env: &Env,
     pool_specs: &PoolSpecs,
     sender: &Addr,
 ) -> Result<(), ContractError> {
-    if let Some(last_commit_time) = USER_LAST_COMMIT.may_load(deps.storage, sender)? {
-        let time_since_last = env.block.time.seconds().saturating_sub(last_commit_time);
+    enforce_min_interval(deps, env, pool_specs, sender, &USER_LAST_COMMIT)
+}
+
+/// Liquidity-operation (deposit / add / remove) rate limit. Keyed in
+/// `USER_LAST_LIQUIDITY_OP`, deliberately distinct from the swap/commit
+/// map so that no swap — including a hostile-CW20 swap that spoofs
+/// `cw20_msg.sender` — can ever stamp an LP's withdrawal cooldown. Every
+/// caller passes the real `info.sender`, which cannot be spoofed.
+pub fn check_liquidity_rate_limit(
+    deps: &mut DepsMut,
+    env: &Env,
+    pool_specs: &PoolSpecs,
+    sender: &Addr,
+) -> Result<(), ContractError> {
+    enforce_min_interval(deps, env, pool_specs, sender, &USER_LAST_LIQUIDITY_OP)
+}
+
+/// Shared min-interval check used by both rate limiters. Reads the last
+/// action time from `last_action`, rejects if inside the cooldown, and
+/// otherwise stamps the current block time.
+fn enforce_min_interval(
+    deps: &mut DepsMut,
+    env: &Env,
+    pool_specs: &PoolSpecs,
+    sender: &Addr,
+    last_action: &Map<&Addr, u64>,
+) -> Result<(), ContractError> {
+    if let Some(last_action_time) = last_action.may_load(deps.storage, sender)? {
+        let time_since_last = env.block.time.seconds().saturating_sub(last_action_time);
 
         if time_since_last < pool_specs.min_commit_interval {
             let wait_time = pool_specs
@@ -102,7 +139,7 @@ pub fn check_rate_limit(
         }
     }
 
-    USER_LAST_COMMIT.save(deps.storage, sender, &env.block.time.seconds())?;
+    last_action.save(deps.storage, sender, &env.block.time.seconds())?;
 
     Ok(())
 }
@@ -205,5 +242,42 @@ mod tests {
         let past = Timestamp::from_seconds(999_999);
         let r = enforce_transaction_deadline(current, Some(past));
         assert!(matches!(r, Err(ContractError::TransactionExpired {})));
+    }
+
+    #[test]
+    fn swap_and_liquidity_rate_limits_use_independent_maps() {
+        // The hostile-CW20 withdrawal-freeze fix relies on swaps/commits
+        // (`USER_LAST_COMMIT`) and liquidity ops (`USER_LAST_LIQUIDITY_OP`)
+        // keying *separate* cooldown maps, so a swap — whose CW20 path can
+        // be made to stamp an arbitrary address — can never block a
+        // withdrawal. This pins that independence.
+        use crate::state::PoolSpecs;
+        use cosmwasm_std::testing::{mock_dependencies, mock_env};
+        use cosmwasm_std::{Addr, Decimal};
+
+        let mut deps = mock_dependencies();
+        let env = mock_env();
+        let specs = PoolSpecs {
+            lp_fee: Decimal::permille(3),
+            min_commit_interval: 13,
+        };
+        let user = Addr::unchecked("user");
+
+        // A swap stamps the swap/commit cooldown at the current block time.
+        check_rate_limit(&mut deps.as_mut(), &env, &specs, &user).unwrap();
+        // A second swap in the same block is correctly rate-limited...
+        assert!(matches!(
+            check_rate_limit(&mut deps.as_mut(), &env, &specs, &user),
+            Err(ContractError::TooFrequentCommits { .. })
+        ));
+        // ...but a liquidity op in the SAME block is NOT blocked: it reads
+        // the separate liquidity map, which the swap never touched. Before
+        // the fix this shared one map and would have tripped here.
+        check_liquidity_rate_limit(&mut deps.as_mut(), &env, &specs, &user).unwrap();
+        // The liquidity map enforces its own cooldown independently.
+        assert!(matches!(
+            check_liquidity_rate_limit(&mut deps.as_mut(), &env, &specs, &user),
+            Err(ContractError::TooFrequentCommits { .. })
+        ));
     }
 }

@@ -21,7 +21,9 @@ use pool_factory_interfaces::cw721_msgs::{Action, Cw721ExecuteMsg};
 
 use crate::asset::TokenType;
 use crate::error::ContractError;
-use crate::generic::{check_rate_limit, enforce_transaction_deadline, with_reentrancy_guard};
+use crate::generic::{
+    check_liquidity_rate_limit, enforce_transaction_deadline, with_reentrancy_guard,
+};
 use crate::liquidity_helpers::{
     calc_liquidity_for_deposit, check_slippage, effective_fee_size_multiplier,
     enforce_standard_pool_min_position,
@@ -308,7 +310,7 @@ fn execute_deposit_liquidity_dispatch(
         // atomic-exploit chains). Rate-limit Err propagates out of the
         // closure; the helper still clears the lock on the way back.
         let pool_specs: PoolSpecs = POOL_SPECS.load(deps.storage)?;
-        check_rate_limit(&mut deps, &env, &pool_specs, &info.sender)?;
+        check_liquidity_rate_limit(&mut deps, &env, &pool_specs, &info.sender)?;
         execute_deposit_liquidity_inner(
             deps,
             env,

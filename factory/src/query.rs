@@ -75,6 +75,13 @@ pub enum QueryMsg {
     /// when creation completed cleanly and the entry was reaped.
     #[returns(Option<PoolCreationStatusResponse>)]
     PoolCreationStatus { pool_id: u64 },
+    /// Registry lookup by pool *contract address*. Returns the pool's
+    /// canonical pair + kind if `pool_addr` is a registered Bluechip pool,
+    /// or `None` otherwise. Lets an integrator (notably the multi-hop
+    /// router) validate an untrusted, caller-supplied pool address against
+    /// the authoritative registry before sending funds to it.
+    #[returns(Option<pool_factory_interfaces::RegisteredPoolResponse>)]
+    PoolByAddress { pool_addr: String },
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -92,7 +99,28 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::PoolCreationStatus { pool_id } => {
             to_json_binary(&query_pool_creation_status(deps, pool_id)?)
         }
+        QueryMsg::PoolByAddress { pool_addr } => {
+            to_json_binary(&query_pool_by_address(deps, pool_addr)?)
+        }
     }
+}
+
+/// Resolve a pool *contract address* against the registry. Returns the
+/// pool's canonical pair + kind, or `None` if the address is not a
+/// registered Bluechip pool. Reuses the same `lookup_pool_by_addr` helper
+/// the oracle/notify auth paths use, so a router validating a hop address
+/// sees exactly the registry the factory itself trusts.
+pub fn query_pool_by_address(
+    deps: Deps,
+    pool_addr: String,
+) -> StdResult<Option<pool_factory_interfaces::RegisteredPoolResponse>> {
+    let addr = deps.api.addr_validate(&pool_addr)?;
+    let details = crate::execute::oracle::lookup_pool_by_addr(deps, &addr)?;
+    Ok(details.map(|d| pool_factory_interfaces::RegisteredPoolResponse {
+        pool_id: d.pool_id,
+        pool_token_info: d.pool_token_info,
+        pool_kind: d.pool_kind,
+    }))
 }
 
 pub fn query_pool_creation_status(

@@ -23,7 +23,7 @@ use crate::msg::{
     ConfigResponse, Cw20HookMsg, ExecuteMsg as RouterExecuteMsg,
     InstantiateMsg as RouterInstantiateMsg, QueryMsg as RouterQueryMsg, SimulateMultiHopResponse,
 };
-use crate::testing::mock_pool;
+use crate::testing::{mock_factory, mock_pool};
 
 const BLUECHIP_DENOM: &str = "ubluechip";
 const POOL_RESERVE: u128 = 1_000_000;
@@ -73,6 +73,27 @@ fn mock_pool_contract() -> Box<dyn Contract<Empty>> {
     ))
 }
 
+fn mock_factory_contract() -> Box<dyn Contract<Empty>> {
+    Box::new(ContractWrapper::new(
+        mock_factory::execute,
+        mock_factory::instantiate,
+        mock_factory::query,
+    ))
+}
+
+/// The canonical pair every mock pool in this harness wraps:
+/// `[Native(bluechip), CreatorToken(creator)]` — matching `instantiate_pool`.
+fn pool_pair(creator: &Addr) -> [TokenType; 2] {
+    [
+        TokenType::Native {
+            denom: BLUECHIP_DENOM.to_string(),
+        },
+        TokenType::CreatorToken {
+            contract_addr: creator.clone(),
+        },
+    ]
+}
+
 fn cw20_contract() -> Box<dyn Contract<Empty>> {
     Box::new(ContractWrapper::new(
         cw20_base::contract::execute,
@@ -85,7 +106,6 @@ fn setup_world() -> World {
     let api = MockApiBech32::new("cosmwasm");
     let user = api.addr_make("user");
     let admin = api.addr_make("admin");
-    let factory = api.addr_make("factory");
 
     let user_for_init = user.clone();
     let admin_for_init = admin.clone();
@@ -112,6 +132,7 @@ fn setup_world() -> World {
 
     let cw20_code = app.store_code(cw20_contract());
     let pool_code = app.store_code(mock_pool_contract());
+    let factory_code = app.store_code(mock_factory_contract());
     let router_code = app.store_code(router_contract());
 
     let creator_a =
@@ -143,6 +164,44 @@ fn setup_world() -> World {
         true,
     );
     let pool_empty = instantiate_pool(&mut app, pool_code, &admin, &creator_empty, true, false);
+
+    // Stand up the mock factory with every pool registered against its
+    // canonical pair, then point the router at it. The router queries this
+    // for `PoolByAddress` on each hop, so an unregistered address is
+    // refused before any funds move.
+    let factory = app
+        .instantiate_contract(
+            factory_code,
+            admin.clone(),
+            &mock_factory::InstantiateMsg {
+                pools: vec![
+                    mock_factory::RegistryEntry {
+                        pool_addr: pool_a.to_string(),
+                        pool_token_info: pool_pair(&creator_a),
+                    },
+                    mock_factory::RegistryEntry {
+                        pool_addr: pool_b.to_string(),
+                        pool_token_info: pool_pair(&creator_b),
+                    },
+                    mock_factory::RegistryEntry {
+                        pool_addr: pool_c.to_string(),
+                        pool_token_info: pool_pair(&creator_c),
+                    },
+                    mock_factory::RegistryEntry {
+                        pool_addr: pool_uncommitted.to_string(),
+                        pool_token_info: pool_pair(&creator_uncommitted),
+                    },
+                    mock_factory::RegistryEntry {
+                        pool_addr: pool_empty.to_string(),
+                        pool_token_info: pool_pair(&creator_empty),
+                    },
+                ],
+            },
+            &[],
+            "mock_factory",
+            None,
+        )
+        .unwrap();
 
     let router = app
         .instantiate_contract(
@@ -394,6 +453,98 @@ fn single_hop_native_passthrough() {
     assert_eq!(
         cw20_balance(&world.app, &world.creator_a, &world.router),
         Uint128::zero()
+    );
+}
+
+#[test]
+fn route_through_unregistered_pool_rejected() {
+    let mut world = setup_world();
+
+    let bluechip = TokenType::Native {
+        denom: BLUECHIP_DENOM.to_string(),
+    };
+    let creator_a = TokenType::CreatorToken {
+        contract_addr: world.creator_a.clone(),
+    };
+
+    // Point the hop at a real on-chain contract (the creator-A CW20) that
+    // is NOT a registered pool — the shape a malicious frontend would use
+    // to steer funds to a contract it controls. Without registry
+    // validation the router would forward the user's bluechip to it; the
+    // fix must refuse before any funds move.
+    let rogue_pool = world.creator_a.clone();
+    let route = vec![op(&rogue_pool, bluechip, creator_a)];
+
+    let amount = Uint128::new(50_000);
+    let user_before = bank_balance(&world.app, &world.user, BLUECHIP_DENOM);
+
+    let err = world
+        .app
+        .execute_contract(
+            world.user.clone(),
+            world.router.clone(),
+            &RouterExecuteMsg::ExecuteMultiHop {
+                operations: route,
+                minimum_receive: Uint128::new(1),
+                deadline: None,
+                recipient: None,
+            },
+            &[Coin::new(amount.u128(), BLUECHIP_DENOM)],
+        )
+        .unwrap_err();
+
+    assert!(
+        err.root_cause().to_string().contains("not registered"),
+        "expected PoolNotRegistered, got: {err}"
+    );
+
+    // The whole tx reverted atomically: the user's bluechip is untouched
+    // and nothing is stranded in the router.
+    assert_eq!(
+        bank_balance(&world.app, &world.user, BLUECHIP_DENOM),
+        user_before
+    );
+    assert_eq!(
+        bank_balance(&world.app, &world.router, BLUECHIP_DENOM),
+        Uint128::zero()
+    );
+}
+
+#[test]
+fn route_with_mislabeled_pair_rejected() {
+    let mut world = setup_world();
+
+    let bluechip = TokenType::Native {
+        denom: BLUECHIP_DENOM.to_string(),
+    };
+    // Ask for creator B out of pool A, whose registered pair is
+    // [bluechip, creator A]. The hop targets a genuine, registered pool
+    // but declares a side that pool does not trade — rejected by the
+    // pair-match half of the registry check before any funds move.
+    let creator_b = TokenType::CreatorToken {
+        contract_addr: world.creator_b.clone(),
+    };
+    let route = vec![op(&world.pool_a, bluechip, creator_b)];
+
+    let amount = Uint128::new(50_000);
+    let err = world
+        .app
+        .execute_contract(
+            world.user.clone(),
+            world.router.clone(),
+            &RouterExecuteMsg::ExecuteMultiHop {
+                operations: route,
+                minimum_receive: Uint128::new(1),
+                deadline: None,
+                recipient: None,
+            },
+            &[Coin::new(amount.u128(), BLUECHIP_DENOM)],
+        )
+        .unwrap_err();
+
+    assert!(
+        err.root_cause().to_string().contains("not this pool's pair"),
+        "expected HopPairMismatch, got: {err}"
     );
 }
 

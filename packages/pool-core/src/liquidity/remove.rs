@@ -13,7 +13,9 @@
 use cosmwasm_std::{DepsMut, Env, MessageInfo, Response, StdError, Timestamp, Uint128};
 
 use crate::error::ContractError;
-use crate::generic::{check_rate_limit, enforce_transaction_deadline, with_reentrancy_guard};
+use crate::generic::{
+    check_liquidity_rate_limit, enforce_transaction_deadline, with_reentrancy_guard,
+};
 use crate::liquidity_helpers::{
     build_fee_transfer_msgs, calc_capped_fees_with_clip, calculate_fees_owed_split_pair,
     check_ratio_deviation, check_slippage, effective_fee_size_multiplier,
@@ -454,7 +456,7 @@ pub fn execute_remove_all_liquidity(
     with_reentrancy_guard(deps, move |mut deps| {
         let pool_specs: PoolSpecs = POOL_SPECS.load(deps.storage)?;
         let sender = info.sender.clone();
-        check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
+        check_liquidity_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
         remove_all_liquidity(
             &mut deps,
             env,
@@ -484,7 +486,7 @@ pub fn execute_remove_partial_liquidity(
     with_reentrancy_guard(deps, move |mut deps| {
         let pool_specs: PoolSpecs = POOL_SPECS.load(deps.storage)?;
         let sender = info.sender.clone();
-        check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
+        check_liquidity_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
         remove_partial_liquidity(
             &mut deps,
             env,
