@@ -12,15 +12,16 @@
 4. [Subscribe Button (Commit)](#4-subscribe-button-commit)
 5. [Buy Button (Swap Bluechips for Creator Tokens)](#5-buy-button-swap-bluechips-for-creator-tokens)
 6. [Sell Button (Swap Creator Tokens for Bluechips)](#6-sell-button-swap-creator-tokens-for-bluechips)
-7. [Add Liquidity](#7-add-liquidity)
-8. [Remove Liquidity](#8-remove-liquidity)
-9. [Collect Fees](#9-collect-fees)
-10. [Create a Pool](#10-create-a-pool)
-11. [Querying Pool Info (Read-Only)](#11-querying-pool-info-read-only)
-12. [Granting Special Privileges to Committed Users](#12-granting-special-privileges-to-committed-users)
-13. [Full Working Example Page](#13-full-working-example-page)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Contract Address Reference](#15-contract-address-reference)
+7. [Cross-Token Swaps (Router)](#7-cross-token-swaps-router)
+8. [Add Liquidity](#8-add-liquidity)
+9. [Remove Liquidity](#9-remove-liquidity)
+10. [Collect Fees](#10-collect-fees)
+11. [Create a Pool](#11-create-a-pool)
+12. [Querying Pool Info (Read-Only)](#12-querying-pool-info-read-only)
+13. [Granting Special Privileges to Committed Users](#13-granting-special-privileges-to-committed-users)
+14. [Full Working Example Page](#14-full-working-example-page)
+15. [Troubleshooting](#15-troubleshooting)
+16. [Contract Address Reference](#16-contract-address-reference)
 
 ---
 
@@ -480,7 +481,7 @@ async function handleBuy() {
 
 The **Sell** button lets people swap their creator tokens back into Bluechip tokens. This uses the CW20 `send` mechanism — the tokens are sent to the pool contract with an embedded swap instruction.
 
-> **Important:** Selling creator tokens requires the CW20 token contract address, which is different from the pool address. You can find this by querying the pool's `pair` endpoint (see [Section 11](#11-querying-pool-info-read-only)).
+> **Important:** Selling creator tokens requires the CW20 token contract address, which is different from the pool address. You can find this by querying the pool's `pair` endpoint (see [Section 12](#12-querying-pool-info-read-only)).
 
 ```html
 <!-- ============================================================ -->
@@ -614,7 +615,92 @@ async function handleSell() {
 
 ---
 
-## 7. Add Liquidity
+## 7. Cross-Token Swaps (Router)
+
+Creator tokens never share a pool with each other — every pair trades through bluechip. To let a fan swap *another creator's token* directly into yours, use the **router contract**: it executes the whole route (up to **3 hops**) in one atomic transaction and validates every hop's pool against the factory registry before moving funds.
+
+> **Slippage model:** the router takes **no per-hop spread parameters**. Protection comes from `minimum_receive` on the final token — simulate first with `simulate_multi_hop`, then set `minimum_receive` a tolerance below the simulated output. If any hop moves the price so the final amount lands short, the entire route reverts; partial swaps cannot strand funds mid-route.
+
+Add the router address to your config block: `routerAddress: "bluechip1router_address_here"`.
+
+```html
+<script>
+async function crossTokenSwap(fromToken, fromPool, toToken, toPool, amountMicro, slippagePct) {
+    // 1. Build the route: TOKEN_A -> bluechip -> TOKEN_B.
+    //    (For bluechip -> TOKEN_B keep only the second hop;
+    //     for TOKEN_A -> bluechip keep only the first.)
+    var route = [
+        {
+            pool_addr:        fromPool,
+            offer_asset_info: { creator_token: { contract_addr: fromToken } },
+            ask_asset_info:   { bluechip: { denom: BLUECHIP_CONFIG.nativeDenom } }
+        },
+        {
+            pool_addr:        toPool,
+            offer_asset_info: { bluechip: { denom: BLUECHIP_CONFIG.nativeDenom } },
+            ask_asset_info:   { creator_token: { contract_addr: toToken } }
+        }
+    ];
+
+    // 2. Simulate to learn the expected output and size minimum_receive.
+    var sim = await window.bluechipClient.queryContractSmart(
+        BLUECHIP_CONFIG.routerAddress,
+        { simulate_multi_hop: { operations: route, offer_amount: amountMicro } }
+    );
+    console.log("Expected out:", sim.final_amount,
+                "per-hop:", sim.intermediate_amounts,
+                "impact:", sim.price_impact);
+
+    var slipBps    = Math.round(slippagePct * 100);
+    var minReceive = (BigInt(sim.final_amount) * BigInt(10000 - slipBps) / BigInt(10000)).toString();
+    var deadlineNs = ((Date.now() + 20 * 60 * 1000) * 1000000).toString();
+
+    var hopArgs = {
+        operations:      route,
+        minimum_receive: minReceive,
+        deadline:        deadlineNs,
+        recipient:       null
+    };
+
+    // 3a. First hop offers a CW20: send the tokens to the router with
+    //     the hook embedded (the router takes custody per hop).
+    var result = await window.bluechipClient.execute(
+        window.bluechipAddress,
+        fromToken,                              // execute on the CW20
+        {
+            send: {
+                contract: BLUECHIP_CONFIG.routerAddress,
+                amount:   amountMicro,
+                msg:      btoa(JSON.stringify({ execute_multi_hop: hopArgs }))
+            }
+        },
+        { amount: [], gas: "900000" },
+        "Cross-Token Swap",
+        []
+    );
+
+    // 3b. If the first hop offers native bluechip instead, call the
+    //     router directly and attach the funds:
+    //
+    //   await window.bluechipClient.execute(
+    //       window.bluechipAddress,
+    //       BLUECHIP_CONFIG.routerAddress,
+    //       { execute_multi_hop: hopArgs },
+    //       { amount: [], gas: "900000" },
+    //       "Cross-Token Swap",
+    //       [{ denom: BLUECHIP_CONFIG.nativeDenom, amount: amountMicro }]
+    //   );
+
+    return result.transactionHash;
+}
+</script>
+```
+
+Both pools in the route must be past their threshold (active AMMs). Get the router address from the BlueChip team alongside the factory address.
+
+---
+
+## 8. Add Liquidity
 
 Liquidity providers earn trading fees. When you add liquidity, you receive an NFT that represents your position. You must provide **both** Bluechip tokens and creator tokens in the correct ratio.
 
@@ -792,7 +878,7 @@ async function handleAddLiquidity() {
 
 ---
 
-## 8. Remove Liquidity
+## 9. Remove Liquidity
 
 You can remove liquidity three ways:
 - **By Amount** — Remove a specific amount of liquidity units
@@ -1005,7 +1091,7 @@ async function handleRemoveLiquidity() {
 
 ---
 
-## 9. Collect Fees
+## 10. Collect Fees
 
 If you have a liquidity position (NFT), you can collect your accumulated trading fees **without** removing your liquidity. Fees are paid out in both Bluechip and creator tokens.
 
@@ -1112,7 +1198,7 @@ async function handleCollectFees() {
 
 ---
 
-## 10. Create a Pool
+## 11. Create a Pool
 
 The factory exposes two distinct creation paths. Pick one based on what you want to ship:
 
@@ -1391,7 +1477,7 @@ async function handleCreatePool() {
 
 ---
 
-## 11. Querying Pool Info (Read-Only)
+## 12. Querying Pool Info (Read-Only)
 
 These queries don't require a wallet connection — they're read-only. You can use them to show pool status on your site.
 
@@ -1513,7 +1599,7 @@ async function getCreatorTokenAddress(poolAddress) {
 
 ---
 
-## 12. Granting Special Privileges to Committed Users
+## 13. Granting Special Privileges to Committed Users
 
 Every commit writes a permanent, public record to your pool's ledger: who committed, how much (in USD and bluechip), and when. After the threshold, supporters also receive your creator tokens. Your website can read either of these to give supporters **special privileges** — subscriber-only pages, download links, badges, Discord roles, early access, anything you can gate.
 
@@ -1773,7 +1859,7 @@ watchCommits(function (commit) {
 
 ---
 
-## 13. Full Working Example Page
+## 14. Full Working Example Page
 
 Here's a complete, self-contained HTML page you can save and use. It includes wallet connection, subscribe, buy, sell, and fee collection all on one page.
 
@@ -1917,7 +2003,7 @@ Here's a complete, self-contained HTML page you can save and use. It includes wa
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
@@ -1929,6 +2015,9 @@ Here's a complete, self-contained HTML page you can save and use. It includes wa
 | **"Insufficient commit-pool creation fee" / "Insufficient creation fee"** | The attached bluechip amount is below the oracle-derived USD fee. Re-query the required amount (it changes with bluechip's USD price) and re-attach |
 | **"creation fee is disabled; do not attach any funds"** | The factory currently has the creation fee set to zero. Pass an empty `funds` array on these calls |
 | **"rate limited"** | Commits have a 13-second cooldown per wallet. Wait and try again |
+| **"Route exceeds the maximum of 3 hops"** | The router caps routes at 3 hops. Any creator-token pair needs at most 2 (token → bluechip → token) |
+| **"...not registered with the factory" (router)** | A hop's pool address is not in the factory registry. Use addresses from the factory's `pools` query |
+| **Router swap reverts on minimum_receive** | Price moved past your tolerance between simulation and execution. Re-quote and retry, or widen slippage slightly |
 | **"Commit too small: $X USD (minimum $Y USD ...)"** | Each pool enforces a minimum commit value in USD (separate pre- and post-threshold floors). Increase the amount |
 | **"Pool is not fully committed"** | Buy/Sell only work after the pool crosses the $25,000 threshold. Use Subscribe instead |
 | **"You do not own this position"** | Double-check your Position ID. Query `positions_by_owner` to find your positions |
@@ -1937,7 +2026,7 @@ Here's a complete, self-contained HTML page you can save and use. It includes wa
 
 ---
 
-## 15. Contract Address Reference
+## 16. Contract Address Reference
 
 These are the addresses you need. Get them from the BlueChip team or your block explorer:
 
