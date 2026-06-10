@@ -448,6 +448,29 @@ pub fn calc_liquidity_for_deposit(
             return Err(ContractError::InsufficientLiquidity {});
         }
 
+        // First deposit into a genuinely empty pool must seed BOTH sides at
+        // or above the protocol reserve floor. A first deposit's reserves
+        // become exactly (final_amount0, final_amount1) (credited in
+        // `execute_deposit_liquidity`), and the geometric-mean check below
+        // is NOT sufficient on its own: a highly asymmetric seed such as
+        // (20, 500_000_000) yields raw_liquidity = sqrt(20·5e8) = 100_000,
+        // far above MINIMUM_LIQUIDITY, yet leaves reserve0 at 20 — below the
+        // floor that the swap path (which rejects reserves < MINIMUM_LIQUIDITY)
+        // and `maybe_auto_pause_on_low_liquidity` both assume every live pool
+        // upholds. Enforce the per-side floor here so a pool can never be
+        // created already sub-floor (and swap-broken) on one side.
+        if current_reserve0.is_zero()
+            && current_reserve1.is_zero()
+            && (final_amount0 < MINIMUM_LIQUIDITY || final_amount1 < MINIMUM_LIQUIDITY)
+        {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "First deposit must seed both reserves at or above MINIMUM_LIQUIDITY ({}); \
+                 got ({}, {}). A sub-floor reserve would leave the pool swap-broken on one \
+                 side.",
+                MINIMUM_LIQUIDITY, final_amount0, final_amount1
+            ))));
+        }
+
         let product = final_amount0.checked_mul(final_amount1)?;
         let raw_liquidity = integer_sqrt(product).max(Uint128::new(1));
 

@@ -47,7 +47,7 @@ Low / Informational or by-design economic decisions.
 | F-6 | Low | creator-pool | Oracle staleness gate fail-opens when the factory returns `timestamp == 0`. **Open.** |
 | F-7 | Low | pool-core | `Simulation` / `CumulativePrices` queries price against live balances, not tracked reserves. **Open.** |
 | F-8 | Low (ops) | keepers | Default `ORACLE_POLL_INTERVAL_MS=330s` contradicts the on-chain 120s staleness gate. **Open.** |
-| F-9 | Low–Med | pool-core | First deposit with a highly asymmetric ratio can leave one reserve below `MINIMUM_LIQUIDITY` (stateful-fuzz invariant violation, pre-existing). **Open.** |
+| F-9 | Low–Med | pool-core | First deposit with a highly asymmetric ratio could leave one reserve below `MINIMUM_LIQUIDITY` (found via the stateful fuzz harness; pre-existing). **Fixed.** |
 | — | Info | various | Dead ungated oracle getters; doc/const mismatches; unbounded never-pruned maps; broken `optimize-pool` Makefile target; stale committed `*.wasm` blobs; "expand-economy" disburses from a pre-funded reservoir (not a literal mint). |
 
 Carried forward from the prior pre-audit (by-design / accepted, unchanged):
@@ -96,6 +96,23 @@ declared `(offer, ask)` are that pool's two real sides — before any funds
 move. `factory_addr` is now load-bearing. Regression tests:
 `router … route_through_unregistered_pool_rejected`,
 `route_with_mislabeled_pair_rejected`.
+
+### F-9 (Low–Medium) — First deposit could leave a reserve below MINIMUM_LIQUIDITY
+`packages/pool-core/src/liquidity_helpers.rs`
+
+`calc_liquidity_for_deposit` floored only the geometric mean
+(`sqrt(amount0·amount1) > MINIMUM_LIQUIDITY`) on the first deposit, so a
+highly asymmetric seed such as `(20, 500_000_000)` passed
+(`sqrt(20·5e8) = 100_000`) yet left `reserve0 = 20` — below the floor the swap
+path and `maybe_auto_pause_on_low_liquidity` both assume every live pool
+upholds, leaving the pool swap-broken on one side. Surfaced by the stateful
+fuzz harness (`minimum_liquidity_breached`); it predated and was not
+introduced by F-1/F-2.
+
+**Fix:** the genuinely-empty first deposit now requires BOTH credited amounts
+`≥ MINIMUM_LIQUIDITY`. Verified by the fuzz harness that found it (now green),
+a 3,000-case stateful run (clean), and a deterministic regression test
+(`standard-pool … first_deposit_rejects_subfloor_reserve_side`).
 
 ---
 
@@ -149,17 +166,6 @@ handlers.
 gate is 120s. Default-configured keepers leave commit valuations stale-blocked
 for most of each cycle. **Action:** lower the default to ≤90s.
 
-### F-9 — First deposit can leave a reserve below MINIMUM_LIQUIDITY
-Stateful fuzz (`fuzz-stateful`) flags `minimum_liquidity_breached` on a first
-`DepositLiquidity` with a highly asymmetric ratio (e.g. `amount0=20,
-amount1=500_000_000`): the liquidity check passes (`sqrt(20·5e8) ≫ 1000`) but
-`reserve0=20 < MINIMUM_LIQUIDITY`. The per-side reserve floor appears not to
-be enforced on the first deposit, so a pool can be created in a near-empty
-state on one side. **This is pre-existing** (reproduces on the clean tree; it
-is not introduced by the F-1/F-2 fixes). **Action:** enforce both reserves
-`≥ MINIMUM_LIQUIDITY` on the first deposit, or reject such deposits; then
-re-run the stateful fuzz harness.
-
 ---
 
 ## Verified clean (high-value confirmations)
@@ -196,7 +202,6 @@ re-run the stateful fuzz harness.
 
 1. **F-3 decision** — allowlist standard-pool tokens *or* correct the
    "hostile-CW20 safe" docs.
-2. **F-9** — close the first-deposit per-side reserve floor and re-fuzz.
-3. **F-5, F-6, F-8** — cheap fail-closed/hardening changes.
-4. **Pre-mainnet (non-code):** multisig/governance for the migrate+admin key
+2. **F-5, F-6, F-8** — cheap fail-closed/hardening changes.
+3. **Pre-mainnet (non-code):** multisig/governance for the migrate+admin key
    (I-1); a vesting decision on the unlocked creator allocation (M-1).

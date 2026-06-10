@@ -232,6 +232,51 @@ fn deposit_rejects_zero_side_for_initial() {
     }
 }
 
+#[test]
+fn first_deposit_rejects_subfloor_reserve_side() {
+    // F-9 regression: an asymmetric first deposit whose geometric mean
+    // clears MINIMUM_LIQUIDITY but whose smaller side is below it must be
+    // rejected. sqrt(20 * 5e8) = 100_000 passes the geometric-mean check,
+    // yet reserve0 would be left at 20 — under the floor the swap path and
+    // auto-pause logic assume. The per-side floor must catch this.
+    let (mut deps, addrs) = instantiate_default_pool();
+
+    let user = addrs.pool_owner.clone();
+    let funds = vec![Coin::new(20u128, BLUECHIP_DENOM)];
+    let info = message_info(&user, &funds);
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        ExecuteMsg::DepositLiquidity {
+            amount0: Uint128::new(20),
+            amount1: Uint128::new(500_000_000),
+            min_amount0: None,
+            min_amount1: None,
+            transaction_deadline: None,
+        },
+    )
+    .unwrap_err();
+
+    match err {
+        ContractError::Std(e) => {
+            assert!(
+                e.to_string()
+                    .contains("seed both reserves at or above MINIMUM_LIQUIDITY"),
+                "expected per-side floor error, got: {e}"
+            );
+        }
+        other => panic!("expected Std error, got {:?}", other),
+    }
+
+    // The deposit reverted before crediting any reserves.
+    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
+    assert!(
+        pool_state.reserve0.is_zero() && pool_state.reserve1.is_zero(),
+        "rejected first deposit must not credit reserves"
+    );
+}
+
 // -- Slippage / ratio guards --------------------------------------------
 
 #[test]
