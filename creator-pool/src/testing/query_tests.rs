@@ -8,12 +8,14 @@ use std::str::FromStr;
 use crate::asset::{TokenInfo, TokenType};
 use crate::mock_querier;
 use crate::msg::{
-    CommitStatus, FeeInfoResponse, LastCommittedResponse, PoolFeeStateResponse, PoolInfoResponse,
-    PoolStateResponse, PositionsResponse, QueryMsg, ReverseSimulationResponse, SimulationResponse,
+    CommitStatus, CreatorEarningsResponse, FeeInfoResponse, LastCommittedResponse,
+    PoolFeeStateResponse, PoolInfoResponse, PoolStateResponse, PositionsResponse, QueryMsg,
+    ReverseSimulationResponse, SimulationResponse,
 };
 use crate::query::query;
 use crate::state::{
-    Committing, COMMIT_INFO, NEXT_POSITION_ID, OWNER_POSITIONS, POOL_FEE_STATE,
+    Committing, CreatorExcessLiquidity, CreatorFeePot, COMMIT_INFO, CREATOR_EXCESS_POSITION,
+    CREATOR_FEE_POT, NEXT_POSITION_ID, OWNER_POSITIONS, POOL_FEE_STATE, THRESHOLD_CROSSED_AT,
     USD_RAISED_FROM_COMMIT,
 };
 use crate::testing::liquidity_tests::{
@@ -592,4 +594,83 @@ fn test_query_pool_state() {
     assert_eq!(state.reserve1, Uint128::new(350_000_000_000));
     assert!(state.nft_ownership_accepted);
     assert!(state.total_liquidity > Uint128::zero());
+}
+
+#[test]
+fn test_query_creator_earnings_empty_defaults() {
+    let mut deps = mock_dependencies();
+    setup_pool_post_threshold(&mut deps);
+
+    let res = query(deps.as_ref(), mock_env(), QueryMsg::CreatorEarnings {}).unwrap();
+    let resp: CreatorEarningsResponse = from_json(res).unwrap();
+
+    assert_eq!(
+        resp.creator_wallet_address,
+        Addr::unchecked("creator_wallet")
+    );
+    // No clip-slice fees accrued and no excess position recorded.
+    assert_eq!(resp.fee_pot.amount_0, Uint128::zero());
+    assert_eq!(resp.fee_pot.amount_1, Uint128::zero());
+    assert!(resp.excess.is_none());
+    assert!(resp.is_threshold_hit);
+    // Fixture never records the crossing timestamp.
+    assert!(resp.threshold_crossed_at.is_none());
+}
+
+#[test]
+fn test_query_creator_earnings_pot_and_locked_excess() {
+    let mut deps = mock_dependencies();
+    setup_pool_post_threshold(&mut deps);
+
+    CREATOR_FEE_POT
+        .save(
+            &mut deps.storage,
+            &CreatorFeePot {
+                amount_0: Uint128::new(850_000_000),
+                amount_1: Uint128::new(1_200_000_000),
+            },
+        )
+        .unwrap();
+
+    let env = mock_env();
+    let unlock = env.block.time.plus_seconds(86_400);
+    CREATOR_EXCESS_POSITION
+        .save(
+            &mut deps.storage,
+            &CreatorExcessLiquidity {
+                creator: Addr::unchecked("creator_wallet"),
+                bluechip_amount: Uint128::new(15_000_000_000),
+                token_amount: Uint128::new(30_000_000_000),
+                unlock_time: unlock,
+                excess_nft_id: None,
+            },
+        )
+        .unwrap();
+    THRESHOLD_CROSSED_AT
+        .save(&mut deps.storage, &env.block.time.minus_seconds(3_600))
+        .unwrap();
+
+    // Still locked: one day before unlock_time.
+    let res = query(deps.as_ref(), env.clone(), QueryMsg::CreatorEarnings {}).unwrap();
+    let resp: CreatorEarningsResponse = from_json(res).unwrap();
+
+    assert_eq!(resp.fee_pot.amount_0, Uint128::new(850_000_000));
+    assert_eq!(resp.fee_pot.amount_1, Uint128::new(1_200_000_000));
+    let excess = resp.excess.expect("excess position should be reported");
+    assert_eq!(excess.bluechip_amount, Uint128::new(15_000_000_000));
+    assert_eq!(excess.token_amount, Uint128::new(30_000_000_000));
+    assert_eq!(excess.unlock_time, unlock);
+    assert!(!excess.claimable_now);
+    assert_eq!(
+        resp.threshold_crossed_at,
+        Some(env.block.time.minus_seconds(3_600))
+    );
+
+    // At unlock_time exactly, the claim handler's `block.time <
+    // unlock_time` gate no longer rejects — claimable_now must agree.
+    let mut late_env = mock_env();
+    late_env.block.time = unlock;
+    let res = query(deps.as_ref(), late_env, QueryMsg::CreatorEarnings {}).unwrap();
+    let resp: CreatorEarningsResponse = from_json(res).unwrap();
+    assert!(resp.excess.expect("excess still unclaimed").claimable_now);
 }
