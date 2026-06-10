@@ -95,7 +95,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ setClient, setAddress, se
 
     const connectMainnet = (): Promise<void> => {
         const config: ChainConfig = {
-            chainId: "bluechip-1",
+            chainId: "bluechip-3",
             chainName: "Bluechip Mainnet",
             rpc: "https://bluechip.rpc.bluechip.link", // Placeholder
             rest: "https://bluechip.api.bluechip.link", // Placeholder
