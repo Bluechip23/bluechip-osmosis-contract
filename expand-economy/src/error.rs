@@ -26,6 +26,14 @@ pub enum ContractError {
     #[error("Unauthorized")]
     Unauthorized {},
 
+    #[error(
+        "factory_address must be the factory CONTRACT, not the instantiating wallet. \
+         Deploy the factory first (bluechip_mint_contract_address: null), then instantiate \
+         expand-economy pointing at it — a placeholder here costs a 48h timelock to repair \
+         and defers every threshold-crossing reward until fixed"
+    )]
+    FactoryAddressIsInstantiator {},
+
     #[error("Daily expansion cap exceeded: requested {requested}, already spent {spent_in_window} in current 24h window, cap {cap}")]
     DailyExpansionCapExceeded {
         requested: Uint128,

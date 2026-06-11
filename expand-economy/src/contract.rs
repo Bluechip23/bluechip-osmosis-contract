@@ -47,8 +47,18 @@ pub fn instantiate(
     // later via the timelocked propose / apply path.
     validate_native_denom(&bluechip_denom)?;
 
+    let factory_address = deps.api.addr_validate(&msg.factory_address)?;
+    // The exact misconfiguration observed in deployment testing:
+    // pointing factory_address at the deployer wallet as a "placeholder".
+    // RequestExpansion gates on this address, so every threshold-crossing
+    // mint then fails (deferred notifies) until a 48h-timelocked config
+    // update lands. A wallet can never be the factory — fail fast here.
+    if factory_address == info.sender {
+        return Err(ContractError::FactoryAddressIsInstantiator {});
+    }
+
     let config = Config {
-        factory_address: deps.api.addr_validate(&msg.factory_address)?,
+        factory_address,
         owner: deps
             .api
             .addr_validate(&msg.owner.unwrap_or_else(|| info.sender.to_string()))?,

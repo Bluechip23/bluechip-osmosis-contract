@@ -35,8 +35,9 @@
 
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
-    from_json, to_json_binary, Addr, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
-    Reply, ReplyOn, Response, StdError, SubMsg, SubMsgResult, Timestamp, Uint128, WasmMsg,
+    from_json, to_json_binary, Addr, Binary, Coin, CosmosMsg, Decimal, Deps, DepsMut, Env,
+    MessageInfo, Reply, ReplyOn, Response, StdError, SubMsg, SubMsgResult, Timestamp, Uint128,
+    WasmMsg,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use pool_factory_interfaces::asset::{TokenInfo, TokenType};
@@ -467,11 +468,23 @@ pub fn validate_route(operations: &[SwapOperation]) -> Result<(), RouterError> {
     Ok(())
 }
 
-/// Builds the underlying pool swap message for one hop. Per-hop
-/// slippage gates (`belief_price`, `max_spread`) are intentionally
-/// pinned to `None` here — see the module / `ExecuteMsg` doc-comment
-/// for why they cannot be made meaningful across heterogeneous
-/// multi-hop pairs. End-to-end slippage is enforced via
+/// Per-hop `max_spread` forwarded to every underlying pool call. A
+/// `None` here would NOT disable the gate — pools substitute their
+/// 0.5% `DEFAULT_SLIPPAGE`, which silently failed every thin-pool
+/// route regardless of the caller's `minimum_receive`. Pinning the
+/// pools' 5% hard cap (the widest value accepted without
+/// `allow_high_max_spread`) neutralizes the per-hop gate so
+/// `minimum_receive` in `execute_assert_received` is the binding,
+/// end-to-end slippage control — exactly the model the `ExecuteMsg`
+/// docs promise.
+fn per_hop_max_spread() -> Decimal {
+    Decimal::percent(5)
+}
+
+/// Builds the underlying pool swap message for one hop. `belief_price`
+/// stays `None` (meaningless across heterogeneous multi-hop pairs);
+/// `max_spread` is pinned to the pools' hard cap — see
+/// [`per_hop_max_spread`]. End-to-end slippage is enforced via
 /// `minimum_receive` in `execute_assert_received`.
 fn build_pool_swap_msg(
     operation: &SwapOperation,
@@ -486,7 +499,7 @@ fn build_pool_swap_msg(
                     amount: offer_amount,
                 },
                 belief_price: None,
-                max_spread: None,
+                max_spread: Some(per_hop_max_spread()),
                 to: Some(to),
                 transaction_deadline: None,
             };
@@ -502,7 +515,7 @@ fn build_pool_swap_msg(
         TokenType::CreatorToken { contract_addr } => {
             let hook = PoolSwapCw20HookMsg::Swap {
                 belief_price: None,
-                max_spread: None,
+                max_spread: Some(per_hop_max_spread()),
                 to: Some(to),
                 transaction_deadline: None,
             };
