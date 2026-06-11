@@ -740,3 +740,53 @@ fn simulation_prices_against_accounting_reserves_not_balances() {
     assert_eq!(resp.spread_amount, expected_spread);
     assert_eq!(resp.commission_amount, expected_commission);
 }
+
+#[test]
+fn simulation_on_zero_reserves_errors_cleanly_instead_of_panicking() {
+    // Delta-audit regression (DA-1): pre-threshold commit pools have
+    // POOL_STATE reserves of 0/0. compute_swap divides by the offer
+    // reserve, so without the guard the query PANICS (VM error) rather
+    // than returning a decodable error.
+    let mut deps = setup_pool_with_querier();
+    let mut pool_state = crate::state::POOL_STATE.load(&deps.storage).unwrap();
+    pool_state.reserve0 = Uint128::zero();
+    pool_state.reserve1 = Uint128::zero();
+    crate::state::POOL_STATE
+        .save(&mut deps.storage, &pool_state)
+        .unwrap();
+
+    let offer = TokenInfo {
+        info: TokenType::Native {
+            denom: "ubluechip".to_string(),
+        },
+        amount: Uint128::new(1_000_000),
+    };
+    let err = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::Simulation { offer_asset: offer },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("no active liquidity"),
+        "expected clean zero-liquidity error, got: {err}"
+    );
+
+    let err = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::ReverseSimulation {
+            ask_asset: TokenInfo {
+                info: TokenType::CreatorToken {
+                    contract_addr: Addr::unchecked("token_contract"),
+                },
+                amount: Uint128::new(1_000_000),
+            },
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("no active liquidity"),
+        "expected clean zero-liquidity error, got: {err}"
+    );
+}

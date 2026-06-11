@@ -64,6 +64,15 @@ pub fn query_simulation(deps: Deps, offer_asset: TokenInfo) -> StdResult<Simulat
         ));
     };
 
+    // Zero accounting reserves (pre-threshold commit pool, or a drained
+    // pool) must return a clean error: `compute_swap` divides by the
+    // offer reserve and would otherwise panic the query.
+    if offer_reserve.is_zero() || ask_reserve.is_zero() {
+        return Err(StdError::generic_err(
+            "Pool has no active liquidity to quote against (pre-threshold or drained)",
+        ));
+    }
+
     let (return_amount, spread_amount, commission_amount) = compute_swap(
         offer_reserve,
         ask_reserve,
@@ -98,6 +107,13 @@ pub fn query_reverse_simulation(
             "Given ask asset doesn't belong to pairs",
         ));
     };
+
+    // Same zero-reserve guard as `query_simulation`.
+    if offer_reserve.is_zero() || ask_reserve.is_zero() {
+        return Err(StdError::generic_err(
+            "Pool has no active liquidity to quote against (pre-threshold or drained)",
+        ));
+    }
 
     let (offer_amount, spread_amount, commission_amount) = compute_offer_amount(
         offer_reserve,

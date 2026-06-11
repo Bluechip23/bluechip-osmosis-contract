@@ -1429,3 +1429,60 @@ fn simulation_rejects_unregistered_pool() {
         "expected registry rejection, got: {err}"
     );
 }
+
+/// Delta-audit hardening (DA-2): minimum_receive is the only end-to-end
+/// slippage protection (per-hop gates are pinned to the pools' 5% hard
+/// cap), so a zero value — i.e. no protection at all — is rejected at
+/// the shared entry point on both offer paths.
+#[test]
+fn router_rejects_zero_minimum_receive() {
+    let mut world = setup_world();
+
+    let bluechip = TokenType::Native {
+        denom: BLUECHIP_DENOM.to_string(),
+    };
+    let creator_a = TokenType::CreatorToken {
+        contract_addr: world.creator_a.clone(),
+    };
+
+    // Native-offered path.
+    let err = world
+        .app
+        .execute_contract(
+            world.user.clone(),
+            world.router.clone(),
+            &RouterExecuteMsg::ExecuteMultiHop {
+                operations: vec![op(&world.pool_a, bluechip.clone(), creator_a.clone())],
+                minimum_receive: Uint128::zero(),
+                deadline: None,
+                recipient: None,
+            },
+            &[Coin::new(100_000u128, BLUECHIP_DENOM)],
+        )
+        .unwrap_err();
+    assert!(
+        err.root_cause().to_string().contains("minimum_receive"),
+        "expected zero-minimum rejection, got: {err:?}"
+    );
+
+    // CW20-offered path goes through the same shared gate.
+    let send_msg = Cw20ExecuteMsg::Send {
+        contract: world.router.to_string(),
+        amount: Uint128::new(100_000),
+        msg: to_json_binary(&Cw20HookMsg::ExecuteMultiHop {
+            operations: vec![op(&world.pool_a, creator_a, bluechip)],
+            minimum_receive: Uint128::zero(),
+            deadline: None,
+            recipient: None,
+        })
+        .unwrap(),
+    };
+    let err = world
+        .app
+        .execute_contract(world.user.clone(), world.creator_a.clone(), &send_msg, &[])
+        .unwrap_err();
+    assert!(
+        err.root_cause().to_string().contains("minimum_receive"),
+        "expected zero-minimum rejection on cw20 path, got: {err:?}"
+    );
+}

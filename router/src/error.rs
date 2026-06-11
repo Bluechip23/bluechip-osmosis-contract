@@ -28,6 +28,13 @@ pub enum RouterError {
     #[error("Offer amount must be greater than zero")]
     ZeroAmount,
 
+    #[error(
+        "minimum_receive must be greater than zero — it is the route's only \
+         end-to-end slippage protection (per-hop gates are pinned to the pools' \
+         5% hard cap). Size it from SimulateMultiHop"
+    )]
+    ZeroMinimumReceive,
+
     #[error("Route input and final output must differ")]
     SameInputOutput,
 
