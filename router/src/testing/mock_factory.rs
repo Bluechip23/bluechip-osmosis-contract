@@ -26,6 +26,11 @@ use pool_factory_interfaces::{PoolKind, RegisteredPoolResponse};
 pub struct RegistryEntry {
     pub pool_addr: String,
     pub pool_token_info: [TokenType; 2],
+    /// Defaults to Commit (the historical assumption); tests standing up
+    /// standard-pool hops set `Standard` so the router's registry-driven
+    /// commit-status gating can be exercised.
+    #[serde(default)]
+    pub pool_kind: PoolKind,
 }
 
 #[cw_serde]
@@ -41,8 +46,8 @@ pub enum QueryMsg {
     PoolByAddress { pool_addr: String },
 }
 
-/// addr (bech32 string the router passes through) -> canonical pair.
-const POOLS: Map<&str, [TokenType; 2]> = Map::new("pools");
+/// addr (bech32 string the router passes through) -> (canonical pair, kind).
+const POOLS: Map<&str, ([TokenType; 2], PoolKind)> = Map::new("pools");
 
 #[entry_point]
 pub fn instantiate(
@@ -52,7 +57,11 @@ pub fn instantiate(
     msg: InstantiateMsg,
 ) -> StdResult<Response> {
     for entry in msg.pools {
-        POOLS.save(deps.storage, &entry.pool_addr, &entry.pool_token_info)?;
+        POOLS.save(
+            deps.storage,
+            &entry.pool_addr,
+            &(entry.pool_token_info, entry.pool_kind),
+        )?;
     }
     Ok(Response::new())
 }
@@ -78,10 +87,10 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::PoolByAddress { pool_addr } => {
             let resp = POOLS
                 .may_load(deps.storage, &pool_addr)?
-                .map(|pool_token_info| RegisteredPoolResponse {
+                .map(|(pool_token_info, pool_kind)| RegisteredPoolResponse {
                     pool_id: 0,
                     pool_token_info,
-                    pool_kind: PoolKind::Standard,
+                    pool_kind,
                 });
             to_json_binary(&resp)
         }

@@ -690,3 +690,53 @@ fn last_commited_query_accepts_both_spellings() {
         }
     }
 }
+
+#[test]
+fn simulation_prices_against_accounting_reserves_not_balances() {
+    // Regression: simulations used to derive reserves from the
+    // contract's bank/cw20 BALANCES, which on commit pools also hold
+    // LP fee reserves, the creator fee pot, and commit proceeds —
+    // inflating quoted depth so execution undershoots the quote. The
+    // quote must come from POOL_STATE, the reserves execution trades
+    // against.
+    let mut deps = setup_pool_with_querier();
+
+    // Drive the accounting reserves away from the bank/cw20 balances the
+    // querier was seeded with. If the simulation still read balances,
+    // the quote below would not match the POOL_STATE-derived expectation.
+    let mut pool_state = crate::state::POOL_STATE.load(&deps.storage).unwrap();
+    pool_state.reserve0 = Uint128::new(10_000_000_000);
+    pool_state.reserve1 = Uint128::new(100_000_000_000);
+    crate::state::POOL_STATE
+        .save(&mut deps.storage, &pool_state)
+        .unwrap();
+    let pool_specs = crate::state::POOL_SPECS.load(&deps.storage).unwrap();
+    let offer_amount = Uint128::new(1_000_000_000);
+    let (expected_return, expected_spread, expected_commission) =
+        crate::swap_helper::compute_swap(
+            pool_state.reserve0,
+            pool_state.reserve1,
+            offer_amount,
+            pool_specs.lp_fee,
+        )
+        .unwrap();
+
+    let res = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::Simulation {
+            offer_asset: TokenInfo {
+                info: TokenType::Native {
+                    denom: "ubluechip".to_string(),
+                },
+                amount: offer_amount,
+            },
+        },
+    )
+    .unwrap();
+    let resp: SimulationResponse = from_json(res).unwrap();
+
+    assert_eq!(resp.return_amount, expected_return);
+    assert_eq!(resp.spread_amount, expected_spread);
+    assert_eq!(resp.commission_amount, expected_commission);
+}

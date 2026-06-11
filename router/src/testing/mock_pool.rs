@@ -26,14 +26,25 @@ use pool_factory_interfaces::asset::{query_pools, PoolPairType, TokenInfo, Token
 pub struct MockPoolState {
     pub asset_infos: [TokenType; 2],
     pub fully_committed: bool,
+    /// Mimic a standard pool: `IsFullyCommited` is a commit-only query,
+    /// so a standard pool rejects it at deserialization. `true` makes
+    /// this mock do the same.
+    #[serde(default)]
+    pub standard: bool,
 }
 
 const STATE: Item<MockPoolState> = Item::new("mock_pool_state");
+
+/// `max_spread` from the most recent swap this mock received — lets
+/// tests assert exactly what the router forwarded per hop.
+const LAST_MAX_SPREAD: Item<Option<Decimal>> = Item::new("last_max_spread");
 
 #[cw_serde]
 pub struct InstantiateMsg {
     pub asset_infos: [TokenType; 2],
     pub fully_committed: bool,
+    #[serde(default)]
+    pub standard: bool,
 }
 
 /// JSON-compatible with `pool_factory_interfaces::routing::PoolSwapExecuteMsg`
@@ -68,6 +79,9 @@ pub enum QueryMsg {
     Pair {},
     Simulation { offer_asset: TokenInfo },
     IsFullyCommited {},
+    /// Test-only introspection: the `max_spread` the router forwarded
+    /// on the most recent swap against this mock.
+    LastMaxSpread {},
 }
 
 #[cw_serde]
@@ -103,6 +117,7 @@ pub fn instantiate(
         &MockPoolState {
             asset_infos: msg.asset_infos,
             fully_committed: msg.fully_committed,
+            standard: msg.standard,
         },
     )?;
     Ok(Response::new())
@@ -112,8 +127,14 @@ pub fn instantiate(
 pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> StdResult<Response> {
     match msg {
         ExecuteMsg::SimpleSwap {
-            offer_asset, to, ..
-        } => execute_native_swap(deps, env, info, offer_asset, to),
+            offer_asset,
+            to,
+            max_spread,
+            ..
+        } => {
+            LAST_MAX_SPREAD.save(deps.storage, &max_spread)?;
+            execute_native_swap(deps, env, info, offer_asset, to)
+        }
         ExecuteMsg::Receive(cw20_msg) => execute_cw20_swap(deps, env, info, cw20_msg),
     }
 }
@@ -188,7 +209,8 @@ fn execute_cw20_swap(
     }
 
     let hook: HookMsg = from_json(&cw20_msg.msg)?;
-    let HookMsg::Swap { to, .. } = hook;
+    let HookMsg::Swap { to, max_spread, .. } = hook;
+    LAST_MAX_SPREAD.save(deps.storage, &max_spread)?;
 
     let offer_info = TokenType::CreatorToken {
         contract_addr: info.sender.clone(),
@@ -244,6 +266,13 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::IsFullyCommited {} => {
             let state = STATE.load(deps.storage)?;
+            // Standard pools don't implement this commit-only query; the
+            // real contract fails variant deserialization. Mirror that.
+            if state.standard {
+                return Err(StdError::generic_err(
+                    "Error parsing into type standard_pool::msg::QueryMsg: unknown variant `is_fully_commited`",
+                ));
+            }
             let status = if state.fully_committed {
                 CommitStatus::FullyCommitted
             } else {
@@ -253,6 +282,9 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 }
             };
             to_json_binary(&status)
+        }
+        QueryMsg::LastMaxSpread {} => {
+            to_json_binary(&LAST_MAX_SPREAD.may_load(deps.storage)?.flatten())
         }
         QueryMsg::Simulation { offer_asset } => {
             let state = STATE.load(deps.storage)?;

@@ -35,9 +35,12 @@ pub struct InstantiateMsg {
 /// final ask token, NOT via per-hop `belief_price` / `max_spread`. A
 /// single per-pair belief price is meaningless across hops on heterogeneous
 /// pairs (units differ between `A/bluechip` and `bluechip/B`), so the
-/// router does not accept those parameters and always passes `None` for
-/// them on the underlying pool calls. Frontends should size
-/// `minimum_receive` from the simulation result (see `SimulateMultiHop`).
+/// router does not accept those parameters. On the underlying pool calls
+/// it passes `belief_price = None` and pins `max_spread` to the pools'
+/// 5% hard cap — passing `None` would make pools substitute their 0.5%
+/// default and silently gate every thin-pool hop regardless of the
+/// caller's tolerance. Frontends should size `minimum_receive` from the
+/// simulation result (see `SimulateMultiHop`).
 #[cw_serde]
 pub enum ExecuteMsg {
     /// Run a multi-hop swap whose first hop offers the native bluechip

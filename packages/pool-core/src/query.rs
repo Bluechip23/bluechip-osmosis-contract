@@ -42,32 +42,31 @@ pub fn query_pair_info(deps: Deps) -> StdResult<PoolDetails> {
     Ok(pool_info.pool_info)
 }
 
+/// Quote against POOL_STATE's accounting reserves — the exact values
+/// `execute_simple_swap` trades against — NOT the contract's bank/cw20
+/// balances. Balances also hold non-AMM funds (LP fee reserves, the
+/// creator fee pot, pre-threshold commit proceeds, emergency escrow),
+/// so a balance-based quote overstates depth and returns optimistic
+/// amounts that execution then undershoots.
 pub fn query_simulation(deps: Deps, offer_asset: TokenInfo) -> StdResult<SimulationResponse> {
     let pool_info = POOL_INFO.load(deps.storage)?;
     let pool_specs = POOL_SPECS.load(deps.storage)?;
-    let contract_addr = pool_info.pool_info.contract_addr.clone();
+    let pool_state = POOL_STATE.load(deps.storage)?;
 
-    let pools: [TokenInfo; 2] = pool_info
-        .pool_info
-        .query_pools(&deps.querier, contract_addr)?;
-
-    let offer_pool: TokenInfo;
-    let ask_pool: TokenInfo;
-    if offer_asset.info.equal(&pools[0].info) {
-        offer_pool = pools[0].clone();
-        ask_pool = pools[1].clone();
-    } else if offer_asset.info.equal(&pools[1].info) {
-        offer_pool = pools[1].clone();
-        ask_pool = pools[0].clone();
+    let infos = &pool_info.pool_info.asset_infos;
+    let (offer_reserve, ask_reserve) = if offer_asset.info.equal(&infos[0]) {
+        (pool_state.reserve0, pool_state.reserve1)
+    } else if offer_asset.info.equal(&infos[1]) {
+        (pool_state.reserve1, pool_state.reserve0)
     } else {
         return Err(StdError::generic_err(
             "Given offer asset does not belong in the pair",
         ));
-    }
+    };
 
     let (return_amount, spread_amount, commission_amount) = compute_swap(
-        offer_pool.amount,
-        ask_pool.amount,
+        offer_reserve,
+        ask_reserve,
         offer_asset.amount,
         pool_specs.lp_fee,
     )?;
@@ -85,29 +84,24 @@ pub fn query_reverse_simulation(
 ) -> StdResult<ReverseSimulationResponse> {
     let pool_info = POOL_INFO.load(deps.storage)?;
     let pool_specs = POOL_SPECS.load(deps.storage)?;
-    let contract_addr = pool_info.pool_info.contract_addr.clone();
+    let pool_state = POOL_STATE.load(deps.storage)?;
 
-    let pools: [TokenInfo; 2] = pool_info
-        .pool_info
-        .query_pools(&deps.querier, contract_addr)?;
-
-    let offer_pool: TokenInfo;
-    let ask_pool: TokenInfo;
-    if ask_asset.info.equal(&pools[0].info) {
-        ask_pool = pools[0].clone();
-        offer_pool = pools[1].clone();
-    } else if ask_asset.info.equal(&pools[1].info) {
-        ask_pool = pools[1].clone();
-        offer_pool = pools[0].clone();
+    // Same accounting-reserve sourcing as `query_simulation` — see the
+    // doc-comment there.
+    let infos = &pool_info.pool_info.asset_infos;
+    let (offer_reserve, ask_reserve) = if ask_asset.info.equal(&infos[0]) {
+        (pool_state.reserve1, pool_state.reserve0)
+    } else if ask_asset.info.equal(&infos[1]) {
+        (pool_state.reserve0, pool_state.reserve1)
     } else {
         return Err(StdError::generic_err(
             "Given ask asset doesn't belong to pairs",
         ));
-    }
+    };
 
     let (offer_amount, spread_amount, commission_amount) = compute_offer_amount(
-        offer_pool.amount,
-        ask_pool.amount,
+        offer_reserve,
+        ask_reserve,
         ask_asset.amount,
         pool_specs.lp_fee,
     )?;

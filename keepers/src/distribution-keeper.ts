@@ -4,6 +4,7 @@ import { buildKeeperClient } from "./lib/client.js";
 import { nextDistributionSleepMs } from "./lib/decisions.js";
 import { runDistributionSweep } from "./lib/distribution-loop.js";
 import { checkFactoryBalance, checkKeeperBalance } from "./lib/oracle-loop.js";
+import { resolveWatchList } from "./lib/discovery.js";
 import { runRetryNotifySweep } from "./lib/retry-notify-loop.js";
 import { interruptibleSleep } from "./lib/sleep.js";
 import { log } from "./lib/logger.js";
@@ -12,9 +13,9 @@ async function main(): Promise<void> {
   const cfg = loadConfigFromEnv();
 
   if (cfg.POOL_ADDRESSES.length === 0) {
-    log.error("POOL_ADDRESSES is empty — nothing for the distribution keeper to watch");
-    log.error("set POOL_ADDRESSES in .env as a comma-separated list of pool contract addresses");
-    process.exit(1);
+    log.info(
+      "POOL_ADDRESSES is empty — auto-discovering commit pools from the factory registry each sweep",
+    );
   }
 
   log.info("distribution keeper starting", {
@@ -34,7 +35,15 @@ async function main(): Promise<void> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
+  let watchList: string[] = cfg.POOL_ADDRESSES;
   while (!stopped) {
+    watchList = await resolveWatchList(
+      client,
+      cfg.FACTORY_ADDRESS,
+      cfg.POOL_ADDRESSES,
+      watchList,
+    );
+
     // Run the retry-factory-notify sweep BEFORE the distribution sweep.
     // Order matters: a stuck factory-notify means POOL_THRESHOLD_MINTED
     // never landed on the factory side, which blocks the bluechip
@@ -45,11 +54,11 @@ async function main(): Promise<void> {
     // RetryFactoryNotify is itself permissionless and idempotent on
     // the factory side (POOL_THRESHOLD_MINTED gate), so a redundant
     // call is at worst wasted gas — never a double-mint.
-    await runRetryNotifySweep(client, cfg.POOL_ADDRESSES);
+    await runRetryNotifySweep(client, watchList);
 
     const { madeProgress } = await runDistributionSweep(
       client,
-      cfg.POOL_ADDRESSES,
+      watchList,
       cfg.DISTRIBUTION_PER_POOL_DELAY_MS,
     );
     await checkKeeperBalance(client, cfg.GAS_DENOM, cfg.MIN_KEEPER_BALANCE_UBLUECHIP);

@@ -275,3 +275,25 @@ mod expand_economy_tests {
         assert_eq!("ucustom2", value.bluechip_denom);
     }
 }
+
+#[test]
+fn instantiate_rejects_factory_address_equal_to_sender() {
+    let mut deps = cosmwasm_std::testing::mock_dependencies();
+    let deployer = cosmwasm_std::testing::MockApi::default().addr_make("deployer");
+    let msg = crate::msg::InstantiateMsg {
+        factory_address: deployer.to_string(),
+        owner: None,
+        bluechip_denom: None,
+    };
+    let err = crate::contract::instantiate(
+        deps.as_mut(),
+        cosmwasm_std::testing::mock_env(),
+        cosmwasm_std::testing::message_info(&deployer, &[]),
+        msg,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::ContractError::FactoryAddressIsInstantiator {}
+    ));
+}
