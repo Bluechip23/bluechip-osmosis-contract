@@ -284,7 +284,7 @@ const PortfolioPage: React.FC = () => {
         }
     }, [client, address]);
 
-    // Fetch liquidity positions across all known pools using positions_by_owner query (H-5 audit optimization)
+    // Fetch liquidity positions across all known pools using positions_by_owner query
     const fetchPositions = useCallback(async () => {
         if (!client || !address) return;
 

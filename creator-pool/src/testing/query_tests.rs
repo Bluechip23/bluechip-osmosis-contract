@@ -743,10 +743,9 @@ fn simulation_prices_against_accounting_reserves_not_balances() {
 
 #[test]
 fn simulation_on_zero_reserves_errors_cleanly_instead_of_panicking() {
-    // Delta-audit regression (DA-1): pre-threshold commit pools have
-    // POOL_STATE reserves of 0/0. compute_swap divides by the offer
-    // reserve, so without the guard the query PANICS (VM error) rather
-    // than returning a decodable error.
+    // Pre-threshold commit pools have POOL_STATE reserves of 0/0.
+    // compute_swap divides by the offer reserve, so without the guard the
+    // query PANICS (VM error) rather than returning a decodable error.
     let mut deps = setup_pool_with_querier();
     let mut pool_state = crate::state::POOL_STATE.load(&deps.storage).unwrap();
     pool_state.reserve0 = Uint128::zero();

@@ -17,7 +17,7 @@ export const PoolExecContinueDistribution = { continue_distribution: {} } as con
  */
 export const PoolExecRetryFactoryNotify = { retry_factory_notify: {} } as const;
 /**
- * Factory-side storage hygiene (HIGH-2 audit follow-up). Iterates the
+ * Factory-side storage hygiene. Iterates the
  * per-address rate-limit maps and removes entries older than 10× the
  * cooldown window. `batch_size` caps work per call (default 100, hard
  * cap 500 on the contract side) so a large backlog doesn't exceed

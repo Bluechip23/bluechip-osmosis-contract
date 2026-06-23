@@ -365,18 +365,8 @@ fn reply_propagates_query_failure_on_missing_cw20() {
     assert!(!err.to_string().is_empty());
 }
 
-/// Regression for Finding 12.1 — `AddToPosition` with prior CW20-side
-/// fee accrual must NOT trip the balance-verify reply.
-///
-/// Pre-fix, the verify reply enforced `delta == actual_amount`. On
-/// `add_to_position` with non-zero `fees_owed_1`, the LAST message in
-/// the Response was the CW20 fee transfer OUT (after the TransferFrom
-/// in). Post-balance reflected `pre + deposited - fee_out`, so
-/// `delta = deposited - fee_out != deposited`, and the reply rejected
-/// every add-to-position whose position had any prior CW20-side fee
-/// accrual.
-///
-/// Post-fix: the reply enforces
+/// `AddToPosition` with prior CW20-side fee accrual must NOT trip the
+/// balance-verify reply. The reply enforces
 /// `post + outgoing == pre + actual_amount`. With `outgoing = fee_out`,
 /// the invariant holds exactly when the CW20 behaves honestly. This
 /// test exercises the reply directly against a context that mirrors
