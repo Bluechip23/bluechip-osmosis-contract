@@ -48,15 +48,52 @@ You need:
 
 ---
 
-## 2. Quick Start — Add the Script Tags
+## 2. Quick Start
 
-Add these two script tags to your HTML page, either in the `<head>` or right before `</body>`. These load the CosmJS library that talks to the blockchain.
+### Fastest path: the BlueChip widget (recommended)
+
+If all you want is a **Subscribe button** and/or **subscriber-gated
+content**, skip this whole document and use the prebuilt widget — one
+script tag, and the only thing you edit is your pool address:
 
 ```html
-<!-- CosmJS — Required for all BlueChip interactions -->
-<script src="https://unpkg.com/@cosmjs/cosmwasm-stargate@0.32.4/build/bundle.js"></script>
-<script src="https://unpkg.com/@cosmjs/stargate@0.32.4/build/bundle.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/Bluechip23/bluechipblockexplorer@main/widget/dist/bluechip-widget.min.js"></script>
+
+<div data-bluechip-subscribe data-pool="bluechip1YOUR_POOL_ADDRESS" data-amount="25"></div>
+
+<div data-bluechip-gate data-pool="bluechip1YOUR_POOL_ADDRESS" data-min-usd="5">
+    Subscriber-only content.
+</div>
 ```
+
+Full options (custom labels, fixed amounts, JS API):
+[widget/README.md](https://github.com/Bluechip23/bluechipblockexplorer/tree/main/widget)
+in the bluechipblockexplorer repo.
+
+### Manual path: load CosmJS yourself
+
+The rest of this guide's code blocks talk to the chain through CosmJS.
+**CosmJS does not publish a ready-made browser bundle** (there is no
+`build/bundle.js` on unpkg — a plain script tag will 404), so pick one:
+
+- **Sites with a bundler (React, Vite, Next, etc.):**
+  `npm install @cosmjs/cosmwasm-stargate@0.32.4` and import it; adapt the
+  snippets from `window.CosmWasmClient.X` to your imports.
+- **Plain HTML sites:** load it as an ES module from a
+  CommonJS-to-ESM CDN and expose the global the snippets expect:
+
+```html
+<script type="module">
+    import * as cosmwasm from "https://esm.sh/@cosmjs/cosmwasm-stargate@0.32.4";
+    window.CosmWasmClient = cosmwasm;   // snippets use CosmWasmClient.SigningCosmWasmClient
+    window.dispatchEvent(new Event("cosmjs-ready"));
+</script>
+```
+
+(Any button handler that runs before the module finishes loading will see
+`CosmWasmClient` undefined — either wait for the `cosmjs-ready` event or
+just let users click again. The prebuilt widget above has none of these
+caveats, which is why it's the recommended path.)
 
 Then add this configuration block. **Replace the placeholder values** with your actual addresses:
 
@@ -1870,8 +1907,13 @@ Here's a complete, self-contained HTML page you can save and use. It includes wa
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BlueChip - My Creator Page</title>
-    <script src="https://unpkg.com/@cosmjs/cosmwasm-stargate@0.32.4/build/bundle.js"></script>
-    <script src="https://unpkg.com/@cosmjs/stargate@0.32.4/build/bundle.js"></script>
+    <!-- CosmJS has no prebuilt browser bundle; load it as an ES module
+         and expose the global the handlers below use. -->
+    <script type="module">
+        import * as cosmwasm from "https://esm.sh/@cosmjs/cosmwasm-stargate@0.32.4";
+        window.CosmWasmClient = cosmwasm;
+        window.dispatchEvent(new Event("cosmjs-ready"));
+    </script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
