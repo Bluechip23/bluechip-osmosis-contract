@@ -17,7 +17,7 @@ describe("parseConfig", () => {
     const cfg = parseConfig(BASE_ENV);
     expect(cfg.RPC_ENDPOINT).toBe("http://localhost:26657");
     expect(cfg.GAS_PRICE).toBe("0.025ubluechip"); // default
-    expect(cfg.ORACLE_POLL_INTERVAL_MS).toBe(330_000); // default
+    expect(cfg.ORACLE_POLL_INTERVAL_MS).toBe(70_000); // default
   });
 
   it("rejects missing required fields", () => {

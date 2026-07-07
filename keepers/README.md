@@ -125,7 +125,7 @@ every ORACLE_POLL_INTERVAL_MS (default 70 s — tracks the on-chain
   warn if wallet balance < MIN_KEEPER_BALANCE_UBLUECHIP
 
   # Folded-in maintenance sweep — see "Rate-limit prune" below.
-  every ORACLE_PRUNE_EVERY_N iterations (default 200 ≈ once per 18h):
+  every ORACLE_PRUNE_EVERY_N iterations (default 750 ≈ once per 14.5h):
     submit factory.PruneRateLimits { batch_size: PRUNE_BATCH_SIZE }
 ```
 

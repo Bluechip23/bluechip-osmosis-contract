@@ -46,7 +46,7 @@ Low / Informational or by-design economic decisions.
 | F-5 | Low | oracle | `UpdateOraclePrice` 60s cooldown is bypassed during the post-reset buffer (`last_update` stays 0). **Open.** |
 | F-6 | Low | creator-pool | Oracle staleness gate fail-opens when the factory returns `timestamp == 0`. **Open.** |
 | F-7 | Low | pool-core | `Simulation` / `CumulativePrices` queries price against live balances, not tracked reserves. **Open.** |
-| F-8 | Low (ops) | keepers | Default `ORACLE_POLL_INTERVAL_MS=330s` contradicts the on-chain 120s staleness gate. **Open.** |
+| F-8 | Low (ops) | keepers | Default `ORACLE_POLL_INTERVAL_MS=330s` contradicts the on-chain 120s staleness gate. **Fixed** (default lowered to 70s). |
 | F-9 | Low–Med | pool-core | First deposit with a highly asymmetric ratio could leave one reserve below `MINIMUM_LIQUIDITY` (found via the stateful fuzz harness; pre-existing). **Fixed.** |
 | — | Info | various | Dead ungated oracle getters; doc/const mismatches; unbounded never-pruned maps; broken `optimize-pool` Makefile target; stale committed `*.wasm` blobs; "expand-economy" disburses from a pre-funded reservoir (not a literal mint). |
 
@@ -161,10 +161,12 @@ reserves and is unaffected. **Action:** use `POOL_STATE.reserve*` in these
 handlers.
 
 ### F-8 — Keeper default poll interval contradicts the staleness gate
-`keepers/src/lib/config.ts`. `ORACLE_POLL_INTERVAL_MS` defaults to 330s
+`keepers/src/lib/config.ts`. `ORACLE_POLL_INTERVAL_MS` defaulted to 330s
 (sized for the retired 300s on-chain interval), but the pool-side staleness
-gate is 120s. Default-configured keepers leave commit valuations stale-blocked
+gate is 120s. Default-configured keepers left commit valuations stale-blocked
 for most of each cycle. **Action:** lower the default to ≤90s.
+**Resolution:** default lowered to 70s (matching RUNBOOK's 65-75s cadence);
+`.env.example` and README updated to match.
 
 ---
 
