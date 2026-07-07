@@ -234,7 +234,7 @@ fn deposit_rejects_zero_side_for_initial() {
 
 #[test]
 fn first_deposit_rejects_subfloor_reserve_side() {
-    // F-9 regression: an asymmetric first deposit whose geometric mean
+    // An asymmetric first deposit whose geometric mean
     // clears MINIMUM_LIQUIDITY but whose smaller side is below it must be
     // rejected. sqrt(20 * 5e8) = 100_000 passes the geometric-mean check,
     // yet reserve0 would be left at 20 — under the floor the swap path and

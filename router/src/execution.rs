@@ -162,12 +162,12 @@ fn start_multi_hop(
     if offer_amount.is_zero() {
         return Err(RouterError::ZeroAmount);
     }
-    // Delta-audit hardening (DA-2): with per-hop max_spread pinned to the
-    // pools' 5% hard cap, minimum_receive is the ONLY end-to-end slippage
-    // guard. Zero means a 3-hop route could be sandwiched for up to ~14%
-    // with no recourse; no retail flow ever wants that, and frontends
-    // size it from SimulateMultiHop. Fail closed at the shared entry
-    // point (covers both the native and CW20 paths).
+    // With per-hop max_spread pinned to the pools' 5% hard cap,
+    // minimum_receive is the ONLY end-to-end slippage guard. Zero means a
+    // 3-hop route could be sandwiched for up to ~14% with no recourse; no
+    // retail flow ever wants that, and frontends size it from
+    // SimulateMultiHop. Fail closed at the shared entry point (covers both
+    // the native and CW20 paths).
     if minimum_receive.is_zero() {
         return Err(RouterError::ZeroMinimumReceive);
     }

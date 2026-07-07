@@ -1430,10 +1430,10 @@ fn simulation_rejects_unregistered_pool() {
     );
 }
 
-/// Delta-audit hardening (DA-2): minimum_receive is the only end-to-end
-/// slippage protection (per-hop gates are pinned to the pools' 5% hard
-/// cap), so a zero value — i.e. no protection at all — is rejected at
-/// the shared entry point on both offer paths.
+/// minimum_receive is the only end-to-end slippage protection (per-hop
+/// gates are pinned to the pools' 5% hard cap), so a zero value — i.e.
+/// no protection at all — is rejected at the shared entry point on both
+/// offer paths.
 #[test]
 fn router_rejects_zero_minimum_receive() {
     let mut world = setup_world();
