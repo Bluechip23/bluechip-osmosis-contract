@@ -1800,7 +1800,7 @@ Every commit emits a `wasm` event with these attributes:
 | Attribute | Value |
 |-----------|-------|
 | `action` | `"commit"` |
-| `phase` | `"funding"` \| `"post-threshold"` \| `"threshold-crossing"` \| `"threshold-hit-exact"` |
+| `phase` | `"funding"` (pre-threshold) \| `"active"` (post-threshold) \| `"threshold_crossing"` \| `"threshold_hit_exact"` |
 | `committer` | wallet address that committed |
 | `commit_amount_bluechip` / `commit_amount_usd` | amounts in micro-units |
 | `total_commit_count` | running commit counter for the pool |

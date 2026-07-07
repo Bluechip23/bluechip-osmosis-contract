@@ -1018,7 +1018,7 @@ bluechip-contracts/
 └── frontend/                         # Reference UI
 ```
 
-See `FUZZING.md` for the fuzz harness layout and `FUZZ_REVIEW.md` for the latest coverage review.
+See `FUZZING.md` for the fuzz harness layout and coverage notes.
 
 ### Deployment Order
 

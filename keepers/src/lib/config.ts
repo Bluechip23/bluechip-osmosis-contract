@@ -77,16 +77,20 @@ export const ConfigSchema = z.object({
   // Wallet
   KEEPER_MNEMONIC: nonEmptyString,
 
-  // Oracle keeper tuning
-  ORACLE_POLL_INTERVAL_MS: positiveIntString({ default: "330000" }), // 5.5 min
+  // Oracle keeper tuning. 70s tracks the on-chain UPDATE_INTERVAL (60s,
+  // factory/src/internal_bluechip_price_oracle.rs) with headroom, and
+  // stays well inside the pool-side 120s staleness gate
+  // (MAX_ORACLE_STALENESS_SECONDS, creator-pool/src/swap_helper.rs).
+  // See RUNBOOK.md ("65-75s cadence") and SECURITY_AUDIT.md F-8.
+  ORACLE_POLL_INTERVAL_MS: positiveIntString({ default: "70000" }), // 70 s
 
   // Rate-limit prune sweep cadence (folded into the oracle keeper).
   // Once every N oracle iterations the keeper also dispatches
-  // factory.PruneRateLimits {}. Default 200 × 5.5min ≈ 18h, so the
+  // factory.PruneRateLimits {}. Default 750 × 70s ≈ 14.5h, so the
   // sweep runs roughly daily per process. Set to 0 to disable
   // entirely (e.g., for testnets where rate-limit growth doesn't
   // matter or for ops who'd rather run prune as a separate cron).
-  ORACLE_PRUNE_EVERY_N: positiveIntString({ allowZero: true, default: "200" }),
+  ORACLE_PRUNE_EVERY_N: positiveIntString({ allowZero: true, default: "750" }),
   // Per-call work cap passed to PruneRateLimits. Contract enforces a
   // hard ceiling of 500; we default to 100 which is plenty for the
   // expected drift rate (≪ 100 stale entries per day on a healthy
