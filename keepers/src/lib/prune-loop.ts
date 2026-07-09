@@ -1,4 +1,4 @@
-// PruneRateLimits sweep — folded into the oracle keeper.
+// PruneRateLimits sweep — folded into the distribution keeper.
 //
 // Background: the factory's `LAST_COMMIT_POOL_CREATE_AT` and
 // `LAST_STANDARD_POOL_CREATE_AT` maps are keyed on `info.sender`. They
@@ -10,13 +10,12 @@
 // `factory.PruneRateLimits { batch_size }` is permissionless and removes
 // entries older than 10× the cooldown window (so 10h today). We don't
 // run it as its own bot because:
-//   - It has no bounty (no economic incentive to spin up a dedicated process).
 //   - Cadence is wildly relaxed (daily would be plenty).
-//   - The oracle keeper already runs every ~5 min and is the natural
-//     place to tack on a low-frequency sweep.
+//   - The distribution keeper already runs a periodic sweep and is the
+//     natural place to tack on a low-frequency maintenance call.
 //
-// We dispatch the prune once every `ORACLE_PRUNE_EVERY_N` iterations of
-// the oracle keeper. With the default 5.5min poll * 200 = ~18h, the
+// We dispatch the prune once every `PRUNE_EVERY_N_SWEEPS` sweeps of the
+// distribution keeper. With the default 30min sweep * 48 = ~24h, the
 // sweep fires roughly once a day per process.
 
 import type { Executor } from "./executor.js";

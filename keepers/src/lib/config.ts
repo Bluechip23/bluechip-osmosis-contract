@@ -77,27 +77,6 @@ export const ConfigSchema = z.object({
   // Wallet
   KEEPER_MNEMONIC: nonEmptyString,
 
-  // Oracle keeper tuning. 70s tracks the on-chain UPDATE_INTERVAL (60s,
-  // factory/src/internal_bluechip_price_oracle.rs) with headroom, and
-  // stays well inside the pool-side 120s staleness gate
-  // (MAX_ORACLE_STALENESS_SECONDS, creator-pool/src/swap_helper.rs).
-  // See RUNBOOK.md ("65-75s cadence") and SECURITY_AUDIT.md F-8.
-  ORACLE_POLL_INTERVAL_MS: positiveIntString({ default: "70000" }), // 70 s
-
-  // Rate-limit prune sweep cadence (folded into the oracle keeper).
-  // Once every N oracle iterations the keeper also dispatches
-  // factory.PruneRateLimits {}. Default 750 × 70s ≈ 14.5h, so the
-  // sweep runs roughly daily per process. Set to 0 to disable
-  // entirely (e.g., for testnets where rate-limit growth doesn't
-  // matter or for ops who'd rather run prune as a separate cron).
-  ORACLE_PRUNE_EVERY_N: positiveIntString({ allowZero: true, default: "750" }),
-  // Per-call work cap passed to PruneRateLimits. Contract enforces a
-  // hard ceiling of 500; we default to 100 which is plenty for the
-  // expected drift rate (≪ 100 stale entries per day on a healthy
-  // protocol). Tunable upward for backlog catch-up after a long
-  // prune outage.
-  PRUNE_BATCH_SIZE: positiveIntString({ default: "100" }),
-
   // Distribution keeper tuning
   DISTRIBUTION_POLL_INTERVAL_MS: positiveIntString({ default: "1800000" }), // 30 min
   // 0 means "no breather"; default is a 2s pause between pool calls so we
@@ -107,27 +86,24 @@ export const ConfigSchema = z.object({
     default: "2000",
   }),
 
-  // Safety
+  // Rate-limit prune sweep cadence (folded into the distribution keeper).
+  // Once every N distribution sweeps the keeper also dispatches
+  // factory.PruneRateLimits {}. Default 48 × 30min ≈ once a day, which
+  // is plenty for the expected rate-limit drift. Set to 0 to disable
+  // entirely (e.g., for testnets where rate-limit growth doesn't matter
+  // or for ops who'd rather run prune as a separate cron).
+  PRUNE_EVERY_N_SWEEPS: positiveIntString({ allowZero: true, default: "48" }),
+  // Per-call work cap passed to PruneRateLimits. Contract enforces a
+  // hard ceiling of 500; we default to 100 which is plenty for the
+  // expected drift rate (≪ 100 stale entries per day on a healthy
+  // protocol). Tunable upward for backlog catch-up after a long
+  // prune outage.
+  PRUNE_BATCH_SIZE: positiveIntString({ default: "100" }),
+
+  // Safety: warn when the keeper wallet's gas runway dips below this.
+  // Keeper calls are bounty-less, so the wallet only ever drains — top
+  // it up when the warning fires.
   MIN_KEEPER_BALANCE_UBLUECHIP: nonNegativeBigIntString("1000000"),
-
-  // Warning threshold for the FACTORY contract's bounty reserve. Distinct
-  // from MIN_KEEPER_BALANCE_UBLUECHIP, which guards the keeper wallet's gas
-  // runway. The factory pays both the oracle bounty (capped at $1) and the
-  // distribution bounty (capped at $1 per batch) out of its native balance;
-  // when the reserve runs low, bounties begin emitting `bounty_skipped =
-  // insufficient_factory_balance` and the operator needs to top up. Default
-  // 100 bluechip ≈ a few thousand bounties at $0.05 — set lower for tighter
-  // alerting, higher to silence noise.
-  MIN_FACTORY_BOUNTY_RESERVE_UBLUECHIP: nonNegativeBigIntString("100000000"),
-
-  // Mock-oracle price push (local/testnet only). When MOCK_ORACLE_ADDRESS
-  // is set, the oracle keeper pushes a fresh SetPrice to the mock oracle
-  // before each UpdateOraclePrice call, simulating the production flow
-  // where the factory reads a live price source every 5 minutes.
-  // Leave unset in production.
-  MOCK_ORACLE_ADDRESS: z.string().optional(),
-  MOCK_PRICE_FEED_ID: nonEmptyString.default("BLUECHIP_USD"),
-  MOCK_PRICE_UBLUECHIP: nonEmptyString.default("1000000"),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

@@ -2,13 +2,13 @@
 //
 // Every commit pool, on threshold-cross, dispatches a NotifyThresholdCrossed
 // SubMsg to the factory using `reply_on_error`. If the factory rejects
-// (e.g., expand-economy reservoir is empty AND skip-with-Ok was configured
-// off, or some transient factory bug), the pool sets PENDING_FACTORY_NOTIFY
-// = true and the threshold-mint reward is held until somebody calls
+// (some transient factory bug or misconfiguration), the pool sets
+// PENDING_FACTORY_NOTIFY = true and the factory's threshold-crossing
+// registry entry is missing until somebody calls
 // pool.RetryFactoryNotify {}.
 //
 // The contract handler is permissionless on purpose — anyone can settle
-// the stuck mint. We add a keeper that polls each pool's
+// the stuck notify. We add a keeper that polls each pool's
 // `FactoryNotifyStatus` query and dispatches RetryFactoryNotify only on
 // pools that report `pending = true`. Querying first avoids blasting
 // every pool every round (most pools have nothing pending most of the
@@ -16,8 +16,8 @@
 //
 // No bounty exists for this action — the contract doesn't pay one and
 // we don't need one (the keeper that runs this is the same operator
-// running the oracle/distribution keepers, who already absorbs the gas
-// cost of "running keepers" as part of running the protocol).
+// running the distribution keeper, who already absorbs the gas cost of
+// "running keepers" as part of running the protocol).
 //
 // Folded into the distribution-keeper process (rather than running as a
 // third long-lived bot) because:

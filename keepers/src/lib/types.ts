@@ -6,14 +6,14 @@
 // Execute messages — the only thing the keeper actually constructs
 // ---------------------------------------------------------------------------
 
-export const FactoryExecUpdateOraclePrice = { update_oracle_price: {} } as const;
 export const PoolExecContinueDistribution = { continue_distribution: {} } as const;
 /**
  * Pool-side recovery: re-sends NotifyThresholdCrossed to the factory when
  * the original SubMsg landed in reply_on_error during the threshold-cross
- * commit (e.g., expand-economy was stalled). Permissionless — anyone may
- * call. Idempotent on the factory side via POOL_THRESHOLD_MINTED, so a
- * stale/redundant call wastes the caller's gas but cannot double-mint.
+ * commit. Permissionless — anyone may call. Idempotent on the factory
+ * side via POOL_THRESHOLD_CROSSED (the factory records the crossing once
+ * and rejects duplicates), so a stale/redundant call wastes the caller's
+ * gas but cannot double-record.
  */
 export const PoolExecRetryFactoryNotify = { retry_factory_notify: {} } as const;
 /**
@@ -57,8 +57,6 @@ export interface FactoryNotifyStatusResponse {
 // form, not the variant name. Keeping both protects against either form
 // appearing in future error payloads.
 const SKIP_MARKERS = [
-  "UpdateTooSoon",
-  "too quickly",
   "NothingToRecover",
   "not found",
   // RetryFactoryNotify: pool returns this when no notify is pending.
@@ -66,11 +64,11 @@ const SKIP_MARKERS = [
   // notify most of the time — so treat as a clean skip rather than an
   // error.
   "No pending factory notification to retry",
-  // RetryFactoryNotify: factory rejects when POOL_THRESHOLD_MINTED is
-  // already true (idempotency gate). Means the previous mint actually
+  // RetryFactoryNotify: factory rejects when POOL_THRESHOLD_CROSSED is
+  // already set (idempotency gate). Means the previous notify actually
   // landed and the pool's pending flag is just stale; the next round
   // of activity will clear it.
-  "Bluechip mint already triggered",
+  "Threshold crossing already recorded for this pool",
 ] as const;
 
 export function isExpectedSkipError(message: string): boolean {

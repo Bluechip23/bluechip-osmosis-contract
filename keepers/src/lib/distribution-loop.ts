@@ -1,5 +1,5 @@
 import {
-  classifyBountyTx,
+  classifyTx,
   isDistributionComplete,
   shouldContinueSamePool,
   type TxOutcome,
@@ -39,7 +39,9 @@ export interface DrainResult {
 
 /**
  * Drain one pool by calling ContinueDistribution repeatedly until
- * distribution_complete=true or a non-progress outcome.
+ * distribution_complete=true or a non-progress outcome. There is no
+ * bounty for this — the keeper simply pays gas to move committer
+ * payouts along.
  *
  * maxBatches is a safety valve — we never loop infinitely on one pool
  * within one iteration even if the chain misbehaves.
@@ -60,42 +62,18 @@ export async function drainPool(
 
     try {
       const tx = await executor.execute(poolAddress, PoolExecContinueDistribution);
-      outcome = classifyBountyTx(tx);
+      outcome = classifyTx(tx);
       complete = isDistributionComplete(tx);
       batches++;
       lastOutcome = { kind: "tx", outcome };
 
       switch (outcome.kind) {
-        case "paid":
-          madeProgress = true;
-          log.info("distribution batch paid", {
-            pool: poolAddress,
-            batch,
-            tx: tx.transactionHash,
-            bounty_usd: outcome.bountyUsd,
-            bounty_bluechip: outcome.bountyBluechip,
-            complete,
-          });
-          break;
         case "ok":
           madeProgress = true;
-          log.info("distribution batch processed, no bounty configured", {
+          log.info("distribution batch processed", {
             pool: poolAddress,
             batch,
             tx: tx.transactionHash,
-            complete,
-          });
-          break;
-        case "skipped":
-          // Bounty skipped but distribution still progressed this batch.
-          // We stop the inner loop because something needs operator
-          // attention (factory underfunded, price unavailable, etc).
-          madeProgress = true;
-          log.warn("distribution batch, bounty skipped", {
-            pool: poolAddress,
-            batch,
-            tx: tx.transactionHash,
-            reason: outcome.reason,
             complete,
           });
           break;

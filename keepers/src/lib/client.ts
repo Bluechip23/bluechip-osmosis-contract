@@ -13,8 +13,8 @@ export interface KeeperClient extends Executor {
  * Derives the keeper wallet from mnemonic, connects to the chain, and
  * returns a live Executor plus a close handle.
  *
- * Use two different mnemonics (one per keeper process) so the oracle
- * and distribution bots don't fight over sequence numbers.
+ * If you ever run more than one keeper process, give each its own
+ * mnemonic so they don't fight over sequence numbers.
  */
 export async function buildKeeperClient(cfg: Config): Promise<KeeperClient> {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(cfg.KEEPER_MNEMONIC, {
@@ -46,10 +46,6 @@ export async function buildKeeperClient(cfg: Config): Promise<KeeperClient> {
     },
     async getBalance(denom): Promise<bigint> {
       const coin = await signer.getBalance(address, denom);
-      return BigInt(coin.amount);
-    },
-    async getAddressBalance(target, denom): Promise<bigint> {
-      const coin = await signer.getBalance(target, denom);
       return BigInt(coin.amount);
     },
     async queryContractSmart<T>(contract: string, msg: Record<string, unknown>): Promise<T> {

@@ -3,8 +3,9 @@ import { loadConfigFromEnv } from "./lib/config.js";
 import { buildKeeperClient } from "./lib/client.js";
 import { nextDistributionSleepMs } from "./lib/decisions.js";
 import { runDistributionSweep } from "./lib/distribution-loop.js";
-import { checkFactoryBalance, checkKeeperBalance } from "./lib/oracle-loop.js";
+import { checkKeeperBalance } from "./lib/balance.js";
 import { resolveWatchList } from "./lib/discovery.js";
+import { runPruneIteration } from "./lib/prune-loop.js";
 import { runRetryNotifySweep } from "./lib/retry-notify-loop.js";
 import { interruptibleSleep } from "./lib/sleep.js";
 import { log } from "./lib/logger.js";
@@ -35,6 +36,22 @@ async function main(): Promise<void> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
+  // Sweep counter for the rate-limit prune. We dispatch
+  // factory.PruneRateLimits once every PRUNE_EVERY_N_SWEEPS distribution
+  // sweeps. A counter (rather than wall-clock cadence) keeps the
+  // sequence-number tx ordering simple — the prune always runs right
+  // after a sweep on the same wallet. PRUNE_EVERY_N_SWEEPS == 0
+  // disables the sweep.
+  let pruneCounter = 0;
+  if (cfg.PRUNE_EVERY_N_SWEEPS === 0) {
+    log.info("rate-limit prune sweep disabled (PRUNE_EVERY_N_SWEEPS=0)");
+  } else {
+    log.info("rate-limit prune sweep enabled", {
+      every_n_sweeps: cfg.PRUNE_EVERY_N_SWEEPS,
+      batch_size: cfg.PRUNE_BATCH_SIZE,
+    });
+  }
+
   let watchList: string[] = cfg.POOL_ADDRESSES;
   while (!stopped) {
     watchList = await resolveWatchList(
@@ -45,15 +62,13 @@ async function main(): Promise<void> {
     );
 
     // Run the retry-factory-notify sweep BEFORE the distribution sweep.
-    // Order matters: a stuck factory-notify means POOL_THRESHOLD_MINTED
-    // never landed on the factory side, which blocks the bluechip
-    // mint reward but does NOT block distribution itself (distribution
-    // mints creator-tokens, which is a pool-side action). Still,
-    // settling the notify first means the same iteration can leave
-    // the pool fully consistent rather than half. Each pool's
-    // RetryFactoryNotify is itself permissionless and idempotent on
-    // the factory side (POOL_THRESHOLD_MINTED gate), so a redundant
-    // call is at worst wasted gas — never a double-mint.
+    // A stuck factory-notify means the factory's POOL_THRESHOLD_CROSSED
+    // registry entry never landed. It does NOT block distribution
+    // itself, but settling the notify first means the same iteration
+    // can leave the pool fully consistent rather than half. Each
+    // pool's RetryFactoryNotify is permissionless and idempotent on
+    // the factory side (POOL_THRESHOLD_CROSSED gate), so a redundant
+    // call is at worst wasted gas.
     await runRetryNotifySweep(client, watchList);
 
     const { madeProgress } = await runDistributionSweep(
@@ -62,17 +77,18 @@ async function main(): Promise<void> {
       cfg.DISTRIBUTION_PER_POOL_DELAY_MS,
     );
     await checkKeeperBalance(client, cfg.GAS_DENOM, cfg.MIN_KEEPER_BALANCE_UBLUECHIP);
-    // Distribution bounties are paid from the factory's native reserve, not
-    // the pools'. If the reserve drains, factory.PayDistributionBounty starts
-    // emitting `bounty_skipped = insufficient_factory_balance` and the
-    // keeper's effective compensation goes to zero. Surface a warning while
-    // there's still time to top up.
-    await checkFactoryBalance(
-      client,
-      cfg.FACTORY_ADDRESS,
-      cfg.GAS_DENOM,
-      cfg.MIN_FACTORY_BOUNTY_RESERVE_UBLUECHIP,
-    );
+
+    // Once every PRUNE_EVERY_N_SWEEPS sweeps, also run the rate-limit
+    // prune. Independent of the sweep's success — a quiet distribution
+    // round doesn't mean we shouldn't prune; the two are unrelated
+    // chain operations.
+    if (cfg.PRUNE_EVERY_N_SWEEPS > 0) {
+      pruneCounter += 1;
+      if (pruneCounter >= cfg.PRUNE_EVERY_N_SWEEPS) {
+        pruneCounter = 0;
+        await runPruneIteration(client, cfg.FACTORY_ADDRESS, cfg.PRUNE_BATCH_SIZE);
+      }
+    }
 
     const ms = nextDistributionSleepMs(cfg.DISTRIBUTION_POLL_INTERVAL_MS, madeProgress);
     log.info("sleeping", { ms, made_progress: madeProgress });

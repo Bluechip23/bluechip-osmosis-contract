@@ -5,10 +5,10 @@ use crate::generic_helpers::calculate_effective_batch_size;
 use crate::liquidity::execute_deposit_liquidity;
 use crate::msg::ExecuteMsg;
 use crate::state::{
-    CommitLimitInfo, OracleInfo, PoolDetails, PoolFeeState, PoolInfo, PoolSpecs, PoolState,
+    CommitLimitInfo, PoolDetails, PoolFeeState, PoolInfo, PoolSpecs, PoolState,
     ThresholdPayoutAmounts, COMMIT_INFO, COMMIT_LEDGER, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
     DEFAULT_MAX_GAS_PER_TX, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, NEXT_POSITION_ID,
-    ORACLE_INFO, POOL_FEE_STATE, POOL_PAUSED, POOL_SPECS, POOL_STATE, REENTRANCY_LOCK,
+    POOL_FEE_STATE, POOL_PAUSED, POOL_SPECS, POOL_STATE, REENTRANCY_LOCK,
     USD_RAISED_FROM_COMMIT,
 };
 use crate::{
@@ -22,9 +22,7 @@ use crate::{
     },
     testing::liquidity_tests::{setup_pool_post_threshold, setup_pool_storage},
 };
-use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
-    from_json,
     testing::{
         message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
         MOCK_CONTRACT_ADDR,
@@ -33,12 +31,7 @@ use cosmwasm_std::{
     OwnedDeps, SystemError, SystemResult, Timestamp, Uint128, WasmQuery,
 };
 use cw20::Cw20ReceiveMsg;
-use pool_factory_interfaces::{ConversionResponse, FactoryQueryMsg};
 
-#[cw_serde]
-enum FactoryQueryWrapper {
-    InternalBlueChipOracleQuery(FactoryQueryMsg),
-}
 fn mock_dependencies_with_balance(
     balances: &[Coin],
 ) -> OwnedDeps<MockStorage, MockApi, MockQuerier> {

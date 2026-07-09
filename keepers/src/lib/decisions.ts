@@ -23,7 +23,7 @@ export interface TxEvent {
 /**
  * Scrape a specific attribute value from a wasm event in a tx result.
  * Returns undefined if the attribute isn't present. Used by the keeper
- * to log "did we actually get paid?" after each tx.
+ * to read progress markers (e.g. `distribution_complete`) after each tx.
  */
 export function readWasmAttribute(
   result: TxResult,
@@ -41,49 +41,18 @@ export function readWasmAttribute(
 
 /**
  * Classify the outcome of a keeper tx. Used both to drive logging and
- * to decide whether to alert the operator.
+ * to decide whether to alert the operator. Keeper calls carry no
+ * bounty economics anymore — a tx either landed or it didn't.
  */
 export type TxOutcome =
-  | { kind: "paid"; bountyUsd: string; bountyBluechip: string }
-  | { kind: "skipped"; reason: string }
-  | { kind: "ok" } // tx succeeded but emitted no bounty attributes
+  | { kind: "ok" }
   | { kind: "failed"; rawLog: string };
 
-export function classifyBountyTx(result: TxResult): TxOutcome {
+export function classifyTx(result: TxResult): TxOutcome {
   if (result.code !== 0) {
     return { kind: "failed", rawLog: result.rawLog ?? "tx failed" };
   }
-  const paidUsd = readWasmAttribute(result, "bounty_paid_usd");
-  const paidBluechip = readWasmAttribute(result, "bounty_paid_bluechip");
-  if (paidUsd && paidBluechip) {
-    return { kind: "paid", bountyUsd: paidUsd, bountyBluechip: paidBluechip };
-  }
-  const skipped = readWasmAttribute(result, "bounty_skipped");
-  if (skipped) {
-    return { kind: "skipped", reason: skipped };
-  }
   return { kind: "ok" };
-}
-
-/**
- * Compute how long to sleep before the next oracle-keeper poll.
- *
- * Called after a loop iteration completes. Adds *centered* jitter
- * (`±jitterMs/2`) so that multiple keepers booted at the same time
- * actually drift apart rather than clustering at `base + small`. Result
- * is clamped to >= 1 ms so we never accidentally schedule a 0-ms sleep
- * and busy-loop.
- */
-export function nextOracleSleepMs(
-  baseIntervalMs: number,
-  jitterMs: number = 5_000,
-  random: () => number = Math.random,
-): number {
-  if (baseIntervalMs <= 0) return 0;
-  // (random()-0.5) ranges in [-0.5, 0.5), so jitter ranges in
-  // [-jitterMs/2, jitterMs/2).
-  const jitter = Math.floor((random() - 0.5) * jitterMs);
-  return Math.max(1, baseIntervalMs + jitter);
 }
 
 /**
@@ -113,7 +82,7 @@ export function isDistributionComplete(result: TxResult): boolean {
 /**
  * Decide whether the keeper should keep calling the same pool in a
  * tight loop during a single iteration. We keep going as long as:
- *   - the last tx was a successful `paid` or `ok` outcome
+ *   - the last tx was a successful `ok` outcome
  *   - AND distribution_complete is still false
  *
  * Putting this logic in a pure function lets tests pin the exact
@@ -124,5 +93,5 @@ export function shouldContinueSamePool(
   complete: boolean,
 ): boolean {
   if (complete) return false;
-  return lastOutcome.kind === "paid" || lastOutcome.kind === "ok";
+  return lastOutcome.kind === "ok";
 }
