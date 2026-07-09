@@ -49,5 +49,4 @@ cw-utils = { workspace = true }
 cw-multi-test = { workspace = true }
 easy-addr = { workspace = true }
 factory = { path = "../factory", features = ["library"] }
-oracle = { path = "../mockoracle", features = ["library"] }
 cw20-base = { workspace = true }

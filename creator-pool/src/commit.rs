@@ -44,16 +44,15 @@ use crate::state::{
     POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS,
     THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
-use crate::swap_helper::get_oracle_conversion_with_staleness;
 
 use post_threshold::process_post_threshold_commit;
 use pre_threshold::process_pre_threshold_commit;
 use threshold_crossing::{process_threshold_crossing_with_excess, process_threshold_hit_exact};
 
 // Minimum commit-value floors moved to per-pool state. Defaults are
-// `crate::state::DEFAULT_MIN_COMMIT_USD_{PRE,POST}_THRESHOLD` and the
-// active values are stored on `CommitLimitInfo.min_commit_usd_pre_threshold`
-// / `min_commit_usd_post_threshold`. The floor still limits pre-threshold
+// `crate::state::DEFAULT_MIN_COMMIT_{PRE,POST}_THRESHOLD` and the
+// active values are stored on `CommitLimitInfo.min_commit_pre_threshold`
+// / `min_commit_post_threshold`. The floor still limits pre-threshold
 // ledger bloat (an attacker can cross the threshold with their own
 // money, but not via thousands of micro-entries that balloon the
 // distribution queue); post-threshold commits stay looser since they're
@@ -177,41 +176,30 @@ fn execute_commit_logic(
         return Err(ContractError::ZeroAmount {});
     }
 
-    // Snapshot the oracle rate once at commit entry and thread it through
-    // every conversion that happens during this handler. Prevents
-    // mid-tx drift where the USD valuation at the top of the handler could
-    // disagree with the bluechip_to_threshold conversion computed later in
-    // process_threshold_crossing_with_excess. No current path allows
-    // drift within a single tx — the factory's cached price doesn't change
-    // during a commit — but threading one rate explicitly makes the
-    // invariant load-bearing rather than incidental.
-    let oracle_snapshot =
-        get_oracle_conversion_with_staleness(deps.as_ref(), asset.amount, env.block.time.seconds())?;
-    let usd_value = oracle_snapshot.amount;
-    let oracle_rate = oracle_snapshot.rate_used;
-    if oracle_rate.is_zero() {
-        return Err(ContractError::InvalidOraclePrice {});
-    }
-    if usd_value.is_zero() {
-        return Err(ContractError::InvalidOraclePrice {});
-    }
+    // The commit's value toward the threshold IS its native amount —
+    // the threshold, the minimum-commit floors, and the per-committer
+    // ledger are all denominated in base units of the chain's native
+    // asset, so no price conversion is needed anywhere in the commit
+    // flow. (`commit_value` is the GROSS pre-fee amount; the net-of-fees
+    // amount computed below is what actually seeds the pool.)
+    let commit_value = asset.amount;
     // Load IS_THRESHOLD_HIT once and thread it through both the minimum-
     // commit check here and the main branching below (used later as
     // `threshold_already_hit`). Previously the load was duplicated.
     let threshold_already_hit = IS_THRESHOLD_HIT.load(deps.storage)?;
     let min_commit = if threshold_already_hit {
-        commit_config.min_commit_usd_post_threshold
+        commit_config.min_commit_post_threshold
     } else {
-        commit_config.min_commit_usd_pre_threshold
+        commit_config.min_commit_pre_threshold
     };
-    if usd_value < min_commit {
+    if commit_value < min_commit {
         let phase: &'static str = if threshold_already_hit {
             "post-threshold"
         } else {
             "pre-threshold"
         };
         return Err(ContractError::CommitTooSmall {
-            got: usd_value,
+            got: commit_value,
             min: min_commit,
             phase,
         });
@@ -277,10 +265,10 @@ fn execute_commit_logic(
             // `threshold_already_hit` was loaded above alongside the
             // minimum-commit check — reuse it here instead of re-reading.
             let response = if !threshold_already_hit {
-                let current_usd_raised = USD_RAISED_FROM_COMMIT.load(deps.storage)?;
-                let new_total = current_usd_raised.checked_add(usd_value)?;
+                let current_raised = USD_RAISED_FROM_COMMIT.load(deps.storage)?;
+                let new_total = current_raised.checked_add(commit_value)?;
 
-                if new_total >= commit_config.commit_amount_for_threshold_usd {
+                if new_total >= commit_config.commit_amount_for_threshold {
                     LAST_THRESHOLD_ATTEMPT.save(deps.storage, &env.block.time)?;
 
                     // THRESHOLD_PROCESSING is set to `true` immediately
@@ -312,12 +300,12 @@ fn execute_commit_logic(
                     }
                     THRESHOLD_PROCESSING.save(deps.storage, &true)?;
 
-                    let usd_to_threshold = commit_config
-                        .commit_amount_for_threshold_usd
-                        .checked_sub(current_usd_raised)
+                    let value_to_threshold = commit_config
+                        .commit_amount_for_threshold
+                        .checked_sub(current_raised)
                         .unwrap_or(Uint128::zero());
 
-                    if usd_value > usd_to_threshold && usd_to_threshold > Uint128::zero() {
+                    if commit_value > value_to_threshold && value_to_threshold > Uint128::zero() {
                         // Split commit: part goes to threshold, excess becomes swap
                         process_threshold_crossing_with_excess(
                             deps,
@@ -326,9 +314,8 @@ fn execute_commit_logic(
                             &asset,
                             amount,
                             amount_after_fees,
-                            usd_value,
-                            usd_to_threshold,
-                            oracle_rate,
+                            commit_value,
+                            value_to_threshold,
                             &mut pool_state,
                             &mut pool_fee_state,
                             &pool_specs,
@@ -354,7 +341,7 @@ fn execute_commit_logic(
                             sender,
                             &asset,
                             amount_after_fees,
-                            usd_value,
+                            commit_value,
                             new_total,
                             &mut pool_state,
                             &mut pool_fee_state,
@@ -373,7 +360,7 @@ fn execute_commit_logic(
                         env,
                         sender,
                         &asset,
-                        usd_value,
+                        commit_value,
                         // Net-of-fees bluechip that actually enters the
                         // contract bank balance from this commit
                         // (see pre_threshold.rs).
@@ -390,7 +377,7 @@ fn execute_commit_logic(
                     sender,
                     asset,
                     amount_after_fees,
-                    usd_value,
+                    commit_value,
                     messages,
                     belief_price,
                     max_spread,

@@ -24,14 +24,14 @@ pub(super) fn process_pre_threshold_commit(
     env: Env,
     sender: Addr,
     asset: &TokenInfo,
-    usd_value: Uint128,
+    commit_value: Uint128,
     net_bluechip: Uint128,
     messages: Vec<CosmosMsg>,
     pool_state: &PoolState,
     analytics: &mut PoolAnalytics,
 ) -> Result<Response, ContractError> {
     COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
-        Ok(v.unwrap_or_default().checked_add(usd_value)?)
+        Ok(v.unwrap_or_default().checked_add(commit_value)?)
     })?;
     // Capture the update return values so we don't re-read USD_RAISED /
     // NATIVE_RAISED after the writes. `Item::update` returns the new value.
@@ -45,8 +45,8 @@ pub(super) fn process_pre_threshold_commit(
     // leaving up to ~2 units per commit stranded in the contract
     // forever. Storing net directly eliminates the second floor and
     // makes the seed math exact: `pools_bluechip_seed = NATIVE_RAISED`.
-    let total_usd_raised = USD_RAISED_FROM_COMMIT
-        .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(usd_value)?))?;
+    let total_raised = USD_RAISED_FROM_COMMIT
+        .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(commit_value)?))?;
     let total_bluechip_raised = NATIVE_RAISED_FROM_COMMIT
         .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(net_bluechip)?))?;
 
@@ -55,7 +55,7 @@ pub(super) fn process_pre_threshold_commit(
         &sender,
         &pool_state.pool_contract_address,
         asset.amount,
-        usd_value,
+        commit_value,
         env.block.time,
     )?;
 
@@ -73,8 +73,7 @@ pub(super) fn process_pre_threshold_commit(
         .add_messages(messages)
         .add_attributes(base)
         .add_attribute("commit_amount_bluechip", asset.amount.to_string())
-        .add_attribute("commit_amount_usd", usd_value.to_string())
-        .add_attribute("total_usd_raised_after", total_usd_raised.to_string())
+        .add_attribute("total_raised_after", total_raised.to_string())
         .add_attribute(
             "total_bluechip_raised_after",
             total_bluechip_raised.to_string(),

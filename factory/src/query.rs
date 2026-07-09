@@ -1,12 +1,6 @@
 use crate::asset::TokenType;
-use crate::internal_bluechip_price_oracle::{
-    bluechip_to_usd, get_bluechip_usd_price, usd_to_bluechip,
-};
 use crate::msg::FactoryInstantiateResponse;
-use crate::state::{
-    CreationStatus, DISTRIBUTION_BOUNTY_USD, FACTORYINSTANTIATEINFO, ORACLE_UPDATE_BOUNTY_USD,
-    POOLS_BY_ID, POOL_CREATION_CONTEXT,
-};
+use crate::state::{CreationStatus, FACTORYINSTANTIATEINFO, POOLS_BY_ID, POOL_CREATION_CONTEXT};
 use cosmwasm_schema::{cw_serde, QueryResponses};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -25,23 +19,6 @@ pub struct CreatorTokenInfoResponse {
     pub decimals: u8,
     pub total_supply: Uint128,
     pub token_address: Addr,
-}
-
-/// Configured oracle-update keeper bounty (paid per successful
-/// `UpdateOraclePrice`). USD-denominated, 6 decimals.
-#[cw_serde]
-pub struct OracleUpdateBountyResponse {
-    pub bounty_usd: Uint128,
-}
-
-/// Configured pool-distribution keeper bounty (paid per successful
-/// `pool.ContinueDistribution` batch). USD-denominated, 6 decimals.
-/// Held as a distinct type from [`OracleUpdateBountyResponse`] so that
-/// future per-bounty extensions (e.g. min-batch-size, per-batch caps)
-/// can land on one without rippling through the other's wire format.
-#[cw_serde]
-pub struct DistributionBountyResponse {
-    pub bounty_usd: Uint128,
 }
 
 /// Per-pool creation diagnostics. Useful for off-chain tooling that watches
@@ -86,12 +63,11 @@ pub enum QueryMsg {
     Factory {},
     #[returns(CreatorTokenInfoResponse)]
     CreatorTokenInfo { pool_id: u64 },
+    /// Cross-contract queries pools make against their factory
+    /// (emergency-withdraw delay, live protocol wallet). Wraps the shared
+    /// [`FactoryQueryMsg`] interface enum from `pool-factory-interfaces`.
     #[returns(cosmwasm_std::Binary)]
-    InternalBlueChipOracleQuery(FactoryQueryMsg),
-    #[returns(OracleUpdateBountyResponse)]
-    OracleUpdateBounty {},
-    #[returns(DistributionBountyResponse)]
-    DistributionBounty {},
+    PoolFactoryQuery(FactoryQueryMsg),
     /// Returns the in-flight creation status for a given pool_id, or None
     /// when creation completed cleanly and the entry was reaped.
     #[returns(Option<PoolCreationStatusResponse>)]
@@ -122,11 +98,9 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::CreatorTokenInfo { pool_id } => {
             to_json_binary(&query_creator_token_info(deps, pool_id)?)
         }
-        QueryMsg::InternalBlueChipOracleQuery(oracle_msg) => {
-            handle_internal_bluechip_oracle_query(deps, env, oracle_msg)
+        QueryMsg::PoolFactoryQuery(factory_msg) => {
+            handle_pool_factory_query(deps, env, factory_msg)
         }
-        QueryMsg::OracleUpdateBounty {} => to_json_binary(&query_oracle_update_bounty(deps)?),
-        QueryMsg::DistributionBounty {} => to_json_binary(&query_distribution_bounty(deps)?),
         QueryMsg::PoolCreationStatus { pool_id } => {
             to_json_binary(&query_pool_creation_status(deps, pool_id)?)
         }
@@ -167,14 +141,14 @@ pub fn query_pools(
 /// Resolve a pool *contract address* against the registry. Returns the
 /// pool's canonical pair + kind, or `None` if the address is not a
 /// registered Bluechip pool. Reuses the same `lookup_pool_by_addr` helper
-/// the oracle/notify auth paths use, so a router validating a hop address
+/// the notify auth path uses, so a router validating a hop address
 /// sees exactly the registry the factory itself trusts.
 pub fn query_pool_by_address(
     deps: Deps,
     pool_addr: String,
 ) -> StdResult<Option<pool_factory_interfaces::RegisteredPoolResponse>> {
     let addr = deps.api.addr_validate(&pool_addr)?;
-    let details = crate::execute::oracle::lookup_pool_by_addr(deps, &addr)?;
+    let details = crate::state::lookup_pool_by_addr(deps, &addr)?;
     Ok(details.map(|d| pool_factory_interfaces::RegisteredPoolResponse {
         pool_id: d.pool_id,
         pool_token_info: d.pool_token_info,
@@ -190,11 +164,7 @@ pub fn query_pool_creation_status(
         Some(c) => c,
         None => return Ok(None),
     };
-    let crate::state::PoolCreationContext {
-        temp,
-        state,
-        commit_pool_ordinal: _,
-    } = ctx;
+    let crate::state::PoolCreationContext { temp, state } = ctx;
     Ok(Some(PoolCreationStatusResponse {
         pool_id: state.pool_id,
         creator: state.creator,
@@ -213,20 +183,6 @@ pub fn query_pool_creation_status(
         creation_time: state.creation_time,
         status: state.status,
     }))
-}
-
-pub fn query_oracle_update_bounty(deps: Deps) -> StdResult<OracleUpdateBountyResponse> {
-    let bounty_usd = ORACLE_UPDATE_BOUNTY_USD
-        .may_load(deps.storage)?
-        .unwrap_or_default();
-    Ok(OracleUpdateBountyResponse { bounty_usd })
-}
-
-pub fn query_distribution_bounty(deps: Deps) -> StdResult<DistributionBountyResponse> {
-    let bounty_usd = DISTRIBUTION_BOUNTY_USD
-        .may_load(deps.storage)?
-        .unwrap_or_default();
-    Ok(DistributionBountyResponse { bounty_usd })
 }
 
 pub fn query_creator_token_info(deps: Deps, pool_id: u64) -> StdResult<CreatorTokenInfoResponse> {
@@ -258,21 +214,12 @@ pub fn query_creator_token_info(deps: Deps, pool_id: u64) -> StdResult<CreatorTo
     })
 }
 
-pub fn handle_internal_bluechip_oracle_query(
+pub fn handle_pool_factory_query(
     deps: Deps,
-    env: Env,
+    _env: Env,
     msg: FactoryQueryMsg,
 ) -> StdResult<Binary> {
     match msg {
-        FactoryQueryMsg::GetBluechipUsdPrice {} => {
-            to_json_binary(&get_bluechip_usd_price(deps, &env)?)
-        }
-        FactoryQueryMsg::ConvertBluechipToUsd { amount } => {
-            to_json_binary(&bluechip_to_usd(deps, amount, &env)?)
-        }
-        FactoryQueryMsg::ConvertUsdToBluechip { amount } => {
-            to_json_binary(&usd_to_bluechip(deps, amount, &env)?)
-        }
         FactoryQueryMsg::EmergencyWithdrawDelaySeconds {} => {
             // Pools call this from `pool-core::execute_emergency_withdraw_initiate`
             // so the delay always tracks the live factory config rather

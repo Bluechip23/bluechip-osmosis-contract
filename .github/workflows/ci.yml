@@ -63,15 +63,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: |
           cargo build --target wasm32-unknown-unknown --release -p creator-pool
+          cargo build --target wasm32-unknown-unknown --release -p standard-pool
           cargo build --target wasm32-unknown-unknown --release -p factory
-          cargo build --target wasm32-unknown-unknown --release -p expand-economy
           cargo build --target wasm32-unknown-unknown --release -p router
 
   # Gate against shipping a test-weakened wasm (SECURITY_REVIEW_PREAUDIT.md H-1).
-  # The canonical artifacts/factory.wasm + expand_economy.wasm that deploy
-  # tooling loads are produced by the optimizer build named "prod", which MUST
-  # have empty features. This job fails if that build ever gains `mock` or
-  # `integration_short_timing`, and proves the no-features config compiles.
+  # The canonical artifacts/factory.wasm that deploy tooling loads is produced
+  # by the optimizer build named "prod", which MUST have empty features. This
+  # job fails if that build ever gains `integration_short_timing`, and proves
+  # the no-features config compiles.
   prod-artifact-guard:
     name: Prod Artifact Guard
     runs-on: ubuntu-latest
@@ -86,4 +86,3 @@ jobs:
       - name: Prove the production (no-features) wasm compiles
         run: |
           cargo build --target wasm32-unknown-unknown --release -p factory --no-default-features
-          cargo build --target wasm32-unknown-unknown --release -p expand-economy --no-default-features

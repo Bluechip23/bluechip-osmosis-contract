@@ -1,6 +1,6 @@
 //! Factory contract entry points + shared reply-ID machinery.
 //!
-//! The bulk of the handler logic has been split into four submodules
+//! The bulk of the handler logic has been split into submodules
 //! by message family:
 //!
 //! - [`config`]         — propose / apply / cancel for both factory
@@ -10,10 +10,6 @@
 //! emergency withdraw (+ cancel), stuck-state
 //! recovery, and the threshold-crossed
 //! callback from pools.
-//! - [`oracle`]         — keeper bounty caps, the pay-distribution-
-//! bounty forward, and the one-shot anchor
-//! pool set. The TWAP math itself lives in
-//! [`crate::internal_bluechip_price_oracle`].
 //! - [`upgrades`]       — pool wasm upgrade proposal + batched migrate
 //! apply.
 //!
@@ -24,7 +20,6 @@
 //! re-exported from a submodule via `pub use`.
 
 pub mod config;
-pub mod oracle;
 pub mod pool_lifecycle;
 pub mod upgrades;
 
@@ -40,15 +35,6 @@ pub use config::{
 // `validate_factory_config` is intentionally NOT re-exported — it's
 // reached via the `config::validate_factory_config(...)` path in
 // `instantiate` so the gate is visible at the call site.
-pub use oracle::{
-    execute_apply_add_oracle_eligible_pool, execute_apply_set_commit_pools_auto_eligible,
-    execute_cancel_add_oracle_eligible_pool, execute_cancel_set_commit_pools_auto_eligible,
-    execute_pay_distribution_bounty, execute_propose_add_oracle_eligible_pool,
-    execute_propose_set_commit_pools_auto_eligible, execute_refresh_oracle_pool_snapshot,
-    execute_remove_oracle_eligible_pool, execute_set_anchor_pool,
-    execute_set_distribution_bounty, execute_set_oracle_update_bounty,
-    execute_set_pyth_conf_threshold_bps,
-};
 pub use pool_lifecycle::admin::{
     execute_cancel_emergency_withdraw_pool, execute_emergency_withdraw_pool,
     execute_notify_threshold_crossed, execute_pause_pool, execute_recover_pool_stuck_states,
@@ -60,21 +46,12 @@ pub use upgrades::{
 };
 
 use crate::error::ContractError;
-use crate::internal_bluechip_price_oracle::{
-    execute_cancel_bootstrap_price, execute_cancel_force_rotate_pools,
-    execute_confirm_bootstrap_price, execute_force_rotate_pools,
-    execute_propose_force_rotate_pools, initialize_internal_bluechip_oracle,
-    update_internal_oracle_price,
-};
 use crate::msg::ExecuteMsg;
 use crate::pool_creation_reply::{finalize_pool, mint_create_pool, set_tokens};
-use crate::state::{
-    DISTRIBUTION_BOUNTY_USD, FACTORYINSTANTIATEINFO, INITIAL_ANCHOR_SET,
-    ORACLE_UPDATE_BOUNTY_USD,
-};
+use crate::state::FACTORYINSTANTIATEINFO;
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{Deps, DepsMut, Env, MessageInfo, Reply, Response, Uint128};
+use cosmwasm_std::{Deps, DepsMut, Env, MessageInfo, Reply, Response};
 
 use crate::{CONTRACT_NAME, CONTRACT_VERSION};
 
@@ -113,7 +90,7 @@ pub fn decode_reply_id(reply_id: u64) -> (u64, u64) {
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
-    env: Env,
+    _env: Env,
     _info: MessageInfo,
     msg: crate::state::FactoryInstantiate,
 ) -> Result<Response, ContractError> {
@@ -122,17 +99,6 @@ pub fn instantiate(
     config::validate_factory_config(deps.as_ref(), &msg)?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &msg)?;
-    // Anchor address starts as whatever the deployer passes (typically a
-    // placeholder wallet); the one-shot SetAnchorPool overwrites it with
-    // the real anchor pool's contract address after that pool is created.
-    INITIAL_ANCHOR_SET.save(deps.storage, &false)?;
-    // Both keeper bounties default to zero. Admin enables them via
-    // SetOracleUpdateBounty / SetDistributionBounty (each takes a USD
-    // value in 6 decimals) once the factory has been pre-funded with
-    // ubluechip from the bluechip main wallet.
-    ORACLE_UPDATE_BOUNTY_USD.save(deps.storage, &Uint128::zero())?;
-    DISTRIBUTION_BOUNTY_USD.save(deps.storage, &Uint128::zero())?;
-    initialize_internal_bluechip_oracle(deps, env)?;
     Ok(Response::new().add_attribute("action", "init_contract"))
 }
 
@@ -153,26 +119,6 @@ pub fn execute(
             pool_msg,
             token_info,
         } => pool_lifecycle::create::execute_create_creator_pool(deps, env, info, pool_msg, token_info),
-        ExecuteMsg::UpdateOraclePrice {} => update_internal_oracle_price(deps, env, info),
-        ExecuteMsg::SetOracleUpdateBounty { new_bounty } => {
-            execute_set_oracle_update_bounty(deps, info, new_bounty)
-        }
-        ExecuteMsg::SetDistributionBounty { new_bounty } => {
-            execute_set_distribution_bounty(deps, info, new_bounty)
-        }
-        ExecuteMsg::SetPythConfThresholdBps { bps } => {
-            execute_set_pyth_conf_threshold_bps(deps, info, bps)
-        }
-        ExecuteMsg::PayDistributionBounty { recipient } => {
-            execute_pay_distribution_bounty(deps, env, info, recipient)
-        }
-        ExecuteMsg::ProposeForceRotateOraclePools {} => {
-            execute_propose_force_rotate_pools(deps, env, info)
-        }
-        ExecuteMsg::CancelForceRotateOraclePools {} => {
-            execute_cancel_force_rotate_pools(deps, info)
-        }
-        ExecuteMsg::ForceRotateOraclePools {} => execute_force_rotate_pools(deps, env, info),
         ExecuteMsg::UpgradePools {
             new_code_id,
             pool_ids,
@@ -213,39 +159,8 @@ pub fn execute(
             pool_token_info,
             label,
         } => pool_lifecycle::create::execute_create_standard_pool(deps, env, info, pool_token_info, label),
-        ExecuteMsg::SetAnchorPool { pool_id } => {
-            execute_set_anchor_pool(deps, env, info, pool_id)
-        }
-        ExecuteMsg::ConfirmBootstrapPrice {} => {
-            execute_confirm_bootstrap_price(deps, env, info)
-        }
-        ExecuteMsg::CancelBootstrapPrice {} => execute_cancel_bootstrap_price(deps, info),
         ExecuteMsg::PruneRateLimits { batch_size } => {
             execute_prune_rate_limits(deps, env, batch_size)
-        }
-        ExecuteMsg::ProposeAddOracleEligiblePool { pool_addr } => {
-            execute_propose_add_oracle_eligible_pool(deps, env, info, pool_addr)
-        }
-        ExecuteMsg::ApplyAddOracleEligiblePool { pool_addr } => {
-            execute_apply_add_oracle_eligible_pool(deps, env, info, pool_addr)
-        }
-        ExecuteMsg::CancelAddOracleEligiblePool { pool_addr } => {
-            execute_cancel_add_oracle_eligible_pool(deps, info, pool_addr)
-        }
-        ExecuteMsg::RemoveOracleEligiblePool { pool_addr } => {
-            execute_remove_oracle_eligible_pool(deps, info, pool_addr)
-        }
-        ExecuteMsg::ProposeSetCommitPoolsAutoEligible { enabled } => {
-            execute_propose_set_commit_pools_auto_eligible(deps, env, info, enabled)
-        }
-        ExecuteMsg::ApplySetCommitPoolsAutoEligible {} => {
-            execute_apply_set_commit_pools_auto_eligible(deps, env, info)
-        }
-        ExecuteMsg::CancelSetCommitPoolsAutoEligible {} => {
-            execute_cancel_set_commit_pools_auto_eligible(deps, info)
-        }
-        ExecuteMsg::RefreshOraclePoolSnapshot {} => {
-            execute_refresh_oracle_pool_snapshot(deps, env)
         }
     }
 }

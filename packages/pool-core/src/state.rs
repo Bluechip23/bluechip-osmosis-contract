@@ -213,11 +213,6 @@ pub struct PoolDetails {
 }
 
 #[cw_serde]
-pub struct OracleInfo {
-    pub oracle_addr: Addr,
-}
-
-#[cw_serde]
 pub struct Position {
     pub liquidity: Uint128,
     pub owner: Addr,
@@ -483,26 +478,6 @@ pub const APPLY_DUST_MULTIPLIER: Item<bool> = Item::new("apply_dust_multiplier")
 /// emergency_withdraw reads `bluechip_wallet_address` for the drain
 /// recipient; standard pool instantiate saves a zero-valued placeholder.
 pub const COMMITFEEINFO: Item<CommitFeeInfo> = Item::new("fee_info");
-
-// Oracle endpoint the pool queries for `ConvertBluechipToUsd`. Initialized
-// at instantiate to `msg.used_factory_addr` (the factory contract hosts
-// the internal price oracle today, so by default oracle == factory) and
-// pinned at that value for the lifetime of the pool. Read by
-// `creator-pool::swap_helper::get_oracle_conversion_with_staleness`,
-// which is the only oracle-query call site in the pool.
-//
-// The runtime `UpdateConfigFromFactory { oracle_address }` knob was
-// removed: a per-pool oracle rotation was a documented
-// admin-compromise vector — a malicious oracle can return arbitrary
-// `ConversionResponse.amount`, letting a $5 commit register as a full
-// threshold cross and capturing the entire pool seed plus
-// creator/bluechip rewards. If a future architecture splits the oracle
-// off the factory, the supported re-routing path is a coordinated
-// `UpgradePools` migration that writes ORACLE_INFO directly — not a
-// runtime config knob — keeping the change-control behind the same
-// 48h timelock + community observability window as every other
-// protocol-level mutation.
-pub const ORACLE_INFO: Item<OracleInfo> = Item::new("oracle_info");
 
 // Block at which post-threshold trading is allowed to resume after a
 // commit pool crosses its threshold. Set inside the threshold-crossing

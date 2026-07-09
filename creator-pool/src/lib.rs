@@ -14,6 +14,4 @@ pub mod swap_helper;
 #[cfg(test)]
 mod mock_querier;
 #[cfg(test)]
-mod oracle;
-#[cfg(test)]
 mod testing;

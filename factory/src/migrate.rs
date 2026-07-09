@@ -28,23 +28,6 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
         });
     }
 
-    // Migration shim. Existing deployments ran with "every threshold-
-    // crossed commit pool is automatically oracle-eligible" baked into the
-    // code path. The new build moves that behaviour behind the
-    // `COMMIT_POOLS_AUTO_ELIGIBLE` flag (default false on fresh
-    // instantiates so admins must opt in for stage 1–3 of the roadmap).
-    // Set it true here on migrate so existing chains keep their current
-    // oracle composition; admin can flip it off via the timelocked
-    // `ProposeSetCommitPoolsAutoEligible` flow at the appropriate stage.
-    // Idempotent (saving `true` twice is a no-op), so re-running the
-    // migrate is safe.
-    if crate::state::COMMIT_POOLS_AUTO_ELIGIBLE
-        .may_load(deps.storage)?
-        .is_none()
-    {
-        crate::state::COMMIT_POOLS_AUTO_ELIGIBLE.save(deps.storage, &true)?;
-    }
-
     // PAIRS back-fill. Older deployments registered pools through the
     // pre-uniqueness `register_pool`, so `PAIRS` is empty even though
     // pools exist. Walk `POOLS_BY_ID` once and insert one entry per
@@ -88,21 +71,6 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
                 &pool_id,
             )?;
             addr_index_backfilled += 1;
-        }
-    }
-
-    // Integration-test-only: rotation_interval and update_interval on the
-    // oracle state are baked in at init time. Refresh them on migrate so a
-    // newly-built integration wasm can shrink them without re-instantiating.
-    #[cfg(feature = "integration_short_timing")]
-    {
-        use crate::internal_bluechip_price_oracle::{
-            INTERNAL_ORACLE, ROTATION_INTERVAL, UPDATE_INTERVAL,
-        };
-        if let Ok(mut o) = INTERNAL_ORACLE.load(deps.storage) {
-            o.rotation_interval = ROTATION_INTERVAL;
-            o.update_interval = UPDATE_INTERVAL;
-            INTERNAL_ORACLE.save(deps.storage, &o)?;
         }
     }
 

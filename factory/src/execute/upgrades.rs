@@ -95,24 +95,6 @@ pub fn execute_propose_pool_upgrade(
             .collect::<StdResult<Vec<_>>>()?
     };
 
-    // Anchor-pool exclusion. Resolve the configured anchor address
-    // once, walk the proposed list, refuse if the anchor pool is in it.
-    let factory_config = crate::state::FACTORYINSTANTIATEINFO.load(deps.storage)?;
-    let anchor_addr = factory_config.atom_bluechip_anchor_pool_address.clone();
-    for id in pools_to_upgrade.iter() {
-        let details = POOLS_BY_ID.load(deps.storage, *id)?;
-        if details.creator_pool_addr == anchor_addr {
-            return Err(ContractError::Std(StdError::generic_err(format!(
-                "Pool {} is the configured anchor pool ({}). Migrating the \
-                 anchor mid-flight would leave the oracle querying \
-                 possibly-mid-migration storage. Repoint the factory at a new \
-                 anchor (CreateStandardPool → 48h ProposeConfigUpdate) before \
-                 migrating this pool.",
-                id, anchor_addr
-            ))));
-        }
-    }
-
     let effective_after = env.block.time.plus_seconds(ADMIN_TIMELOCK_SECONDS);
 
     PENDING_POOL_UPGRADE.save(
@@ -193,22 +175,8 @@ fn build_upgrade_batch(
     let mut skipped: Vec<u64> = Vec::new();
     let mut migrated: Vec<u64> = Vec::new();
 
-    let current_anchor_addr = crate::state::FACTORYINSTANTIATEINFO
-        .load(deps.storage)?
-        .atom_bluechip_anchor_pool_address;
-
     for pool_id in pool_ids.iter() {
         let pool_addr = POOLS_BY_ID.load(deps.storage, *pool_id)?.creator_pool_addr;
-
-        if pool_addr == current_anchor_addr {
-            return Err(ContractError::Std(StdError::generic_err(format!(
-                "Pool {} ({}) is the current anchor pool. The pending upgrade was \
-                 created when a different pool was the anchor; an anchor change \
-                 has landed since. Cancel this upgrade, choose whether to keep \
-                 the new anchor or drop pool {} from the batch, and re-propose.",
-                pool_id, pool_addr, pool_id
-            ))));
-        }
 
         let is_paused: pool_factory_interfaces::IsPausedResponse = match deps
             .querier

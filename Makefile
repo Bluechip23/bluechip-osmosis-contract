@@ -18,25 +18,15 @@ WASM_TARGET       := wasm32-unknown-unknown
 ARTIFACTS         := artifacts
 
 # ─── Build (local, non-optimized cargo build — local testing only) ──────────
-# Canonical artifact names (factory.wasm, expand_economy.wasm) are the
-# PRODUCTION default-feature builds: real Pyth oracle, real 48h timelocks.
-# The mock factory is emitted under the explicit factory-mock.wasm name so a
-# test binary can never be mistaken for the deployable artifact. Deployable,
+# Canonical artifact names (factory.wasm, creator_pool.wasm, ...) are the
+# PRODUCTION default-feature builds: real 48h timelocks. Deployable,
 # reproducible, gas-optimized artifacts come from `make optimize-*`.
 build:
 	@mkdir -p $(ARTIFACTS)
-	# Workspace default-feature build → PRODUCTION factory + expand-economy.
 	RUSTFLAGS="-C link-arg=-s" cargo build --release --target $(WASM_TARGET)
 	cp target/$(WASM_TARGET)/release/creator_pool.wasm $(ARTIFACTS)/creator_pool.wasm
 	cp target/$(WASM_TARGET)/release/standard_pool.wasm $(ARTIFACTS)/standard_pool.wasm
 	cp target/$(WASM_TARGET)/release/factory.wasm $(ARTIFACTS)/factory.wasm
-	cp target/$(WASM_TARGET)/release/expand_economy.wasm $(ARTIFACTS)/expand_economy.wasm
-	# Mockoracle helper contract (test-only entry points).
-	RUSTFLAGS="-C link-arg=-s" cargo build --release --target $(WASM_TARGET) -p oracle --features testing
-	cp target/$(WASM_TARGET)/release/oracle.wasm $(ARTIFACTS)/oracle.wasm
-	# Mock factory for LOCAL mock-oracle testing only → explicit -mock name (NEVER ship).
-	RUSTFLAGS="-C link-arg=-s" cargo build --release --target $(WASM_TARGET) -p factory --features mock
-	cp target/$(WASM_TARGET)/release/factory.wasm $(ARTIFACTS)/factory-mock.wasm
 
 test:
 	cargo test
@@ -66,55 +56,26 @@ optimize-factory:
 	  --mount type=volume,source=factory_cache,target=/target \
 	  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
 	  cosmwasm/optimizer:0.16.0 ./factory
-	@# factory declares THREE optimizer build variants:
-	@#   name="prod"      → factory-prod.wasm      (NO features: real oracle + 48h timing) ← DEPLOY THIS
-	@#   name="mock"      → factory-mock.wasm      (mock + integration_short_timing; shell tests; NEVER ship)
-	@#   name="mock_only" → factory-mock_only.wasm (mock only, prod timing; verify_oracle_gates.sh)
+	@# factory declares TWO optimizer build variants:
+	@#   name="prod"        → factory-prod.wasm        (NO features: real 48h timing) ← DEPLOY THIS
+	@#   name="integration" → factory-integration.wasm (integration_short_timing; shell tests; NEVER ship)
 	@# The canonical artifacts/factory.wasm that deploy tooling loads is the
-	@# PROD build. The mock builds keep their explicit -mock names so a test
-	@# binary can never masquerade as the deployable artifact. Hard-fail if the
-	@# prod artifact is missing rather than leave a stale/mock factory.wasm.
+	@# PROD build. Hard-fail if the prod artifact is missing rather than
+	@# leave a stale factory.wasm.
 	@if [ -f $(ARTIFACTS)/factory-prod.wasm ]; then \
 	  cp $(ARTIFACTS)/factory-prod.wasm $(ARTIFACTS)/factory.wasm; \
 	else \
-	  echo "ERROR: factory-prod.wasm not produced by optimizer; refusing to leave a stale/mock factory.wasm" >&2; \
+	  echo "ERROR: factory-prod.wasm not produced by optimizer; refusing to leave a stale factory.wasm" >&2; \
 	  exit 1; \
 	fi
 
-optimize-expand-economy:
-	docker run --rm -v ${CURDIR}:/code \
-	  --mount type=volume,source=expand_economy_cache,target=/target \
-	  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
-	  cosmwasm/optimizer:0.16.0 ./expand-economy
-	@# expand-economy declares prod / mock / mock_only optimizer builds.
-	@# The canonical artifacts/expand_economy.wasm (+ legacy expand-economy.wasm)
-	@# that deploy tooling loads is the PROD build (no features). The mock
-	@# builds keep their explicit -mock / -mock_only names. cosmwasm/optimizer
-	@# normalizes the crate name to underscores in the output filename. Hard-fail
-	@# if the prod artifact is missing rather than leave a stale/mock artifact.
-	@if [ -f $(ARTIFACTS)/expand_economy-prod.wasm ]; then \
-	  cp $(ARTIFACTS)/expand_economy-prod.wasm $(ARTIFACTS)/expand_economy.wasm; \
-	  cp $(ARTIFACTS)/expand_economy-prod.wasm $(ARTIFACTS)/expand-economy.wasm; \
-	else \
-	  echo "ERROR: expand_economy-prod.wasm not produced by optimizer; refusing to leave a stale/mock expand_economy.wasm" >&2; \
-	  exit 1; \
-	fi
-
-optimize-mockoracle:
-	docker run --rm -v ${CURDIR}:/code \
-	  --mount type=volume,source=mockoracle_cache,target=/target \
-	  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
-	  cosmwasm/optimizer:0.16.0 ./mockoracle
-
-optimize-all: optimize-creator-pool optimize-standard-pool optimize-factory optimize-expand-economy optimize-mockoracle
+optimize-all: optimize-creator-pool optimize-standard-pool optimize-factory
 
 # ─── Cosmwasm Check ──────────────────────────────────────────────────────────
 check:
 	cosmwasm-check $(ARTIFACTS)/creator_pool.wasm
 	cosmwasm-check $(ARTIFACTS)/standard_pool.wasm
 	cosmwasm-check $(ARTIFACTS)/factory.wasm
-	cosmwasm-check $(ARTIFACTS)/expand_economy.wasm
-	cosmwasm-check $(ARTIFACTS)/oracle.wasm
 
 check-pool:
 	cosmwasm-check $(ARTIFACTS)/creator_pool.wasm
@@ -122,12 +83,6 @@ check-pool:
 
 check-factory:
 	cosmwasm-check $(ARTIFACTS)/factory.wasm
-
-check-expand-economy:
-	cosmwasm-check $(ARTIFACTS)/expand_economy.wasm
-
-check-mockoracle:
-	cosmwasm-check $(ARTIFACTS)/oracle.wasm
 
 # ─── Local Chain Deploy (store wasm on local chain) ──────────────────────────
 deploy-pool-local: build
@@ -157,27 +112,8 @@ deploy-factory-local: build
 		--keyring-backend $(LOCAL_KEYRING) \
 		-y --output json
 
-deploy-expand-economy-local: build
-	@echo "Deploying expand-economy contract to local chain..."
-	$(LOCAL_CHAIN_BIN) tx wasm store $(ARTIFACTS)/expand_economy.wasm \
-		--from $(LOCAL_FROM) \
-		--chain-id $(LOCAL_CHAIN_ID) \
-		--gas $(LOCAL_GAS) --gas-adjustment $(LOCAL_GAS_ADJ) \
-		--keyring-backend $(LOCAL_KEYRING) \
-		-y --output json
-
-deploy-mockoracle-local: build
-	@echo "Deploying mock oracle contract to local chain..."
-	$(LOCAL_CHAIN_BIN) tx wasm store $(ARTIFACTS)/oracle.wasm \
-		--from $(LOCAL_FROM) \
-		--chain-id $(LOCAL_CHAIN_ID) \
-		--gas $(LOCAL_GAS) --gas-adjustment $(LOCAL_GAS_ADJ) \
-		--keyring-backend $(LOCAL_KEYRING) \
-		-y --output json
-
 # ─── Full Stack Local Deploy ─────────────────────────────────────────────────
 deploy-all-local:
-	@echo "For full stack local deployment, use: ./deploy_full_stack_mock_oracle.sh"
 	@echo "For robust deployment with base contracts: ./deploy_robust.sh"
 
 # ─── Sei Testnet Deploy ─────────────────────────────────────────────────────
@@ -238,6 +174,6 @@ init-pool:
 		-b block \
 		-y | tee ./config/pool_init_result.txt
 
-.PHONY: build test optimize optimize-all optimize-creator-pool optimize-standard-pool optimize-factory optimize-expand-economy optimize-mockoracle \
-	check check-pool check-factory check-expand-economy check-mockoracle \
-	deploy-pool-local deploy-factory-local deploy-expand-economy-local deploy-mockoracle-local deploy-all-local \
+.PHONY: build test optimize optimize-all optimize-creator-pool optimize-standard-pool optimize-factory \
+	check check-pool check-factory \
+	deploy-pool-local deploy-factory-local deploy-all-local \

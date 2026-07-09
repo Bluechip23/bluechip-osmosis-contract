@@ -21,52 +21,28 @@ exclude = [
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []        # Default features (no mock — keeps prod-path unit tests working)
-# `mock` keeps unit-test semantics: mockoracle queries, BLUECHIP_USD
-# short-circuit, testing/mod.rs gating. Compatible with the existing
-# 247-test factory suite — does NOT alter timing constants or behavior
-# gates.
-mock = []
+default = []
 # `integration_short_timing` is the integration-test-only feature that
-# shortens timelocks, rate limits, liquidity floors, warmup, and the
-# UpdateTooSoon cooldown. Used by the docker-built wasm for shell-script
-# integration tests. NEVER ship to production. Unit tests do NOT enable
-# this — that would break tests written against prod constants.
+# shortens timelocks and rate limits. Used by the docker-built wasm for
+# shell-script integration tests. NEVER ship to production. Unit tests do
+# NOT enable this — that would break tests written against prod constants.
 integration_short_timing = []
 library = []
 
-# PRODUCTION deployment build. Empty feature set: real Pyth oracle, real
-# 48h timelocks, full warm-up gate, $5k liquidity floor, 300s keeper
-# cooldown, anchor-only (basket-disabled) oracle. This is the ONLY factory
-# artifact that is safe to deploy to a public chain. The optimizer emits it
-# as `factory-prod.wasm`; the Makefile copies that onto the canonical
-# `artifacts/factory.wasm` that deploy tooling loads. The `mock` builds
-# below keep their explicit `-mock` / `-mock_only` filenames so a test
-# binary can never masquerade as the deployable artifact. The CI
-# `prod-artifact-guard` job fails the build if this entry ever gains
-# `mock` or `integration_short_timing`.
+# PRODUCTION deployment build. Empty feature set: real 48h timelocks.
+# This is the ONLY factory artifact that should be deployed to a public
+# chain. The optimizer emits it as `factory-prod.wasm`; the Makefile
+# copies that onto the canonical `artifacts/factory.wasm` that deploy
+# tooling loads.
 [[package.metadata.optimizer.builds]]
 name = "prod"
 features = []
 
-# Docker-built wasm for shell-script integration tests. Enables BOTH
-# `mock` (so mockoracle queries work) AND `integration_short_timing`
-# (so timelocks/rate-limits are short enough for an interactive test).
-# Produced as `factory-mock.wasm` (NOT the canonical name). NEVER ship.
+# Docker-built wasm for shell-script integration tests. Enables
+# `integration_short_timing` (short timelocks/rate-limits). NEVER ship.
 [[package.metadata.optimizer.builds]]
-name = "mock"
-features = ["mock", "integration_short_timing"]
-
-# Production-timing build for end-to-end verification of the oracle
-# gates that `integration_short_timing` deliberately bypasses (warmup,
-# UpdateTooSoon cooldown, liquidity floors). Used by
-# `verify_oracle_gates.sh` to confirm the real-chain semantics agree
-# with what the unit suite asserts. NOT for production deployment —
-# the `mock` feature still wires the mockoracle short-circuit; this
-# variant just keeps the timing constants at their prod values.
-[[package.metadata.optimizer.builds]]
-name = "mock_only"
-features = ["mock"]
+name = "integration"
+features = ["integration_short_timing"]
 
 [package.metadata.scripts]
 optimize = { workspace = true }

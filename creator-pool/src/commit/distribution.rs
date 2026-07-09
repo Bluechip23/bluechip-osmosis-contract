@@ -7,7 +7,7 @@
 //! native reserve, not LP funds), and advances the cursor in
 //! `DISTRIBUTION_STATE` until the pool is fully distributed.
 
-use cosmwasm_std::{to_json_binary, CosmosMsg, DepsMut, Env, MessageInfo, Response, SubMsg, WasmMsg};
+use cosmwasm_std::{DepsMut, Env, MessageInfo, Response, SubMsg};
 
 use crate::admin::ensure_not_drained;
 use crate::error::ContractError;
@@ -78,27 +78,6 @@ pub fn execute_continue_distribution(
     let (mint_submsgs, processed_count): (Vec<SubMsg>, u32) =
         process_distribution_batch(deps.storage, &pool_info, &env)?;
 
-    // Bounty paid by the factory from its own reserve, not pool LP funds.
-    // Only emit the PayDistributionBounty message when this call actually
-    // processed at least one committer. An empty/no-op call (cursor past
-    // end, stale-state cleanup) must not earn a bounty: it would let a
-    // keeper farm the factory reserve for zero work, and the factory's
-    // bounty cap doesn't gate frequency the way the oracle cooldown does.
-    let mut msgs: Vec<CosmosMsg> = Vec::new();
-    if processed_count > 0 {
-        // Factory rejects unregistered pools, which reverts this whole tx —
-        // desired behavior since only legitimate pools should pay bounties.
-        msgs.push(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: pool_info.factory_addr.to_string(),
-            msg: to_json_binary(
-                &pool_factory_interfaces::FactoryExecuteMsg::PayDistributionBounty {
-                    recipient: info.sender.to_string(),
-                },
-            )?,
-            funds: vec![],
-        }));
-    }
-
     // process_distribution_batch may have either removed the state
     // entirely (genuine completion) or flipped is_distributing=false
     // (recovery path after repeated failures). Treat both as "stop
@@ -110,7 +89,6 @@ pub fn execute_continue_distribution(
 
     Ok(Response::new()
         .add_submessages(mint_submsgs)
-        .add_messages(msgs)
         .add_attribute("action", "continue_distribution")
         .add_attribute("caller", info.sender.to_string())
         .add_attribute("processed_count", processed_count.to_string())

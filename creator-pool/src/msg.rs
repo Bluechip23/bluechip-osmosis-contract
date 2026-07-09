@@ -384,7 +384,8 @@ pub struct PoolInstantiateMsg {
     pub used_factory_addr: Addr,
     pub threshold_payout: Option<Binary>,
     pub commit_fee_info: CommitFeeInfo,
-    pub commit_threshold_limit_usd: Uint128,
+    /// Commit threshold in base units of the chain's native asset.
+    pub commit_threshold_limit: Uint128,
     pub position_nft_address: Addr,
     pub token_address: Addr,
     pub max_bluechip_lock_per_pool: Uint128,

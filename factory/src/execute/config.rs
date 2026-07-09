@@ -22,51 +22,12 @@ use super::ensure_admin;
 /// `FactoryInstantiate` payload. Shared between `instantiate` and
 /// `execute_propose_factory_config_update` so the same rules apply to
 /// the initial config and any subsequent config proposal.
-///
-/// When called from the propose-update path, additionally enforces the
-/// strict anchor-pool shape check (registry presence, `PoolKind::Standard`,
-/// exact `[Native(bluechip), Native(atom)]` pair) — but only once the
-/// one-shot `SetAnchorPool` has fired (`INITIAL_ANCHOR_SET == true`).
-/// At instantiate time the anchor address is the deploy-time placeholder
-/// and `INITIAL_ANCHOR_SET` is `false`, so the strict check is skipped
-/// (it would fail by design — placeholder isn't a pool).
 pub(crate) fn validate_factory_config(
     deps: cosmwasm_std::Deps,
     config: &FactoryInstantiate,
 ) -> Result<(), ContractError> {
     deps.api.addr_validate(config.factory_admin_address.as_str())?;
     deps.api.addr_validate(config.bluechip_wallet_address.as_str())?;
-    deps.api
-        .addr_validate(config.atom_bluechip_anchor_pool_address.as_str())?;
-    if let Some(ref mint_addr) = config.bluechip_mint_contract_address {
-        deps.api.addr_validate(mint_addr.as_str())?;
-    }
-
-    // Validate the Pyth contract address — it's stored as `String` rather
-    // than `Addr`, so without this check an empty string or bech32-invalid
-    // string would only surface deep inside `query_pyth_atom_usd_price`
-    // (after a 48h timelock has already lapsed). Worse, an attacker-
-    // controlled but bech32-valid address would silently be accepted as
-    // the price feed; we can't prevent admin compromise but we can at
-    // least reject malformed inputs at propose time.
-    if config.pyth_contract_addr_for_conversions.trim().is_empty() {
-        return Err(ContractError::Std(StdError::generic_err(
-            "pyth_contract_addr_for_conversions must be non-empty",
-        )));
-    }
-    deps.api
-        .addr_validate(config.pyth_contract_addr_for_conversions.as_str())
-        .map_err(|e| {
-            ContractError::Std(StdError::generic_err(format!(
-                "pyth_contract_addr_for_conversions is not a valid address: {}",
-                e
-            )))
-        })?;
-    if config.pyth_atom_usd_price_feed_id.trim().is_empty() {
-        return Err(ContractError::Std(StdError::generic_err(
-            "pyth_atom_usd_price_feed_id must be non-empty",
-        )));
-    }
 
     // Commit fees split bluechip + creator out of every commit. Their sum
     // must not exceed 100% — anything more would either underflow at
@@ -87,36 +48,19 @@ pub(crate) fn validate_factory_config(
         ))));
     }
 
-    // A zero USD threshold would make the pool's commit threshold
+    // A zero threshold would make the pool's commit threshold
     // uncrossable — every commit-pool created against this config would
     // permanently sit pre-threshold, never minting, never opening swaps.
     // Reject explicitly rather than letting that misconfig ride through
     // a 48h timelock.
-    if config.commit_threshold_limit_usd.is_zero() {
+    if config.commit_threshold_limit.is_zero() {
         return Err(ContractError::Std(StdError::generic_err(
-            "commit_threshold_limit_usd must be non-zero",
+            "commit_threshold_limit must be non-zero",
         )));
     }
     if config.bluechip_denom.trim().is_empty() {
         return Err(ContractError::Std(StdError::generic_err(
             "bluechip_denom must be non-empty",
-        )));
-    }
-    // `atom_denom` is the bank denom for the non-bluechip side of the
-    // ATOM/bluechip anchor pool. Required at instantiate so SetAnchorPool
-    // can enforce that the anchor pool actually references it. Empty would
-    // either lock SetAnchorPool out indefinitely or — worse, if the empty
-    // check were skipped — let the admin point the anchor at any bluechip/X
-    // pool with no relation to the Pyth ATOM/USD feed.
-    if config.atom_denom.trim().is_empty() {
-        return Err(ContractError::Std(StdError::generic_err(
-            "atom_denom must be non-empty (e.g. \"uatom\" on Cosmos Hub, or the chain's \
-             IBC-wrapped atom denom). Set this before instantiate or via ProposeConfigUpdate.",
-        )));
-    }
-    if config.atom_denom == config.bluechip_denom {
-        return Err(ContractError::Std(StdError::generic_err(
-            "atom_denom must differ from bluechip_denom",
         )));
     }
 
@@ -145,51 +89,11 @@ pub(crate) fn validate_factory_config(
         ))));
     }
 
-    // Strict anchor-pool validation on the post-bootstrap path. Without
-    // this gate, the propose/update flow would let an admin point the
-    // anchor at any well-formed address — including a non-pool contract
-    // or a pool that isn't a (bluechip, atom) Native/Native pair.
-    // `execute_set_anchor_pool` enforces the same invariants on its
-    // one-shot path; this runs the equivalent check on the timelocked
-    // path so the two flows can't disagree on what an "anchor" is.
-    let initial_anchor_set = crate::state::INITIAL_ANCHOR_SET
-        .may_load(deps.storage)?
-        .unwrap_or(false);
-    if initial_anchor_set {
-        // Compare against the currently-stored anchor; only validate when
-        // the proposal actually tries to change it. Same-anchor proposals
-        // (e.g., changes to other fields like fees) skip the round-trip.
-        let current = FACTORYINSTANTIATEINFO
-            .may_load(deps.storage)?
-            .map(|c| c.atom_bluechip_anchor_pool_address);
-        let changing = current
-            .as_ref()
-            .map(|a| a != &config.atom_bluechip_anchor_pool_address)
-            .unwrap_or(true);
-        if changing {
-            let pool_details = super::oracle::lookup_pool_by_addr(
-                deps,
-                &config.atom_bluechip_anchor_pool_address,
-            )?
-            .ok_or_else(|| {
-                ContractError::Std(StdError::generic_err(format!(
-                    "Proposed anchor pool address {} is not a registered pool",
-                    config.atom_bluechip_anchor_pool_address
-                )))
-            })?;
-            super::oracle::validate_anchor_pool_choice(
-                deps,
-                &pool_details,
-                &config.bluechip_denom,
-                &config.atom_denom,
-            )?;
-        }
-    }
     Ok(())
 }
 
 pub fn execute_update_factory_config(
-    mut deps: DepsMut,
+    deps: DepsMut,
     env: Env,
     info: MessageInfo,
 ) -> Result<Response, ContractError> {
@@ -204,110 +108,14 @@ pub fn execute_update_factory_config(
     }
 
     // Re-validate at apply time. Between propose (48h ago) and apply,
-    // on-chain state can have moved — most notably, `SetAnchorPool`
-    // may have fired in the meantime, so the validation that ran at
-    // propose time used a different `current` anchor than what is now
-    // stored. Re-running it here catches stale-proposal hazards before
-    // the state lands.
+    // on-chain state can have moved; re-running the validation here
+    // catches stale-proposal hazards before the state lands.
     validate_factory_config(deps.as_ref(), &pending.new_config)?;
-
-    // Single load of the prior config — we read it for both the
-    // anchor-change refresh decision below and the expand-economy
-    // denom cross-check.
-    let prior_config = FACTORYINSTANTIATEINFO.may_load(deps.storage)?;
-    let prior_anchor = prior_config
-        .as_ref()
-        .map(|c| c.atom_bluechip_anchor_pool_address.clone());
-    let prior_denom = prior_config.as_ref().map(|c| c.bluechip_denom.clone());
-    let new_anchor = pending.new_config.atom_bluechip_anchor_pool_address.clone();
-    let anchor_changed = prior_anchor.as_ref() != Some(&new_anchor);
-    let new_denom = pending.new_config.bluechip_denom.clone();
-    let denom_changed = prior_denom.as_ref() != Some(&new_denom);
-
-    // Bluechip_denom drift between factory and expand-economy bricks
-    // every `RequestExpansion` (and therefore every threshold-crossing's
-    // bluechip mint reward) until both sides re-align. Each contract has
-    // its own independent 48h timelock; without an apply-time
-    // cross-check, an operator who applies factory's update first leaves
-    // expand-economy stuck at the old denom, and every
-    // RetryFactoryNotify fails with BluechipDenomMismatch until the
-    // matching expand-economy apply runs (up to 48h later).
-    //
-    // Force the explicit ordering: if factory's apply changes the denom,
-    // expand-economy must already have applied the matching change. The
-    // operator's runbook becomes:
-    //   1. Propose denom change on BOTH expand-economy and factory.
-    //   2. Wait 48h. Apply expand-economy first.
-    //   3. Apply factory — this gate verifies (1) and (2) succeeded.
-    //
-    // If the operator inverts the order, this apply errors with a clear
-    // message rather than landing the change and bricking RequestExpansion.
-    // Skipped when bluechip_mint_contract_address is None (no
-    // expand-economy configured — no drift surface).
-    if denom_changed {
-        if let Some(ref ee_addr) = pending.new_config.bluechip_mint_contract_address {
-            // Minimal mirror of expand-economy's QueryMsg::GetConfig.
-            // Defined locally so the factory crate stays compile-free
-            // of an expand-economy dep (wire-format contract only).
-            #[derive(serde::Serialize)]
-            #[serde(rename_all = "snake_case")]
-            enum ExpandEconomyQuery {
-                GetConfig {},
-            }
-            #[derive(serde::Deserialize)]
-            struct ExpandEconomyConfigSubset {
-                bluechip_denom: String,
-            }
-            let ee_config: ExpandEconomyConfigSubset = deps
-                .querier
-                .query_wasm_smart(ee_addr.to_string(), &ExpandEconomyQuery::GetConfig {})
-                .map_err(|e| {
-                    ContractError::Std(StdError::generic_err(format!(
-                        "Cannot apply factory bluechip_denom change to \"{}\": \
-                         expand-economy query to {} failed: {}. Verify \
-                         bluechip_mint_contract_address is reachable, or \
-                         clear it via ProposeConfigUpdate if no \
-                         expand-economy should be configured.",
-                        new_denom, ee_addr, e
-                    )))
-                })?;
-            if ee_config.bluechip_denom != new_denom {
-                return Err(ContractError::Std(StdError::generic_err(format!(
-                    "Cannot apply factory bluechip_denom change to \"{}\": \
-                     expand-economy at {} still has bluechip_denom=\"{}\". \
-                     Apply the matching expand-economy ProposeConfigUpdate \
-                     first, then re-execute this factory apply. Forcing the \
-                     explicit ordering prevents threshold-crossing mint \
-                     reward strand-out from cross-contract denom drift.",
-                    new_denom, ee_addr, ee_config.bluechip_denom
-                ))));
-            }
-        }
-    }
-
-    // Detect anchor change against the currently-stored anchor and, if
-    // the apply will mutate it, refresh `INTERNAL_ORACLE` so it samples
-    // the new anchor and clears the stale price cache. Without this,
-    // the oracle would keep querying the old anchor address (which may
-    // be defunct) until the next rotation interval and could either
-    // freeze with `MissingAtomPool` or serve stale/wrong prices.
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &pending.new_config)?;
     PENDING_CONFIG.remove(deps.storage);
 
-    let mut response = Response::new().add_attribute("action", "execute_update_config");
-    if anchor_changed {
-        let pools_in_oracle = super::oracle::refresh_internal_oracle_for_anchor_change(
-            &mut deps,
-            &env,
-            &new_anchor,
-        )?;
-        response = response
-            .add_attribute("anchor_changed", "true")
-            .add_attribute("new_anchor_addr", new_anchor.to_string())
-            .add_attribute("pools_in_oracle_after_refresh", pools_in_oracle.to_string());
-    }
-    Ok(response)
+    Ok(Response::new().add_attribute("action", "execute_update_config"))
 }
 
 pub fn execute_propose_factory_config_update(
@@ -337,33 +145,6 @@ pub fn execute_propose_factory_config_update(
     // elapses and the admin calls UpdateConfig, but a malformed proposal
     // should fail loudly now, not then).
     validate_factory_config(deps.as_ref(), &config)?;
-
-    // Pyth smoke-test against the PROPOSED (contract, feed_id) tuple so
-    // an unreachable contract, a wrong feed id, or any other Pyth-side
-    // misconfig (stale publish, conf interval too wide, negative price,
-    // expo out of range) surfaces at propose time rather than after the
-    // 48h timelock elapses. The query is read-only and cheap when the
-    // feed is healthy; on failure the admin can Cancel + Re-Propose
-    // with corrected values immediately, saving a full timelock cycle.
-    //
-    // Gated on `not(test)` because test builds short-circuit the Pyth
-    // path to a mock and don't have `query_pyth_with_feed` available;
-    // propose-flow tests still cover the rest of the handler.
-    #[cfg(not(test))]
-    crate::internal_bluechip_price_oracle::query_pyth_with_feed(
-        deps.as_ref(),
-        &env,
-        config.pyth_contract_addr_for_conversions.as_str(),
-        config.pyth_atom_usd_price_feed_id.as_str(),
-    )
-    .map_err(|e| {
-        ContractError::Std(StdError::generic_err(format!(
-            "Proposed Pyth configuration failed validation (contract={}, feed_id={}): {}",
-            config.pyth_contract_addr_for_conversions,
-            config.pyth_atom_usd_price_feed_id,
-            e
-        )))
-    })?;
 
     let pending = PendingConfig {
         new_config: config,
@@ -417,12 +198,12 @@ pub fn execute_propose_pool_config_update(
     // time and silently no-op on the pool side; rejecting at propose
     // makes the misuse loud and saves a 48h timelock cycle.
     if pool_details.pool_kind == pool_factory_interfaces::PoolKind::Standard
-        && (update_msg.min_commit_usd_pre_threshold.is_some()
-            || update_msg.min_commit_usd_post_threshold.is_some())
+        && (update_msg.min_commit_pre_threshold.is_some()
+            || update_msg.min_commit_post_threshold.is_some())
     {
         return Err(ContractError::Std(StdError::generic_err(format!(
             "Pool {} is a standard pool — commit-floor knobs \
-             (min_commit_usd_pre_threshold, min_commit_usd_post_threshold) \
+             (min_commit_pre_threshold, min_commit_post_threshold) \
              are creator-pool-only. Drop those fields or target a commit pool.",
             pool_id
         ))));

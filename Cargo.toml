@@ -4,10 +4,7 @@ members = [
     "creator-pool",
     "standard-pool",
     "factory",
-    "mockoracle",
-    "expand-economy",
     "router",
-    "fuzz-stateful",
 ]
 exclude = [
     # cargo-fuzz crate uses libFuzzer + nightly; excluded from the

@@ -29,15 +29,12 @@ pub struct IsPausedResponse {
 ///
 /// - `Commit`  — the original two-phase pool. Starts in a commit phase, mints
 ///   a fresh creator CW20 at creation, only opens to swaps/liquidity after
-///   USD commits cross the configured threshold. Eligible for oracle
-///   sampling once threshold-crossed.
+///   native-asset commits cross the configured threshold.
 ///
 /// - `Standard` — a plain xyk pool around two pre-existing assets (any
 ///   combination of native-denom and CW20). No threshold, no commit phase,
 ///   no distribution; immediately ready for deposits and swaps at pool
-///   creation. Excluded from oracle sampling (its price is not meaningful
-///   for bluechip/USD derivation unless the admin explicitly designates
-///   it as the anchor pool).
+///   creation.
 ///
 /// Default is `Commit` so that old serialized `PoolDetails` records that
 /// lack a `pool_kind` field round-trip cleanly as commit pools.
@@ -74,15 +71,6 @@ pub struct RegisteredPoolResponse {
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum FactoryQueryMsg {
-    #[returns(BluechipPriceResponse)]
-    GetBluechipUsdPrice {},
-
-    #[returns(ConversionResponse)]
-    ConvertBluechipToUsd { amount: Uint128 },
-
-    #[returns(ConversionResponse)]
-    ConvertUsdToBluechip { amount: Uint128 },
-
     /// Returns the chain-side emergency-withdraw delay (seconds between
     /// `Phase 1: initiate` and `Phase 2: drain` on each pool's
     /// `EmergencyWithdraw` flow). Pools query this at initiate time so
@@ -117,20 +105,6 @@ pub struct BluechipWalletResponse {
 }
 
 #[cw_serde]
-pub struct BluechipPriceResponse {
-    pub price: Uint128,
-    pub timestamp: u64,
-    pub is_cached: bool,
-}
-
-#[cw_serde]
-pub struct ConversionResponse {
-    pub amount: Uint128,
-    pub rate_used: Uint128,
-    pub timestamp: u64,
-}
-
-#[cw_serde]
 pub struct PoolStateResponseForFactory {
     pub pool_contract_address: Addr,
     pub nft_ownership_accepted: bool,
@@ -155,10 +129,8 @@ pub enum FactoryExecuteMsg {
     //
     // `crossed_at` is the pool's `env.block.time` at the moment the
     // threshold flipped (snapshotted by `trigger_threshold_payout` into
-    // pool storage). The factory's bluechip-mint decay formula
-    // (`calculate_mint_amount`) uses this timestamp to compute
-    // `seconds_elapsed` against `FIRST_THRESHOLD_TIMESTAMP`, so the
-    // mint amount reflects when the pool ACTUALLY crossed — not when
+    // pool storage). Recorded by the factory for observability so the
+    // registry reflects when the pool ACTUALLY crossed — not when
     // the (possibly retried-after-failure) notification finally lands.
     //
     // `#[serde(default)]` keeps the wire format backward-compatible:
@@ -171,22 +143,6 @@ pub enum FactoryExecuteMsg {
         #[serde(default)]
         crossed_at: Option<cosmwasm_std::Timestamp>,
     },
-    // Called by a pool's ContinueDistribution handler to ask the factory
-    // to pay the keeper bounty out of the factory's native reserve.
-    // The factory verifies the caller is a registered pool via
-    // POOLS_BY_CONTRACT_ADDRESS, so unregistered contracts cannot drain
-    // the reserve by pretending to be a pool.
-    PayDistributionBounty { recipient: String },
-}
-
-#[cw_serde]
-pub enum ExpandEconomyMsg {
-    RequestExpansion { recipient: String, amount: Uint128 },
-}
-
-#[cw_serde]
-pub enum ExpandEconomyExecuteMsg {
-    ExpandEconomy(ExpandEconomyMsg),
 }
 
 /// Wire-format instantiate message sent by the factory's CreateStandardPool

@@ -29,20 +29,21 @@ pub struct PoolConfigUpdate {
     pub lp_fee: Option<Decimal>,
     pub min_commit_interval: Option<u64>,
     /// Per-pool override for the pre-threshold minimum commit value
-    /// (USD, 6 decimals). Creator-pool only. Standard-pool proposals
-    /// carrying this field are rejected at propose time
-    /// (`execute_propose_pool_config_update` looks up `pool_kind` and
-    /// rejects when `Standard` AND any commit-floor field is `Some`).
-    /// Bounds: `0 < v <= POOL_CONFIG_MAX_MIN_COMMIT_USD`. Mirrors the
-    /// pool-side `PoolConfigUpdate.min_commit_usd_pre_threshold`.
+    /// (base units of the chain's native asset). Creator-pool only.
+    /// Standard-pool proposals carrying this field are rejected at
+    /// propose time (`execute_propose_pool_config_update` looks up
+    /// `pool_kind` and rejects when `Standard` AND any commit-floor
+    /// field is `Some`).
+    /// Bounds: `0 < v <= POOL_CONFIG_MAX_MIN_COMMIT`. Mirrors the
+    /// pool-side `PoolConfigUpdate.min_commit_pre_threshold`.
     /// `#[serde(default)]` keeps pre-this-field clients wire-compatible.
     #[serde(default)]
-    pub min_commit_usd_pre_threshold: Option<Uint128>,
+    pub min_commit_pre_threshold: Option<Uint128>,
     /// Per-pool override for the post-threshold minimum commit value
-    /// (USD, 6 decimals). Creator-pool only. Same shape and bounds as
-    /// `min_commit_usd_pre_threshold` above.
+    /// (base units of the chain's native asset). Creator-pool only.
+    /// Same shape and bounds as `min_commit_pre_threshold` above.
     #[serde(default)]
-    pub min_commit_usd_post_threshold: Option<Uint128>,
+    pub min_commit_post_threshold: Option<Uint128>,
     // `oracle_address` removed. Mirrors the same field's
     // removal from `pool_core::msg::PoolConfigUpdate`. Per-pool oracle
     // rotation was an admin-compromise vector — a malicious oracle could
@@ -57,12 +58,12 @@ pub struct PoolConfigUpdate {
 /// per-address commit cooldown), matching pool-side acceptance.
 pub const POOL_CONFIG_MIN_COMMIT_INTERVAL_MAX_SECONDS: u64 = 86_400;
 
-/// Inclusive upper bound on either commit-floor knob ($1000, 6 decimals).
-/// Mirrors the pool side's `MAX_MIN_COMMIT_USD` in
+/// Inclusive upper bound on either commit-floor knob (1000 native tokens
+/// at 6 decimals). Mirrors the pool side's `MAX_MIN_COMMIT` in
 /// `creator-pool::state`. Both ends bounds-check; the propose-time
 /// gate exists so an out-of-range value fails fast rather than after
 /// 48h timelock.
-pub const POOL_CONFIG_MAX_MIN_COMMIT_USD: Uint128 = Uint128::new(1_000_000_000);
+pub const POOL_CONFIG_MAX_MIN_COMMIT: Uint128 = Uint128::new(1_000_000_000);
 
 impl PoolConfigUpdate {
     /// Validate the update at propose time so a misconfigured value fails
@@ -97,8 +98,8 @@ impl PoolConfigUpdate {
             }
         }
         for (name, maybe) in [
-            ("min_commit_usd_pre_threshold", self.min_commit_usd_pre_threshold),
-            ("min_commit_usd_post_threshold", self.min_commit_usd_post_threshold),
+            ("min_commit_pre_threshold", self.min_commit_pre_threshold),
+            ("min_commit_post_threshold", self.min_commit_post_threshold),
         ] {
             if let Some(v) = maybe {
                 if v.is_zero() {
@@ -107,10 +108,10 @@ impl PoolConfigUpdate {
                         name
                     )));
                 }
-                if v > POOL_CONFIG_MAX_MIN_COMMIT_USD {
+                if v > POOL_CONFIG_MAX_MIN_COMMIT {
                     return Err(StdError::generic_err(format!(
                         "{} {} exceeds maximum {}; pool will reject at apply time",
-                        name, v, POOL_CONFIG_MAX_MIN_COMMIT_USD
+                        name, v, POOL_CONFIG_MAX_MIN_COMMIT
                     )));
                 }
             }
@@ -215,38 +216,6 @@ pub struct PoolDetails {
     /// to standard-pool support was a commit pool.
     #[serde(default)]
     pub pool_kind: PoolKind,
-    /// 1-indexed ordinal among commit pools that have CROSSED THEIR
-    /// THRESHOLD (NOT the order in which pools were created). Always
-    /// zero for standard pools, and zero for commit pools that have
-    /// not yet crossed. Consumed by the bluechip mint-decay formula
-    /// in `calculate_and_mint_bluechip` as the polynomial input `x`.
-    ///
-    /// Lifecycle:
-    /// 1. At create time (`execute_create_creator_pool`), this field
-    ///    is written as `0` (sentinel meaning "not yet allocated").
-    /// 2. At threshold-cross time (`execute_notify_threshold_crossed`,
-    ///    after the `POOL_THRESHOLD_MINTED` idempotency gate), the
-    ///    notify handler bumps `COMMIT_POOL_COUNTER` and writes the
-    ///    new value back here.
-    ///
-    /// Two layers of inflation defense are coupled here:
-    /// - Decouple from `POOL_COUNTER` so permissionless
-    ///   `CreateStandardPool` cannot inflate `x`.
-    /// - Decouple from create-time so paid junk-create spam (pools that
-    ///   never threshold-cross) cannot inflate `x` for legitimate future
-    ///   crossings. The counter advances only on real protocol activity.
-    ///
-    /// `calculate_and_mint_bluechip` fail-closes (`Err`) on a zero
-    /// ordinal — that branch is reachable only if some path bypasses
-    /// `execute_notify_threshold_crossed`'s allocation, which would be
-    /// a bug. Failing closed prevents the formula from inflating the
-    /// mint by treating zero as the (vacuously) lowest-ordinal slot.
-    ///
-    /// `#[serde(default)]` is retained for future-field-extension
-    /// compatibility; v1 fresh chain state has no legacy records to
-    /// back-fill.
-    #[serde(default)]
-    pub commit_pool_ordinal: u64,
 }
 
 impl ThresholdPayoutAmounts {

@@ -145,7 +145,7 @@ pub fn mint_create_pool(
             commit_fee_bluechip: factory_config.commit_fee_bluechip,
             commit_fee_creator: factory_config.commit_fee_creator,
         },
-        commit_threshold_limit_usd: factory_config.commit_threshold_limit_usd,
+        commit_threshold_limit: factory_config.commit_threshold_limit,
         token_address,
         position_nft_address: nft_address.clone(),
         max_bluechip_lock_per_pool: factory_config.max_bluechip_lock_per_pool,
@@ -229,14 +229,6 @@ pub fn finalize_pool(
         // chain (triggered by ExecuteMsg::Create). Standard pools have
         // their own reply chain that sets pool_kind = Standard.
         pool_kind: pool_factory_interfaces::PoolKind::Commit,
-        // Sentinel 0 propagated from `PoolCreationContext.commit_pool_ordinal`.
-        // The real ordinal is allocated at threshold-cross time inside
-        // `execute_notify_threshold_crossed`, which overwrites this field.
-        // We still propagate `ctx.commit_pool_ordinal` rather than hardcoding
-        // 0 so the wire format stays uniform with any future migration that
-        // re-introduces create-time allocation; under current code it is
-        // always 0 for fresh pools.
-        commit_pool_ordinal: ctx.commit_pool_ordinal,
     };
 
     let ownership_msgs =
@@ -384,10 +376,6 @@ pub fn finalize_standard_pool(
         pool_token_info: ctx.pool_token_info.clone(),
         creator_pool_addr: pool_address.clone(),
         pool_kind: PoolKind::Standard,
-        // Standard pools never participate in the commit-pool decay
-        // schedule. Zero ordinal flags this in `calculate_and_mint_bluechip`
-        // (which never runs for standard pools anyway, but defense-in-depth).
-        commit_pool_ordinal: 0,
     };
 
     // Standard pools have only the NFT to transfer (no CW20 minter to

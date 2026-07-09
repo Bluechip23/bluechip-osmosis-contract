@@ -19,7 +19,8 @@ pub struct CreatePoolReplyMsg {
     pub threshold_payout: Option<Binary>,
     //fees to bluechip and creator
     pub commit_fee_info: CommitFeeInfo,
-    pub commit_threshold_limit_usd: Uint128,
+    /// Commit threshold in base units of the chain's native asset.
+    pub commit_threshold_limit: Uint128,
     pub token_address: Addr,
     //address called by the pool to mint new liquidity position NFTs.
     pub position_nft_address: Addr,
@@ -37,13 +38,6 @@ pub enum ExecuteMsg {
         pool_msg: CreatePool,
         token_info: CreatorTokenInfo,
     },
-    UpdateOraclePrice {},
-    // 2-step rotation: admin proposes, waits 48h, then calls
-    // ForceRotateOraclePools to execute. Cancel with
-    // CancelForceRotateOraclePools before the timelock elapses.
-    ProposeForceRotateOraclePools {},
-    CancelForceRotateOraclePools {},
-    ForceRotateOraclePools {},
     UpgradePools {
         new_code_id: u64,
         pool_ids: Option<Vec<u64>>,
@@ -65,13 +59,11 @@ pub enum ExecuteMsg {
         pool_id: u64,
     },
     // Called by a pool contract when its commit threshold has been crossed.
-    // Triggers the bluechip mint for this pool (only fires once per pool).
+    // Records the crossing in the factory registry (only fires once per pool).
     //
     // `crossed_at` is the pool's `env.block.time` at the moment threshold
-    // flipped. The mint formula uses this timestamp so the amount reflects
-    // when the pool actually crossed, not when a (possibly retried) notify
-    // finally lands. `serde(default)` keeps the legacy wire shape working —
-    // None falls back to `env.block.time`.
+    // flipped, recorded for observability. `serde(default)` keeps the
+    // legacy wire shape working — None falls back to `env.block.time`.
     NotifyThresholdCrossed {
         pool_id: u64,
         #[serde(default)]
@@ -108,49 +100,13 @@ pub enum ExecuteMsg {
         pool_id: u64,
         recovery_type: RecoveryType,
     },
-    // Admin sets the per-call bounty paid to anyone who successfully
-    // invokes UpdateOraclePrice. Capped by MAX_ORACLE_UPDATE_BOUNTY.
-    // Set to zero to disable the bounty entirely.
-    SetOracleUpdateBounty {
-        new_bounty: Uint128,
-    },
-    // Admin sets the per-batch bounty paid to keepers calling
-    // pool.ContinueDistribution. Capped by MAX_DISTRIBUTION_BOUNTY.
-    // Set to zero to disable the bounty entirely.
-    SetDistributionBounty {
-        new_bounty: Uint128,
-    },
-    // Admin tightens or relaxes the Pyth ATOM/USD confidence-interval
-    // gate. `bps` is bounded to
-    // `[PYTH_CONF_THRESHOLD_BPS_MIN, PYTH_CONF_THRESHOLD_BPS_MAX]`
-    // (50–500 bps inclusive). The same value is applied immediately
-    // to (a) the live Pyth read and (b) the cache-fallback re-read,
-    // so tightening the gate forces stale-cached prices whose
-    // sampling-time conf no longer satisfies the new gate to be
-    // refused on the very next conversion. Effect is immediate
-    // rather than timelocked: tightening is always conservative
-    // (it can only make the protocol more cautious about Pyth
-    // confidence) so the standard 48h window would only delay the
-    // safer state. Loosening is bounded by the hardcoded ceiling so
-    // even a compromised admin cannot disable the gate.
-    SetPythConfThresholdBps {
-        bps: u16,
-    },
-    // Pool-only. Forwarded by a pool's ContinueDistribution handler to
-    // pay the keeper bounty out of the factory's reserve. The factory
-    // verifies info.sender is a registered pool.
-    PayDistributionBounty {
-        recipient: String,
-    },
 
     // ---- Standard pools ----
     //
     // Permissionless creator-of-its-own-pool entry point for plain xyk
     // pools around two pre-existing assets. Caller pays the configured
-    // `standard_pool_creation_fee_usd` in ubluechip — the handler
-    // converts USD → bluechip via the oracle (with hardcoded fallback
-    // for the bootstrap case where the oracle has no data yet) and
-    // forwards the fee to `bluechip_wallet_address`.
+    // `standard_pool_creation_fee` (a flat amount of the chain's native
+    // asset) which is forwarded to `bluechip_wallet_address`.
     //
     // Pair shape constraints (enforced in the handler): no self-pair;
     // any `Bluechip { denom }` entry must match the canonical
@@ -164,26 +120,6 @@ pub enum ExecuteMsg {
         pool_token_info: [TokenType; 2],
         label: String,
     },
-    // One-shot bootstrap: admin sets the ATOM/bluechip anchor pool
-    // address to a previously-created standard pool. Only callable
-    // ONCE per factory deployment (gated on the `INITIAL_ANCHOR_SET`
-    // flag). All subsequent anchor changes require the standard 48h
-    // `ProposeConfigUpdate` flow. Exists purely to break the launch-day
-    // chicken-and-egg of "factory needs an anchor pool address at
-    // instantiate but the anchor pool itself is created via the factory".
-    SetAnchorPool {
-        pool_id: u64,
-    },
-    // bootstrap-price candidate confirmation. Branch (d)
-    // of `update_internal_oracle_price` writes the very-first published
-    // TWAP to a pending candidate slot rather than directly into
-    // `last_price`. The admin observes the candidate stabilize (≥ 1h
-    // BOOTSTRAP_OBSERVATION_SECONDS) and then calls `ConfirmBootstrapPrice`
-    // to publish it. Mitigates the single-block anchor-manipulation
-    // window that would otherwise let an attacker anchor the breaker
-    // for branch (a) to a chosen value.
-    ConfirmBootstrapPrice {},
-    CancelBootstrapPrice {},
     // permissionless storage hygiene. Iterates the
     // per-address rate-limit maps (commit-pool create, standard-pool
     // create) and removes entries older than 10× the cooldown window.
@@ -194,70 +130,6 @@ pub enum ExecuteMsg {
     PruneRateLimits {
         batch_size: Option<u32>,
     },
-
-    // ---- Oracle eligibility curation ----
-    //
-    // Two parallel inputs feed the oracle's eligible-pool set: an
-    // admin-curated allowlist (`ORACLE_ELIGIBLE_POOLS`, any pool kind)
-    // and a global flag that, when true, also auto-includes every
-    // threshold-crossed `PoolKind::Commit` pool. The roadmap is:
-    // - Stage 1–3: admin curates the allowlist (anchor + a few
-    // bluechip/IBC standard pools); auto-eligible flag is OFF.
-    // - Stage 4+: admin flips the flag to ON; threshold-crossed
-    // creator pools flow in automatically.
-    // Add: 48h timelock. Remove: immediate. Flag flip: 48h timelock.
-
-    /// Admin-only. Stage a pool address for inclusion in the oracle
-    /// allowlist. Requires the standard 48h timelock before
-    /// `ApplyAddOracleEligiblePool` can land it. Validates at propose
-    /// time that the pool exists in `POOLS_BY_ID` and has a bluechip
-    /// side, but final inclusion is gated on re-validation at apply.
-    ProposeAddOracleEligiblePool {
-        pool_addr: String,
-    },
-    /// Admin-only. Apply a previously-proposed oracle-allowlist add
-    /// after the 48h timelock has elapsed. Re-validates the pool's
-    /// bluechip-side index against current registry state.
-    ApplyAddOracleEligiblePool {
-        pool_addr: String,
-    },
-    /// Admin-only. Discard a pending oracle-allowlist add before
-    /// the timelock has expired. No-op on already-applied adds
-    /// (use `RemoveOracleEligiblePool` for those).
-    CancelAddOracleEligiblePool {
-        pool_addr: String,
-    },
-    /// Admin-only. Drop a pool from the oracle allowlist. Effect is
-    /// immediate (no timelock) — removing a contributor is always
-    /// safe relative to oracle integrity, and the breaker /
-    /// snapshot-refresh machinery handles the consequent
-    /// recomputation cleanly.
-    RemoveOracleEligiblePool {
-        pool_addr: String,
-    },
-    /// Admin-only. Stage a flip of the global `COMMIT_POOLS_AUTO_ELIGIBLE`
-    /// flag. Standard 48h timelock before `ApplySetCommitPoolsAutoEligible`
-    /// can land it. Both ON→OFF and OFF→ON are timelocked: turning OFF
-    /// affects creator-pool operators who will lose oracle weight, and
-    /// they deserve the same observability window as turning ON.
-    ProposeSetCommitPoolsAutoEligible {
-        enabled: bool,
-    },
-    /// Admin-only. Apply the previously-proposed flag flip after the
-    /// 48h timelock has elapsed.
-    ApplySetCommitPoolsAutoEligible {},
-    /// Admin-only. Discard a pending flag flip before the timelock
-    /// has expired.
-    CancelSetCommitPoolsAutoEligible {},
-    /// Permissionless. Force a rebuild of `ELIGIBLE_POOL_SNAPSHOT` from
-    /// the current allowlist + auto-flag inputs. Rate-limited via
-    /// `ORACLE_REFRESH_RATE_LIMIT_BLOCKS` so this can't be spammed.
-    /// Useful when the admin has just added a pool to the allowlist
-    /// and wants the oracle to start sampling it without waiting for
-    /// the next lazy refresh inside `select_random_pools_with_atom`.
-    /// Has no effect on which pools are eligible — only on when the
-    /// snapshot reflects the current eligibility inputs.
-    RefreshOraclePoolSnapshot {},
 }
 
 #[cw_serde]

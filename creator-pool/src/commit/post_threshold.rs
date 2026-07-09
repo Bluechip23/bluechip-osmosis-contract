@@ -32,7 +32,7 @@ pub(super) fn process_post_threshold_commit(
     sender: Addr,
     asset: TokenInfo,
     swap_amount: Uint128,
-    usd_value: Uint128,
+    commit_value: Uint128,
     mut messages: Vec<CosmosMsg>,
     belief_price: Option<Decimal>,
     max_spread: Option<Decimal>,
@@ -166,7 +166,7 @@ pub(super) fn process_post_threshold_commit(
         &sender,
         &pool_state.pool_contract_address,
         asset.amount,
-        usd_value,
+        commit_value,
         env.block.time,
     )?;
 
@@ -197,7 +197,6 @@ pub(super) fn process_post_threshold_commit(
         .add_messages(messages)
         .add_attributes(base)
         .add_attribute("commit_amount_bluechip", asset.amount.to_string())
-        .add_attribute("commit_amount_usd", usd_value.to_string())
         .add_attribute("swap_amount_bluechip", swap_amount.to_string())
         .add_attribute("tokens_received", return_amt.to_string())
         .add_attribute("spread_amount", spread_amt.to_string())

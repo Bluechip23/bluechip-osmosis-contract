@@ -31,10 +31,10 @@ use pool_core::liquidity::{
 };
 use pool_core::msg::CommitFeeInfo;
 use pool_core::state::{
-    pause_kind, ExpectedFactory, OracleInfo, PauseKind, PoolAnalytics, PoolDetails, PoolFeeState,
+    pause_kind, ExpectedFactory, PauseKind, PoolAnalytics, PoolDetails, PoolFeeState,
     PoolInfo, PoolSpecs, PoolState, Position, COMMITFEEINFO, DEFAULT_LP_FEE,
     DEFAULT_SWAP_RATE_LIMIT_SECS, DEPOSIT_VERIFY_REPLY_ID, EXPECTED_FACTORY, IS_THRESHOLD_HIT,
-    LIQUIDITY_POSITIONS, MAX_LP_FEE, MIN_LP_FEE, NEXT_POSITION_ID, ORACLE_INFO, OWNER_POSITIONS,
+    LIQUIDITY_POSITIONS, MAX_LP_FEE, MIN_LP_FEE, NEXT_POSITION_ID, OWNER_POSITIONS,
     POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_KIND_STANDARD, POOL_SPECS, POOL_STATE,
 };
 use pool_core::swap::{execute_swap_cw20, simple_swap};
@@ -119,9 +119,6 @@ pub fn instantiate(
     let pool_state = build_initial_pool_state(&env);
     let pool_fee_state = build_zero_pool_fee_state();
 
-    let oracle_info = OracleInfo {
-        oracle_addr: msg.used_factory_addr.clone(),
-    };
 
     COMMITFEEINFO.save(deps.storage, &fee_info)?;
     // Standard pools are "threshold-hit" from birth — shared swap and
@@ -142,7 +139,6 @@ pub fn instantiate(
     POOL_SPECS.save(deps.storage, &pool_specs)?;
     LIQUIDITY_POSITIONS.save(deps.storage, "0", &liquidity_position)?;
     OWNER_POSITIONS.save(deps.storage, (&env.contract.address, "0"), &true)?;
-    ORACLE_INFO.save(deps.storage, &oracle_info)?;
     POOL_ANALYTICS.save(deps.storage, &PoolAnalytics::default())?;
 
     Ok(Response::new()

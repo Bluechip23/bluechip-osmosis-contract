@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail CI if the deployable optimizer build is not feature-clean.
 
-The canonical ``artifacts/<crate>.wasm`` files (factory, expand-economy) that
+The canonical ``artifacts/<crate>.wasm`` file (factory) that
 deploy tooling loads are produced by the optimizer build named ``prod``. That
 build MUST have an empty feature set: a ``mock`` or ``integration_short_timing``
 wasm must never become the deployable artifact (see
@@ -19,7 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover
     print("::error::python >= 3.11 required for tomllib", file=sys.stderr)
     sys.exit(2)
 
-CRATES = ("factory/Cargo.toml", "expand-economy/Cargo.toml")
+CRATES = ("factory/Cargo.toml",)
 FORBIDDEN = {"mock", "integration_short_timing"}
 
 

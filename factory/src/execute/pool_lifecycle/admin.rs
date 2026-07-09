@@ -14,8 +14,7 @@ use cosmwasm_std::{
 };
 
 use crate::error::ContractError;
-use crate::mint_bluechips_pool_creation::calculate_and_mint_bluechip;
-use crate::state::{COMMIT_POOL_COUNTER, POOLS_BY_ID, POOL_THRESHOLD_MINTED};
+use crate::state::{POOLS_BY_ID, POOL_THRESHOLD_CROSSED};
 
 use super::super::ensure_admin;
 
@@ -176,7 +175,7 @@ pub fn execute_sweep_unclaimed_emergency_shares_pool(
 /// retried-after-failure) notify finally lands. `None` falls back to
 /// `env.block.time` here for wire-format backward compatibility.
 pub fn execute_notify_threshold_crossed(
-    mut deps: DepsMut,
+    deps: DepsMut,
     env: Env,
     info: MessageInfo,
     pool_id: u64,
@@ -199,86 +198,36 @@ pub fn execute_notify_threshold_crossed(
 
     // Defense-in-depth against a standard pool somehow reaching this code
     // path (it shouldn't — the pool-side Commit handler is gated on
-    // PoolKind::Commit). Rejecting here too keeps the bluechip mint
-    // schedule cleanly tied to commit-pool threshold events only.
+    // PoolKind::Commit).
     if pool_details.pool_kind == pool_factory_interfaces::PoolKind::Standard {
         return Err(ContractError::Std(StdError::generic_err(
             "Standard pools do not have a commit threshold to cross",
         )));
     }
 
-    // Check if this pool has already triggered its mint
-    if POOL_THRESHOLD_MINTED
+    // Idempotency gate: the crossing is recorded exactly once. A retried
+    // notify after the first success is rejected so the pool's
+    // RetryFactoryNotify machinery can distinguish "already recorded"
+    // from a transient failure.
+    if POOL_THRESHOLD_CROSSED
         .may_load(deps.storage, pool_id)?
         .unwrap_or(false)
     {
         return Err(ContractError::Std(StdError::generic_err(
-            "Bluechip mint already triggered for this pool",
+            "Threshold crossing already recorded for this pool",
         )));
     }
 
-    POOL_THRESHOLD_MINTED.save(deps.storage, pool_id, &true)?;
+    POOL_THRESHOLD_CROSSED.save(deps.storage, pool_id, &true)?;
 
-    // Allocate the commit-pool ordinal here, at threshold-cross time —
-    // NOT at create time. Junk-create pools that never cross threshold
-    // therefore do not consume an ordinal slot, so they cannot inflate
-    // the bluechip-mint decay formula's `x` input for legitimate future
-    // crossings. The counter is bumped after the POOL_THRESHOLD_MINTED
-    // idempotency check above, so a `RetryFactoryNotify` after a failed
-    // initial dispatch does not double-allocate. CosmWasm storage
-    // atomicity guarantees: if `calculate_and_mint_bluechip` below
-    // fails (e.g. expand_economy daily-cap exceeded), the entire tx
-    // reverts including the bumps above — POOL_THRESHOLD_MINTED reverts
-    // to false, COMMIT_POOL_COUNTER reverts, and a later RetryFactoryNotify
-    // re-runs allocation cleanly.
-    let prior_counter = COMMIT_POOL_COUNTER.may_load(deps.storage)?.unwrap_or(0);
-    let new_ordinal = prior_counter
-        .checked_add(1)
-        .ok_or_else(|| ContractError::Std(StdError::generic_err(
-            "COMMIT_POOL_COUNTER overflow on threshold-cross allocation",
-        )))?;
-    COMMIT_POOL_COUNTER.save(deps.storage, &new_ordinal)?;
-    // Write the freshly-allocated ordinal back to PoolDetails so
-    // `calculate_and_mint_bluechip` (which re-loads PoolDetails) reads
-    // the assigned value rather than the create-time sentinel 0.
-    let mut pool_details = pool_details;
-    pool_details.commit_pool_ordinal = new_ordinal;
-    POOLS_BY_ID.save(deps.storage, pool_id, &pool_details)?;
-
-    // Use the pool-supplied crossed_at when present (anchors the decay
-    // formula to the original crossing time so a retried notify after a
-    // long delay doesn't get a smaller mint than the original crossing
-    // was entitled to). Fall back to env.block.time for legacy
-    // wire-format compat (no field).
-    //
-    // Reject pool-supplied timestamps that are in the future relative
-    // to the current block. A pool can in principle send any value
-    // here; clamping to (..= env.block.time) keeps `seconds_elapsed`
-    // non-negative in `calculate_mint_amount` and prevents a buggy /
-    // adversarial pool from claiming a "negative elapsed" (which would
-    // inflate the mint). Reject explicitly rather than silently
-    // clamping so a buggy caller surfaces.
-    let effective_crossed_at = match crossed_at {
-        Some(ts) => {
-            if ts > env.block.time {
-                return Err(ContractError::Std(StdError::generic_err(format!(
-                    "Pool-supplied crossed_at ({}) is in the future relative to \
-                     current block.time ({}). Pool should snapshot env.block.time \
-                     at threshold-cross and not advance it on retries.",
-                    ts, env.block.time
-                ))));
-            }
-            ts
-        }
-        None => env.block.time,
-    };
-
-    let mint_messages =
-        calculate_and_mint_bluechip(&mut deps, env, pool_id, effective_crossed_at)?;
+    // Use the pool-supplied crossed_at when present (the pool snapshots
+    // env.block.time at the moment threshold flipped, so a retried
+    // notify still records the original crossing time). Fall back to
+    // env.block.time for legacy wire-format compat (no field).
+    let effective_crossed_at = crossed_at.unwrap_or(env.block.time);
 
     Ok(Response::new()
-        .add_messages(mint_messages)
-        .add_attribute("action", "threshold_crossed_mint")
+        .add_attribute("action", "threshold_crossed")
         .add_attribute("pool_id", pool_id.to_string())
         .add_attribute("crossed_at", effective_crossed_at.to_string()))
 }

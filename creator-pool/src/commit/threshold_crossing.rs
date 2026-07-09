@@ -35,9 +35,7 @@ use crate::state::{
     POOL_FEE_STATE, POOL_STATE, POST_THRESHOLD_COOLDOWN_BLOCKS,
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
-use crate::swap_helper::{
-    assert_max_spread, compute_swap, update_price_accumulator, usd_to_bluechip_at_rate,
-};
+use crate::swap_helper::{assert_max_spread, compute_swap, update_price_accumulator};
 
 use super::commit_base_attributes;
 
@@ -49,9 +47,8 @@ pub(crate) fn process_threshold_crossing_with_excess(
     asset: &TokenInfo,
     amount: Uint128,
     amount_after_fees: Uint128,
-    usd_value: Uint128,
-    usd_to_threshold: Uint128,
-    oracle_rate: Uint128,
+    commit_value: Uint128,
+    value_to_threshold: Uint128,
     pool_state: &mut PoolState,
     pool_fee_state: &mut PoolFeeState,
     pool_specs: &PoolSpecs,
@@ -81,11 +78,10 @@ pub(crate) fn process_threshold_crossing_with_excess(
         return Err(ContractError::StuckThresholdProcessing);
     }
 
-    // Reuse the rate captured at commit() entry rather than re-querying the
-    // oracle. usd_to_bluechip_at_rate is the inverse of the
-    // bluechip_to_usd math used to produce usd_value, so thresholding is
-    // arithmetically consistent with the valuation.
-    let bluechip_to_threshold = usd_to_bluechip_at_rate(usd_to_threshold, oracle_rate)?;
+    // Threshold accounting is native-denominated: the portion of this
+    // commit that fills the remaining threshold gap is `value_to_threshold`
+    // native base units, and everything above it is excess.
+    let bluechip_to_threshold = value_to_threshold;
     let bluechip_excess = asset.amount.checked_sub(bluechip_to_threshold)?;
 
     let threshold_portion_after_fees = if amount.is_zero() {
@@ -94,13 +90,12 @@ pub(crate) fn process_threshold_crossing_with_excess(
         amount_after_fees.multiply_ratio(bluechip_to_threshold, amount)
     };
     let effective_bluechip_excess = amount_after_fees.checked_sub(threshold_portion_after_fees)?;
-    let usd_excess = usd_value.checked_sub(usd_to_threshold)?;
 
     // Update commit ledger with only the threshold portion
     COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
-        Ok(v.unwrap_or_default().checked_add(usd_to_threshold)?)
+        Ok(v.unwrap_or_default().checked_add(value_to_threshold)?)
     })?;
-    USD_RAISED_FROM_COMMIT.save(deps.storage, &commit_config.commit_amount_for_threshold_usd)?;
+    USD_RAISED_FROM_COMMIT.save(deps.storage, &commit_config.commit_amount_for_threshold)?;
     // NATIVE_RAISED_FROM_COMMIT stores the *net* bluechip entering the
     // threshold-pool side of the contract's bank balance — i.e. the
     // threshold-portion-after-fees, not the gross `bluechip_to_threshold`.
@@ -278,7 +273,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
 
     // Single consolidated commit-info update covering BOTH the threshold
     // portion and the excess portion (if any). Sum the bluechip into one
-    // value and use `usd_value` (= threshold_usd + excess_usd) so
+    // value and use `commit_value` (= threshold + excess) so
     // `last_payment_*` reflects the user's full crossing commit rather
     // than the excess-only snapshot the prior two-call structure left.
     let bluechip_committed = bluechip_to_threshold
@@ -288,7 +283,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
         &sender,
         &pool_state.pool_contract_address,
         bluechip_committed,
-        usd_value,
+        commit_value,
         env.block.time,
     )?;
 
@@ -331,8 +326,6 @@ pub(crate) fn process_threshold_crossing_with_excess(
             "swap_amount_bluechip_pre_cap",
             effective_bluechip_excess.to_string(),
         )
-        .add_attribute("threshold_amount_usd", usd_to_threshold.to_string())
-        .add_attribute("swap_amount_usd", usd_excess.to_string())
         .add_attribute("bluechip_excess_spread", spread_amt.to_string())
         .add_attribute("bluechip_excess_returned", return_amt.to_string())
         .add_attribute("bluechip_excess_commission", commission_amt.to_string())
@@ -342,7 +335,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
 }
 
 /// Threshold-hit-exact handler. Fires when a commit hits the
-/// `commit_amount_for_threshold_usd` target precisely (no excess to
+/// `commit_amount_for_threshold` target precisely (no excess to
 /// route through the AMM swap). Sister to
 /// [`process_threshold_crossing_with_excess`] — same payout / NFT-accept /
 /// cooldown / factory-notify pipeline, just no swap branch.
@@ -358,7 +351,7 @@ pub(crate) fn process_threshold_hit_exact(
     sender: Addr,
     asset: &TokenInfo,
     amount_after_fees: Uint128,
-    usd_value: Uint128,
+    commit_value: Uint128,
     new_total: Uint128,
     pool_state: &mut PoolState,
     pool_fee_state: &mut PoolFeeState,
@@ -383,10 +376,10 @@ pub(crate) fn process_threshold_hit_exact(
     }
 
     COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
-        Ok(v.unwrap_or_default().checked_add(usd_value)?)
+        Ok(v.unwrap_or_default().checked_add(commit_value)?)
     })?;
-    let final_usd = new_total.min(commit_config.commit_amount_for_threshold_usd);
-    USD_RAISED_FROM_COMMIT.save(deps.storage, &final_usd)?;
+    let final_raised = new_total.min(commit_config.commit_amount_for_threshold);
+    USD_RAISED_FROM_COMMIT.save(deps.storage, &final_raised)?;
     // Store the net-of-fees bluechip that actually enters the contract's
     // bank balance (; see pre_threshold.rs comment block).
     // Eliminates the dust-stranding mismatch between per-commit fee
@@ -425,7 +418,7 @@ pub(crate) fn process_threshold_hit_exact(
         &sender,
         &pool_state.pool_contract_address,
         asset.amount,
-        usd_value,
+        commit_value,
         env.block.time,
     )?;
     THRESHOLD_PROCESSING.save(deps.storage, &false)?;
@@ -445,6 +438,5 @@ pub(crate) fn process_threshold_hit_exact(
         .add_messages(messages)
         .add_attributes(base)
         .add_attribute("commit_amount_bluechip", asset.amount.to_string())
-        .add_attribute("commit_amount_usd", usd_value.to_string())
-        .add_attribute("total_usd_raised_after", new_total.to_string()))
+        .add_attribute("total_raised_after", new_total.to_string()))
 }

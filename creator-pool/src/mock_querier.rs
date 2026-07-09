@@ -1,5 +1,4 @@
 #![cfg(not(target_arch = "wasm32"))]
-use crate::oracle::{PriceResponse, PythQueryMsg};
 use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
     from_json, to_json_binary, Addr, Coin, Decimal, Empty, OwnedDeps, Querier, QuerierResult,
@@ -9,17 +8,6 @@ use cw20::{BalanceResponse, Cw20QueryMsg, TokenInfoResponse};
 use std::collections::HashMap;
 
 use crate::msg::{CommitFeeInfo, FeeInfoResponse, PoolResponse, QueryMsg};
-use cosmwasm_schema::cw_serde;
-
-#[cw_serde]
-pub enum MockFactoryQuery {
-    InternalBlueChipOracleQuery(MockOracleQuery),
-}
-
-#[cw_serde]
-pub enum MockOracleQuery {
-    ConvertBluechipToUsd { amount: Uint128 },
-}
 
 // mock_dependencies is a drop-in replacement for cosmwasm_std::testing::mock_dependencies.
 // This uses the BETFI CustomQuerier.
@@ -124,15 +112,6 @@ impl WasmMockQuerier {
                         let bin = to_json_binary(&resp).unwrap();
                         return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(bin));
                     }
-                    // Handle InternalBlueChipOracleQuery
-                    if let Ok(MockFactoryQuery::InternalBlueChipOracleQuery(
-                        MockOracleQuery::ConvertBluechipToUsd { amount },
-                    )) = from_json(msg)
-                    {
-                        // Mock 1:1 price for simplicity in tests
-                        let bin = to_json_binary(&amount).unwrap();
-                        return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(bin));
-                    }
                     panic!(
                         "Unexpected query to factory: {}",
                         String::from_utf8_lossy(msg)
@@ -167,20 +146,6 @@ impl WasmMockQuerier {
                     };
                     let bin = to_json_binary(&resp).unwrap();
                     return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(bin));
-                } else if contract_addr == "oracle0000" {
-                    match from_json(msg).unwrap() {
-                        PythQueryMsg::GetPrice { price_id: _ } => {
-                            let resp = PriceResponse {
-                                price: Uint128::new(100_000_000),
-                                conf: Uint128::new(100_000),
-                                expo: -8,
-                                publish_time: 1234567890,
-                            };
-                            return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
-                                to_json_binary(&resp).unwrap(),
-                            ));
-                        }
-                    }
                 }
                 // 3) CW20 canonical queries
                 match from_json(msg).unwrap() {

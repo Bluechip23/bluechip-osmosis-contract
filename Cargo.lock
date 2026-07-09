@@ -343,7 +343,6 @@ dependencies = [
  "cw20-base",
  "easy-addr",
  "factory",
- "oracle",
  "pool-core",
  "pool-factory-interfaces",
  "proptest",
@@ -656,22 +655,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "expand-economy"
-version = "1.0.0"
-dependencies = [
- "cosmwasm-schema",
- "cosmwasm-std",
- "cw-multi-test",
- "cw-storage-plus",
- "cw-utils",
- "cw2",
- "pool-factory-interfaces",
- "semver",
- "serde",
- "thiserror 2.0.12",
-]
-
-[[package]]
 name = "factory"
 version = "1.0.0"
 dependencies = [
@@ -716,32 +699,6 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
-
-[[package]]
-name = "fuzz-stateful"
-version = "1.0.0"
-dependencies = [
- "cosmwasm-schema",
- "cosmwasm-std",
- "creator-pool",
- "cw-multi-test",
- "cw-storage-plus",
- "cw-utils",
- "cw20",
- "cw20-base",
- "expand-economy",
- "factory",
- "oracle",
- "pool-core",
- "pool-factory-interfaces",
- "proptest",
- "proptest-derive",
- "router",
- "schemars",
- "serde",
- "standard-pool",
- "thiserror 2.0.12",
-]
 
 [[package]]
 name = "generic-array"
@@ -820,15 +777,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
-]
-
-[[package]]
-name = "integer-sqrt"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "276ec31bcb4a9ee45f58bec6f9ec700ae4cf4f4f8f2fa7e06cb406bd5ffdd770"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -926,24 +874,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d75b0bedcc4fe52caa0e03d9f1151a323e4aa5e2d78ba3580400cd3c9e2bc4bc"
 
 [[package]]
-name = "oracle"
-version = "1.0.0"
-dependencies = [
- "cosmwasm-schema",
- "cosmwasm-std",
- "cw-multi-test",
- "cw-storage-plus",
- "cw-utils",
- "cw2",
- "cw20",
- "cw20-base",
- "easy-addr",
- "integer-sqrt",
- "proptest",
- "thiserror 2.0.12",
-]
-
-[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1034,17 +964,6 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
-]
-
-[[package]]
-name = "proptest-derive"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf16337405ca084e9c78985114633b6827711d22b9e6ef6c6c0d665eb3f0b6e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -1373,7 +1292,6 @@ dependencies = [
  "cw20-base",
  "easy-addr",
  "factory",
- "oracle",
  "pool-core",
  "pool-factory-interfaces",
  "semver",

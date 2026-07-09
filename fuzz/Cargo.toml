@@ -31,11 +31,6 @@ creator-pool = { path = "../creator-pool", features = ["library"] }
 # Workspace inheritance is unavailable here (we're outside the
 # workspace) so we restate the cosmwasm version explicitly.
 
-[[bin]]
-name = "fuzz_expand_economy_formula"
-path = "fuzz_targets/fuzz_expand_economy_formula.rs"
-test = false
-doc = false
 bench = false
 
 [[bin]]

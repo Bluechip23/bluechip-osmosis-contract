@@ -7,7 +7,6 @@ use cosmwasm_std::{
 };
 use pool_factory_interfaces::{IsPausedResponse, PoolQueryMsg, PoolStateResponseForFactory};
 
-use crate::pyth_types::{PriceResponse, PythQueryMsg};
 use crate::query::QueryMsg;
 
 pub fn mock_dependencies(
@@ -31,26 +30,12 @@ pub struct WasmMockQuerier {
     // factory's graceful-fallback behavior when a pool contract is broken
     // or has been migrated out from under the factory.
     pub query_error_pools: std::collections::HashSet<String>,
-    // When set, responds to mock-oracle GetPrice { price_id: "BLUECHIP_USD" }
-    // with this price. Used by the #[cfg(feature = "mock")] oracle-update tests.
-    pub mock_bluechip_usd_price: Option<cosmwasm_std::Uint128>,
     // Per-pool overrides for `PoolQueryMsg::GetPoolState`. Keyed by
     // contract address; when present, the override is returned verbatim.
     // Falls back to the default 50B/10B reserves below if no override is
-    // registered for the queried address. Used by integration tests that
-    // need different reserves on different pools (dedup, USD-denominated
-    // liquidity floor) — without this, every cross-contract pool query
-    // returns the same numbers regardless of which pool was asked.
+    // registered for the queried address.
     pub pool_state_overrides:
         std::collections::HashMap<String, PoolStateResponseForFactory>,
-    // When set, responds to `ExpandEconomyQuery::GetConfig {}` (sent by
-    // `execute_update_factory_config`'s denom cross-check) with a
-    // `ConfigResponse` carrying this `bluechip_denom`. The
-    // `factory_address` / `owner` fields in the response are stubbed
-    // with dummy addresses since the factory's cross-check only reads
-    // `bluechip_denom`. None means the query goes through the
-    // unrecognized-query error path.
-    pub mock_expand_economy_denom: Option<String>,
 }
 
 impl Querier for WasmMockQuerier {
@@ -124,53 +109,8 @@ impl WasmMockQuerier {
                     }
                 }
 
-                // Mock-oracle GetPrice: tests set `mock_bluechip_usd_price`
-                // to configure what BLUECHIP_USD returns.
-                if let Ok(pyth_msg) = from_json::<PythQueryMsg>(&msg) {
-                    if let PythQueryMsg::GetPrice { price_id } = pyth_msg {
-                        if price_id == "BLUECHIP_USD" {
-                            if let Some(price) = self.mock_bluechip_usd_price {
-                                let resp = PriceResponse {
-                                    price,
-                                    publish_time: 0,
-                                    expo: -6,
-                                    conf: cosmwasm_std::Uint128::zero(),
-                                };
-                                return SystemResult::Ok(to_json_binary(&resp).into());
-                            }
-                        }
-                    }
-                }
-
                 if let Ok(_factory_msg) = from_json::<QueryMsg>(&msg) {
                     panic!("Unsupported factory query");
-                }
-
-                // Expand-economy `GetConfig {}` for the bluechip_denom cross-check.
-                // Mirror of the locally-defined `ExpandEconomyQuery` enum
-                // in `execute_update_factory_config` — same snake_case
-                // wire format. Defined here as a test-only struct to avoid
-                // pulling the expand-economy crate into the test dep graph.
-                #[derive(serde::Deserialize)]
-                #[serde(rename_all = "snake_case")]
-                enum ExpandEconomyQueryProbe {
-                    GetConfig {},
-                }
-                if let Ok(ExpandEconomyQueryProbe::GetConfig {}) = from_json::<ExpandEconomyQueryProbe>(&msg) {
-                    if let Some(denom) = self.mock_expand_economy_denom.clone() {
-                        #[derive(serde::Serialize)]
-                        struct ConfigResponse {
-                            factory_address: Addr,
-                            owner: Addr,
-                            bluechip_denom: String,
-                        }
-                        let resp = ConfigResponse {
-                            factory_address: Addr::unchecked("factory_stub"),
-                            owner: Addr::unchecked("owner_stub"),
-                            bluechip_denom: denom,
-                        };
-                        return SystemResult::Ok(to_json_binary(&resp).into());
-                    }
                 }
 
                 // If neither parse succeeded
@@ -190,9 +130,7 @@ impl WasmMockQuerier {
             base,
             paused_pools: std::collections::HashSet::new(),
             query_error_pools: std::collections::HashSet::new(),
-            mock_bluechip_usd_price: None,
             pool_state_overrides: std::collections::HashMap::new(),
-            mock_expand_economy_denom: None,
         }
     }
 

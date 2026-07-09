@@ -198,57 +198,15 @@ pub(crate) fn execute_create_creator_pool(
         &(),
     )?;
 
-    // Charge a USD-denominated creation fee (paid in canonical bluechip)
-    // for commit-pool creation as anti-spam friction. Reuses the same
-    // fee knob as standard pools so deployments can enable/disable from
-    // a single config value.
-    //
-    // Fallback policy:
-    // - oracle returns a non-zero amount (steady state OR best-effort
-    // warm-up backed by `pre_reset_last_price`): use the conversion.
-    // - oracle unavailable AND `INITIAL_ANCHOR_SET == false`: this is
-    // the true bootstrap window before the anchor pool exists, so
-    // fall back to the hardcoded `STANDARD_POOL_CREATION_FEE_FALLBACK_BLUECHIP`.
-    // Reachable for at most the first standard-pool creation (which
-    // becomes the anchor) — bounded one-shot.
-    // - oracle unavailable AND `INITIAL_ANCHOR_SET == true`: refuse
-    // creation with `OracleUnavailable`. Without this gate, an
-    // attacker who waited for an oracle outage could pay the flat
-    // hardcoded amount regardless of the bluechip USD price (could
-    // be 100× too cheap if bluechip moons, or 100× too expensive
-    // if it crashes). Refusing converts an attack window into a
-    // temporary creation freeze, which is safer than mispricing.
-    let usd_fee = factory_cw20.standard_pool_creation_fee_usd;
-    let (required_bluechip, fee_source) = if usd_fee.is_zero() {
-        (Uint128::zero(), "disabled")
+    // Charge a flat creation fee (denominated in the chain's native
+    // asset) for commit-pool creation as anti-spam friction. Reuses the
+    // same fee knob as standard pools so deployments can enable/disable
+    // from a single config value. Zero disables the fee entirely.
+    let required_bluechip = factory_cw20.standard_pool_creation_fee;
+    let fee_source = if required_bluechip.is_zero() {
+        "disabled"
     } else {
-        match crate::internal_bluechip_price_oracle::usd_to_bluechip_best_effort(
-            deps.as_ref(),
-            usd_fee,
-            &env,
-        ) {
-            Ok(conv) if !conv.amount.is_zero() => (conv.amount, "oracle"),
-            _ => {
-                let initial_anchor_set = crate::state::INITIAL_ANCHOR_SET
-                    .may_load(deps.storage)?
-                    .unwrap_or(false);
-                if !initial_anchor_set {
-                    (
-                        crate::state::STANDARD_POOL_CREATION_FEE_FALLBACK_BLUECHIP,
-                        "fallback_bootstrap",
-                    )
-                } else {
-                    return Err(ContractError::Std(StdError::generic_err(
-                        "Cannot price creation fee: oracle unavailable AND no recent \
-                         bluechip USD estimate. Hardcoded fallback is only permitted \
-                         during the pre-anchor bootstrap window. Wait for the oracle \
-                         to recover (next UpdateOraclePrice succeeds), or — if this is \
-                         a sustained outage — investigate the Pyth feed and anchor \
-                         pool before retrying.",
-                    )));
-                }
-            }
-        }
+        "config"
     };
     // Strict single-denom funds validation` + refund-extras pattern with `must_pay`).
     // `must_pay` enforces that `info.funds` contains exactly one Coin
@@ -324,18 +282,6 @@ pub(crate) fn execute_create_creator_pool(
     let pool_counter = POOL_COUNTER.may_load(deps.storage)?.unwrap_or(0);
     let pool_id = pool_counter + 1;
     POOL_COUNTER.save(deps.storage, &pool_id)?;
-    // Sentinel ordinal at create time. The real allocation happens at
-    // threshold-cross inside `execute_notify_threshold_crossed`, so the
-    // bluechip mint-decay formula's `x` reflects pools that actually
-    // reached threshold rather than pools that were merely created.
-    // Junk pools that never cross do not consume an ordinal slot and
-    // therefore cannot inflate the decay input for legitimate future
-    // crossings. The downstream guard in
-    // `calculate_and_mint_bluechip` (`if commit_pool_ordinal == 0:
-    // Err`) keeps the invariant load-bearing: any path that reaches
-    // the mint without going through the notify-handler's allocation
-    // fails closed.
-    let commit_pool_ordinal: u64 = 0;
 
     let msg = WasmMsg::Instantiate {
         code_id: factory_cw20.cw20_token_contract_id,
@@ -397,7 +343,6 @@ pub(crate) fn execute_create_creator_pool(
                 creation_time: env.block.time,
                 status: CreationStatus::Started,
             },
-            commit_pool_ordinal,
         },
     )?;
     let sub_msg = vec![SubMsg::reply_on_success(
@@ -610,52 +555,13 @@ pub(crate) fn execute_create_standard_pool(
         ))));
     }
 
-    // Compute required fee. See the per-branch policy doc on the
-    // `match` below for the full fallback logic.
-    let usd_fee = factory_config.standard_pool_creation_fee_usd;
-    let (required_bluechip, fee_source) = if usd_fee.is_zero() {
-        (Uint128::zero(), "disabled")
+    // Flat creation fee denominated in the chain's native asset.
+    // Zero disables the fee entirely.
+    let required_bluechip = factory_config.standard_pool_creation_fee;
+    let fee_source = if required_bluechip.is_zero() {
+        "disabled"
     } else {
-        // Best-effort USD→bluechip conversion. Falls back to
-        // `pre_reset_last_price` during the post-reset warm-up window
-        // instead of erroring; keeps standard-pool creation functional
-        // through anchor rotations rather than forcing every standard-
-        // pool creator to wait ~30 min after every rotation.
-        //
-        // Hardcoded-fallback policy: if even
-        // best-effort returns nothing, only fall back when this is the
-        // true pre-anchor bootstrap window (`INITIAL_ANCHOR_SET == false`,
-        // meaning no anchor pool exists yet — this is the very first
-        // standard-pool creation that becomes the anchor). After the
-        // anchor is set, an oracle outage MUST refuse creation rather
-        // than charging a flat amount untied to the live USD value, to
-        // prevent attackers from timing creations during outages to
-        // bypass the configured USD fee.
-        match crate::internal_bluechip_price_oracle::usd_to_bluechip_best_effort(
-            deps.as_ref(),
-            usd_fee,
-            &env,
-        ) {
-            Ok(conv) if !conv.amount.is_zero() => (conv.amount, "oracle"),
-            _ => {
-                let initial_anchor_set = crate::state::INITIAL_ANCHOR_SET
-                    .may_load(deps.storage)?
-                    .unwrap_or(false);
-                if !initial_anchor_set {
-                    (
-                        crate::state::STANDARD_POOL_CREATION_FEE_FALLBACK_BLUECHIP,
-                        "fallback_bootstrap",
-                    )
-                } else {
-                    return Err(ContractError::Std(StdError::generic_err(
-                        "Cannot price creation fee: oracle unavailable AND no recent \
-                         bluechip USD estimate. Hardcoded fallback is only permitted \
-                         during the pre-anchor bootstrap window. Wait for the oracle \
-                         to recover (next UpdateOraclePrice succeeds) before retrying.",
-                    )));
-                }
-            }
-        }
+        "config"
     };
 
     // Strict single-denom funds validation` + refund-extras pattern with `must_pay`).
