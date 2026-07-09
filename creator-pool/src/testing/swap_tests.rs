@@ -52,7 +52,6 @@ fn test_commit_pre_threshold_basic() {
 
     let env = mock_env();
     let commit_amount = Uint128::new(1_000_000_000); // 1k bluechip
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per bluechip with 6 decimals
 
     let info = message_info(
         &Addr::unchecked("user1"),
@@ -108,7 +107,6 @@ fn test_race_condition_commits_crossing_threshold() {
         .save(&mut deps.storage, &Uint128::new(24_900_000_000))
         .unwrap();
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per bluechip with 6 decimals
 
     let commit_amount = Uint128::new(200_000_000); // $200 per commit
     let env = mock_env();
@@ -220,7 +218,6 @@ fn test_commit_crosses_threshold() {
     let env = mock_env();
     let commit_amount = Uint128::new(200_000_000); // 200 tokens = $200
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per bluechip with 6 decimals
     let info = message_info(
         &Addr::unchecked("whale"),
         &[Coin {
@@ -282,7 +279,6 @@ fn test_commit_post_threshold_swap() {
     let env = mock_env();
     let commit_amount = Uint128::new(100_000_000); // 100 bluechip
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per bluechip with 6 decimals
 
     let info = message_info(
         &Addr::unchecked("commiter"),
@@ -850,7 +846,6 @@ fn test_commit_rate_limiting() {
         }],
     );
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per bluechip with 6 decimals
 
     let msg = ExecuteMsg::Commit {
         asset: TokenInfo {
@@ -1249,7 +1244,6 @@ fn test_commit_with_changing_oracle_prices() {
     }]);
     setup_pool_storage(&mut deps);
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
     let env = mock_env();
     let info1 = message_info(
@@ -1277,7 +1271,6 @@ fn test_commit_with_changing_oracle_prices() {
     let first_usd = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
     assert_eq!(first_usd, Uint128::new(5_000_000)); // $5
 
-    with_factory_oracle(&mut deps, Uint128::new(2_000_000));
 
     let info2 = message_info(
         &Addr::unchecked("user2"),
@@ -1321,7 +1314,6 @@ fn test_threshold_crossing_depends_on_oracle_price() {
         .save(&mut deps1.storage, &false)
         .unwrap();
 
-    with_factory_oracle(&mut deps1, Uint128::new(10_000_000));
     USD_RAISED_FROM_COMMIT
         .save(&mut deps1.storage, &Uint128::new(24_000_000_000))
         .unwrap();
@@ -1358,7 +1350,6 @@ fn test_threshold_crossing_depends_on_oracle_price() {
         .save(&mut deps2.storage, &false)
         .unwrap();
 
-    with_factory_oracle(&mut deps2, Uint128::new(100_000)); // $0.10
 
     USD_RAISED_FROM_COMMIT
         .save(&mut deps2.storage, &Uint128::new(24_000_000_000))
@@ -1444,7 +1435,6 @@ fn test_oracle_conversion_precision_various_prices() {
         }]);
         setup_pool_storage(&mut deps);
 
-        with_factory_oracle(&mut deps, test.oracle_price);
 
         let env = mock_env();
         let info = message_info(
@@ -1491,7 +1481,6 @@ fn test_extreme_oracle_prices() {
     }]);
     setup_pool_storage(&mut deps_low);
 
-    with_factory_oracle(&mut deps_low, Uint128::new(1_000)); // $0.001
 
     let env = mock_env();
     // 5B bluechip atoms @ $0.001/bluechip = $5 USD (atomics 5_000_000)
@@ -1530,7 +1519,6 @@ fn test_extreme_oracle_prices() {
     }]);
     setup_pool_storage(&mut deps_high);
 
-    with_factory_oracle(&mut deps_high, Uint128::new(1_000_000_000)); // $1000
 
     let info_high = message_info(
         &Addr::unchecked("user"),
@@ -1567,7 +1555,6 @@ fn test_usd_tracking_consistency_across_commits() {
     }]);
     setup_pool_storage(&mut deps);
 
-    with_factory_oracle(&mut deps, Uint128::new(2_500_000)); // $2.50 per token
 
     let env = mock_env();
 
@@ -1633,7 +1620,6 @@ fn test_commit_with_zero_oracle_price() {
     }]);
     setup_pool_storage(&mut deps);
 
-    with_factory_oracle(&mut deps, Uint128::zero()); // ZERO PRICE
 
     let env = mock_env();
     let info = message_info(
@@ -1673,7 +1659,6 @@ fn test_usd_calculation_overflow() {
     }]);
     setup_pool_storage(&mut deps);
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000_000_000)); // $1M per token
 
     let env = mock_env();
     let info = message_info(
@@ -1721,7 +1706,6 @@ fn test_rounding_error_accumulation() {
     }]);
     setup_pool_storage(&mut deps);
 
-    with_factory_oracle(&mut deps, Uint128::new(333_333)); // $0.333333...
 
     let env = mock_env();
 
@@ -2114,7 +2098,6 @@ fn test_race_condition_not_manually_set() {
     USD_RAISED_FROM_COMMIT
         .save(&mut deps.storage, &Uint128::new(24_900_000_000))
         .unwrap();
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
     let env = mock_env();
 
@@ -2238,7 +2221,6 @@ fn test_concurrent_commits_both_recorded() {
         )
         .unwrap();
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
     let env = mock_env();
 
     let alice_info = message_info(
@@ -2978,7 +2960,6 @@ fn test_commit_and_swap_with_price_change() {
     let env = mock_env();
 
     // Set initial price: $1.00 per bluechip (1_000_000 = $1 with 6 decimals)
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
     // User1 commits 1000 bluechip at $1.00 = $1000 USD
     let commit_msg = ExecuteMsg::Commit {
@@ -3101,7 +3082,6 @@ fn post_threshold_commit_rejects_when_pre_state_reserve_below_min() {
         amount: Uint128::new(1_000_000_000),
     }]);
     setup_pool_post_threshold(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
     // Manually drop reserve1 below MIN (simulating a drained pool that
     // somehow stayed un-paused; the test setup doesn't auto-pause).

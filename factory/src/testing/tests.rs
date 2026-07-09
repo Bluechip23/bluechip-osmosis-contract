@@ -535,7 +535,7 @@ fn test_complete_pool_creation_flow() {
     );
     // 2-3 messages: cw20 instantiate (always) + fee BankMsg to wallet
     // (when required > 0) + optional surplus refund BankMsg when the
-    // caller overpays the oracle-derived USD fee.
+    // caller overpays the flat native fee.
     assert!(
         !res.messages.is_empty() && res.messages.len() <= 3,
         "Should have 1-3 messages (token instantiate + fee + optional surplus refund), got {}",
@@ -755,20 +755,236 @@ fn test_reply_handling() {
     assert_eq!(updated_ctx.temp.temp_creator_wallet, the_admin);
 }
 
-// Helper function for creating a test pool message
-fn create_test_pool_msg() -> CreatePool {
-    CreatePool {
-        pool_token_info: [
-            TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            TokenType::CreatorToken {
-                contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
-            },
-        ],
-    }
+// ---------------------------------------------------------------------------
+// NotifyThresholdCrossed — pure registry recording
+// ---------------------------------------------------------------------------
+// The handler records the crossing exactly once per pool: auth check
+// (only the registered pool contract, Commit kind), idempotency gate,
+// then a flag save. No messages are emitted.
+
+#[test]
+fn test_notify_threshold_crossed_records_flag_and_rejects_duplicate() {
+    let mut deps = mock_dependencies(&[]);
+    let env = mock_env();
+    instantiate(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&admin_addr(), &[]),
+        create_default_instantiate_msg(),
+    )
+    .unwrap();
+
+    let pool_addr = make_addr("pool_contract_1");
+    register_test_pool_addr(deps.as_mut().storage, 1, &pool_addr);
+
+    let res = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&pool_addr, &[]),
+        ExecuteMsg::NotifyThresholdCrossed {
+            pool_id: 1,
+            crossed_at: None,
+        },
+    )
+    .unwrap();
+
+    // Pure registry recording: no mint, no bounty — no messages at all.
+    assert!(
+        res.messages.is_empty(),
+        "NotifyThresholdCrossed must not emit any messages, got {}",
+        res.messages.len()
+    );
+    assert!(res
+        .attributes
+        .iter()
+        .any(|a| a.key == "action" && a.value == "threshold_crossed"));
+    assert!(res
+        .attributes
+        .iter()
+        .any(|a| a.key == "pool_id" && a.value == "1"));
+    // crossed_at: None falls back to env.block.time.
+    assert!(res
+        .attributes
+        .iter()
+        .any(|a| a.key == "crossed_at" && a.value == env.block.time.to_string()));
+
+    assert!(
+        crate::state::POOL_THRESHOLD_CROSSED
+            .load(&deps.storage, 1)
+            .unwrap(),
+        "crossing flag must be recorded"
+    );
+
+    // Idempotency gate: a retried notify is rejected with the dedicated
+    // error string so the pool's retry machinery can tell "already
+    // recorded" apart from a transient failure.
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&pool_addr, &[]),
+        ExecuteMsg::NotifyThresholdCrossed {
+            pool_id: 1,
+            crossed_at: None,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{}", err).contains("Threshold crossing already recorded for this pool"),
+        "got: {}",
+        err
+    );
 }
 
+#[test]
+fn test_notify_threshold_crossed_records_supplied_crossed_at() {
+    let mut deps = mock_dependencies(&[]);
+    let env = mock_env();
+    instantiate(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&admin_addr(), &[]),
+        create_default_instantiate_msg(),
+    )
+    .unwrap();
+
+    let pool_addr = make_addr("pool_contract_1");
+    register_test_pool_addr(deps.as_mut().storage, 1, &pool_addr);
+
+    // The pool-supplied timestamp is recorded verbatim (it may differ
+    // from env.block.time, e.g. a retried notify after a transient
+    // failure still records the original crossing time).
+    let crossed_at = env.block.time.minus_seconds(42);
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&pool_addr, &[]),
+        ExecuteMsg::NotifyThresholdCrossed {
+            pool_id: 1,
+            crossed_at: Some(crossed_at),
+        },
+    )
+    .unwrap();
+    assert!(res
+        .attributes
+        .iter()
+        .any(|a| a.key == "crossed_at" && a.value == crossed_at.to_string()));
+}
+
+#[test]
+fn test_notify_threshold_crossed_rejects_wrong_caller() {
+    let mut deps = mock_dependencies(&[]);
+    let env = mock_env();
+    instantiate(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&admin_addr(), &[]),
+        create_default_instantiate_msg(),
+    )
+    .unwrap();
+
+    let pool_addr = make_addr("pool_contract_1");
+    register_test_pool_addr(deps.as_mut().storage, 1, &pool_addr);
+
+    // Unregistered pool_id -> registry miss.
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&pool_addr, &[]),
+        ExecuteMsg::NotifyThresholdCrossed {
+            pool_id: 99,
+            crossed_at: None,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{}", err).contains("not found in registry"),
+        "got: {}",
+        err
+    );
+
+    // Caller that isn't the registered pool contract -> auth failure,
+    // and the flag must NOT be recorded.
+    let interloper = make_addr("not_the_pool");
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&interloper, &[]),
+        ExecuteMsg::NotifyThresholdCrossed {
+            pool_id: 1,
+            crossed_at: None,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{}", err)
+            .contains("Only the registered pool contract can notify threshold crossed"),
+        "got: {}",
+        err
+    );
+    assert!(crate::state::POOL_THRESHOLD_CROSSED
+        .may_load(&deps.storage, 1)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn test_notify_threshold_crossed_rejects_standard_pool() {
+    let mut deps = mock_dependencies(&[]);
+    let env = mock_env();
+    instantiate(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&admin_addr(), &[]),
+        create_default_instantiate_msg(),
+    )
+    .unwrap();
+
+    // Register a STANDARD pool — it has no commit threshold, so even the
+    // registered pool contract itself must be rejected (defense in depth).
+    let pool_addr = make_addr("standard_pool_1");
+    POOLS_BY_ID
+        .save(
+            deps.as_mut().storage,
+            1,
+            &PoolDetails {
+                pool_id: 1,
+                pool_token_info: [
+                    TokenType::Native {
+                        denom: "ubluechip".to_string(),
+                    },
+                    TokenType::CreatorToken {
+                        contract_addr: Addr::unchecked("token"),
+                    },
+                ],
+                creator_pool_addr: pool_addr.clone(),
+                pool_kind: pool_factory_interfaces::PoolKind::Standard,
+            },
+        )
+        .unwrap();
+    crate::state::POOL_ID_BY_ADDRESS
+        .save(deps.as_mut().storage, pool_addr.clone(), &1u64)
+        .unwrap();
+
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&pool_addr, &[]),
+        ExecuteMsg::NotifyThresholdCrossed {
+            pool_id: 1,
+            crossed_at: None,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{}", err).contains("Standard pools do not have a commit threshold to cross"),
+        "got: {}",
+        err
+    );
+    assert!(crate::state::POOL_THRESHOLD_CROSSED
+        .may_load(&deps.storage, 1)
+        .unwrap()
+        .is_none());
+}
 
 // ---------------------------------------------------------------------------
 // Creator token name/symbol validation
