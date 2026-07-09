@@ -27,6 +27,7 @@ build:
 	cp target/$(WASM_TARGET)/release/creator_pool.wasm $(ARTIFACTS)/creator_pool.wasm
 	cp target/$(WASM_TARGET)/release/standard_pool.wasm $(ARTIFACTS)/standard_pool.wasm
 	cp target/$(WASM_TARGET)/release/factory.wasm $(ARTIFACTS)/factory.wasm
+	cp target/$(WASM_TARGET)/release/router.wasm $(ARTIFACTS)/router.wasm
 
 test:
 	cargo test
@@ -69,13 +70,20 @@ optimize-factory:
 	  exit 1; \
 	fi
 
-optimize-all: optimize-creator-pool optimize-standard-pool optimize-factory
+optimize-router:
+	docker run --rm -v ${CURDIR}:/code \
+	  --mount type=volume,source=router_cache,target=/target \
+	  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
+	  cosmwasm/optimizer:0.16.0 ./router
+
+optimize-all: optimize-creator-pool optimize-standard-pool optimize-factory optimize-router
 
 # ─── Cosmwasm Check ──────────────────────────────────────────────────────────
 check:
 	cosmwasm-check $(ARTIFACTS)/creator_pool.wasm
 	cosmwasm-check $(ARTIFACTS)/standard_pool.wasm
 	cosmwasm-check $(ARTIFACTS)/factory.wasm
+	cosmwasm-check $(ARTIFACTS)/router.wasm
 
 check-pool:
 	cosmwasm-check $(ARTIFACTS)/creator_pool.wasm
@@ -174,6 +182,6 @@ init-pool:
 		-b block \
 		-y | tee ./config/pool_init_result.txt
 
-.PHONY: build test optimize optimize-all optimize-creator-pool optimize-standard-pool optimize-factory \
+.PHONY: build test optimize optimize-all optimize-creator-pool optimize-standard-pool optimize-factory optimize-router \
 	check check-pool check-factory \
 	deploy-pool-local deploy-factory-local deploy-all-local \
