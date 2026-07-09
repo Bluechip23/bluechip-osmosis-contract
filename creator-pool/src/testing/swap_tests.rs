@@ -536,14 +536,15 @@ fn test_continue_distribution_batches() {
                 "Should record the actual batch size that was processed"
             );
 
-            // Messages: `processed` mint messages plus one WasmMsg::Execute
-            // forwarding the bounty payment to the factory. No self-call
-            // ContinueDistribution — external callers trigger subsequent
-            // batches in separate transactions.
+            // Messages: `processed` mint messages only. The factory
+            // distribution bounty was removed along with the oracle
+            // machinery, and there is no self-call ContinueDistribution —
+            // external callers trigger subsequent batches in separate
+            // transactions.
             assert_eq!(
                 res.messages.len(),
-                processed + 1,
-                "Expected `processed` mints + 1 factory bounty msg, got: {:?}",
+                processed,
+                "Expected exactly `processed` mint msgs, got: {:?}",
                 res.messages
             );
         }
@@ -609,16 +610,16 @@ fn test_adaptive_batch_sizing_with_history() {
         .count();
     let actually_processed = total_before - total_after;
 
-    // Mints + 1 factory bounty WasmMsg + 1 dust-settlement mint to the
-    // creator. The test inputs have `total_committed_usd = 1_000_000`
-    // but ledger sums to 2_000, so per-user floor(100 * 1_000_000 /
-    // 1_000_000) = 100; 20 * 100 = 2_000 vs total_to_distribute =
-    // 1_000_000, leaving a 998_000-base-unit residual that the final
-    // batch settles to the creator wallet.
+    // Mints + 1 dust-settlement mint to the creator (the factory bounty
+    // message is gone). The test inputs have `total_committed_usd =
+    // 1_000_000` but the ledger sums to 2_000, so per-user
+    // floor(100 * 1_000_000 / 1_000_000) = 100; 20 * 100 = 2_000 vs
+    // total_to_distribute = 1_000_000, leaving a 998_000-base-unit
+    // residual that the final batch settles to the creator wallet.
     assert_eq!(
         res.messages.len(),
-        actually_processed + 2,
-        "Expected `actually_processed` mints + 1 factory bounty msg + 1 dust-settlement mint"
+        actually_processed + 1,
+        "Expected `actually_processed` mints + 1 dust-settlement mint"
     );
 
     let expected = 20;
@@ -719,10 +720,10 @@ fn test_batch_size_with_consecutive_failures() {
     )
     .unwrap();
 
-    // Up to 5 mints (gas estimate cap) + 1 factory bounty msg.
+    // Up to 5 mints (gas estimate cap); no factory bounty msg anymore.
     assert!(
-        res.messages.len() <= 6,
-        "Should process at most 5 committers + 1 factory bounty msg, got {}",
+        res.messages.len() <= 5,
+        "Should process at most 5 committers, got {}",
         res.messages.len()
     );
 }
@@ -778,15 +779,15 @@ fn test_final_batch_completes_distribution() {
         "Distribution state should be removed after completion"
     );
 
-    // 3 committer mints + 1 dust-settlement mint to creator + 1
-    // factory bounty WasmMsg. With 3 committers each paying 100 USD
+    // 3 committer mints + 1 dust-settlement mint to creator (the factory
+    // bounty message is gone). With 3 committers each paying 100
     // and total_to_distribute = 1_000_000, per-user reward floors to
     // 333_333; 3 * 333_333 = 999_999, leaving 1 base unit of dust the
     // final batch settles to the creator wallet.
     assert_eq!(
         res.messages.len(),
-        5,
-        "Expected 3 mint messages for committers + 1 dust mint + 1 factory bounty msg"
+        4,
+        "Expected 3 mint messages for committers + 1 dust mint"
     );
 }
 
@@ -1237,317 +1238,6 @@ fn test_factory_impersonation_prevented() {
 }
 
 #[test]
-fn test_commit_with_changing_oracle_prices() {
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(10_000_000_000),
-    }]);
-    setup_pool_storage(&mut deps);
-
-
-    let env = mock_env();
-    let info1 = message_info(
-        &Addr::unchecked("user1"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(5_000_000),
-        }],
-    );
-
-    let msg1 = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(5_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    execute(deps.as_mut(), env.clone(), info1, msg1).unwrap();
-
-    let first_usd = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
-    assert_eq!(first_usd, Uint128::new(5_000_000)); // $5
-
-
-    let info2 = message_info(
-        &Addr::unchecked("user2"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(5_000_000),
-        }],
-    );
-
-    let msg2 = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(5_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    execute(deps.as_mut(), env, info2, msg2).unwrap();
-
-    let total_usd = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
-    assert_eq!(total_usd, Uint128::new(15_000_000)); // $5 + $10 = $15
-
-    let user2_commit = COMMIT_INFO
-        .load(&deps.storage, &Addr::unchecked("user2"))
-        .unwrap();
-    assert_eq!(user2_commit.total_paid_usd, Uint128::new(10_000_000));
-}
-
-#[test]
-fn test_threshold_crossing_depends_on_oracle_price() {
-    let mut deps1 = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(100_000_000_000),
-    }]);
-    setup_pool_storage(&mut deps1);
-    THRESHOLD_PROCESSING
-        .save(&mut deps1.storage, &false)
-        .unwrap();
-
-    USD_RAISED_FROM_COMMIT
-        .save(&mut deps1.storage, &Uint128::new(24_000_000_000))
-        .unwrap();
-
-    let env = mock_env();
-    let info1 = message_info(
-        &Addr::unchecked("whale"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(100_000_000), // 100 tokens
-        }],
-    );
-
-    let msg1 = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(100_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    execute(deps1.as_mut(), env.clone(), info1, msg1).unwrap();
-    assert!(IS_THRESHOLD_HIT.load(&deps1.storage).unwrap());
-    let mut deps2 = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(100_000_000_000),
-    }]);
-    setup_pool_storage(&mut deps2);
-    THRESHOLD_PROCESSING
-        .save(&mut deps2.storage, &false)
-        .unwrap();
-
-
-    USD_RAISED_FROM_COMMIT
-        .save(&mut deps2.storage, &Uint128::new(24_000_000_000))
-        .unwrap();
-
-    let info2 = message_info(
-        &Addr::unchecked("whale"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(100_000_000),
-        }],
-    );
-
-    let msg2 = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(100_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    execute(deps2.as_mut(), env, info2, msg2).unwrap();
-    assert!(!IS_THRESHOLD_HIT.load(&deps2.storage).unwrap());
-
-    let total = USD_RAISED_FROM_COMMIT.load(&deps2.storage).unwrap();
-    assert_eq!(total, Uint128::new(24_010_000_000)); // $24k + $10
-}
-
-#[test]
-fn test_oracle_conversion_precision_various_prices() {
-    struct TestCase {
-        oracle_price: Uint128,
-        token_amount: Uint128,
-        expected_usd: Uint128,
-        description: &'static str,
-    }
-
-    // Every case targets $5 USD — MIN_COMMIT_USD_PRE_THRESHOLD is $5,
-    // so $1 test cases wouldn't reach the validator any
-    // more. Scaling token_amounts by 5x preserves the cross-price
-    // equivalence the test is really checking.
-    let test_cases = vec![
-        TestCase {
-            oracle_price: Uint128::new(1_000_000), // $1
-            token_amount: Uint128::new(5_000_000), // 5 tokens
-            expected_usd: Uint128::new(5_000_000), // $5
-            description: "$1 per token, 5 tokens",
-        },
-        TestCase {
-            oracle_price: Uint128::new(500_000),    // $0.50
-            token_amount: Uint128::new(10_000_000), // 10 tokens
-            expected_usd: Uint128::new(5_000_000),  // $5
-            description: "$0.50 per token, 10 tokens",
-        },
-        TestCase {
-            oracle_price: Uint128::new(10_000_000), // $10
-            token_amount: Uint128::new(500_000),    // 0.5 tokens
-            expected_usd: Uint128::new(5_000_000),  // $5
-            description: "$10 per token, 0.5 tokens",
-        },
-        TestCase {
-            oracle_price: Uint128::new(100_000),    // $0.10
-            token_amount: Uint128::new(50_000_000), // 50 tokens
-            expected_usd: Uint128::new(5_000_000),  // $5
-            description: "$0.10 per token, 50 tokens",
-        },
-        TestCase {
-            oracle_price: Uint128::new(3_333_333), // $3.33...
-            token_amount: Uint128::new(3_000_000), // 3 tokens
-            expected_usd: Uint128::new(9_999_999), // ~$10 (already over $5)
-            description: "$3.33 per token, 3 tokens",
-        },
-    ];
-
-    for test in test_cases {
-        let mut deps = mock_dependencies_with_balance(&[Coin {
-            denom: "ubluechip".to_string(),
-            amount: test.token_amount,
-        }]);
-        setup_pool_storage(&mut deps);
-
-
-        let env = mock_env();
-        let info = message_info(
-            &Addr::unchecked("user"),
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: test.token_amount,
-            }],
-        );
-
-        let msg = ExecuteMsg::Commit {
-            asset: TokenInfo {
-                info: TokenType::Native {
-                    denom: "ubluechip".to_string(),
-                },
-                amount: test.token_amount,
-            },
-            transaction_deadline: None,
-            belief_price: None,
-            max_spread: None,
-        };
-
-        execute(deps.as_mut(), env, info, msg).unwrap();
-
-        let recorded_usd = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
-        let tolerance = Uint128::new(10); // Allow small rounding error
-
-        assert!(
-            recorded_usd >= test.expected_usd.saturating_sub(tolerance)
-                && recorded_usd <= test.expected_usd + tolerance,
-            "{}: expected ~{}, got {}",
-            test.description,
-            test.expected_usd,
-            recorded_usd
-        );
-    }
-}
-
-#[test]
-fn test_extreme_oracle_prices() {
-    let mut deps_low = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(1_000_000_000_000), // 1M tokens
-    }]);
-    setup_pool_storage(&mut deps_low);
-
-
-    let env = mock_env();
-    // 5B bluechip atoms @ $0.001/bluechip = $5 USD (atomics 5_000_000)
-    // — exactly MIN_COMMIT_USD_PRE_THRESHOLD. Below the threshold the
-    // $5 min commit guard would reject; this test is about the math at
-    // a very low rate, not the guard.
-    let info_low = message_info(
-        &Addr::unchecked("user"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(5_000_000_000),
-        }],
-    );
-
-    let msg_low = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(5_000_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    let res_low = execute(deps_low.as_mut(), env.clone(), info_low, msg_low);
-    assert!(res_low.is_ok(), "Should handle very low prices");
-
-    let usd_low = USD_RAISED_FROM_COMMIT.load(&deps_low.storage).unwrap();
-    assert_eq!(usd_low, Uint128::new(5_000_000));
-
-    let mut deps_high = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(1_000_000),
-    }]);
-    setup_pool_storage(&mut deps_high);
-
-
-    let info_high = message_info(
-        &Addr::unchecked("user"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(1_000_000), // 1 token
-        }],
-    );
-
-    let msg_high = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(1_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    let res_high = execute(deps_high.as_mut(), env, info_high, msg_high);
-    assert!(res_high.is_ok(), "Should handle very high prices");
-
-    let usd_high = USD_RAISED_FROM_COMMIT.load(&deps_high.storage).unwrap();
-    assert_eq!(usd_high, Uint128::new(1_000_000_000));
-}
-
-#[test]
 fn test_usd_tracking_consistency_across_commits() {
     let mut deps = mock_dependencies_with_balance(&[Coin {
         denom: "ubluechip".to_string(),
@@ -1558,11 +1248,13 @@ fn test_usd_tracking_consistency_across_commits() {
 
     let env = mock_env();
 
-    // Multiple commits
+    // Multiple commits. A commit's value toward the threshold IS its
+    // gross native amount (1:1) — no oracle conversion anywhere. All
+    // amounts sit above the 5_000_000 pre-threshold minimum-commit floor.
     let commits = vec![
-        ("user1", 4_000_000u128), // 4 tokens * $2.50 = $10
-        ("user2", 8_000_000u128), // 8 tokens * $2.50 = $20
-        ("user3", 2_000_000u128), // 2 tokens * $2.50 = $5
+        ("user1", 10_000_000u128),
+        ("user2", 20_000_000u128),
+        ("user3", 5_000_000u128),
     ];
 
     let mut expected_total = Uint128::zero();
@@ -1590,21 +1282,22 @@ fn test_usd_tracking_consistency_across_commits() {
 
         execute(deps.as_mut(), env.clone(), info, msg).unwrap();
 
-        let commit_usd = Uint128::new(amount) * Uint128::new(2_500_000) / Uint128::new(1_000_000);
-        expected_total += commit_usd;
+        // Gross native amount counts 1:1 toward the raised total.
+        let commit_value = Uint128::new(amount);
+        expected_total += commit_value;
 
         let current_total = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
         assert_eq!(
             current_total, expected_total,
-            "USD tracking inconsistent after {} commit",
+            "raised-total tracking inconsistent after {} commit",
             user
         );
         let user_commit = COMMIT_INFO
             .load(&deps.storage, &Addr::unchecked(user))
             .unwrap();
         assert_eq!(
-            user_commit.total_paid_usd, commit_usd,
-            "User {} USD tracking incorrect",
+            user_commit.total_paid_usd, commit_value,
+            "User {} commit-value tracking incorrect",
             user
         );
     }
@@ -1612,45 +1305,6 @@ fn test_usd_tracking_consistency_across_commits() {
     assert_eq!(expected_total, Uint128::new(35_000_000));
 }
 
-#[test]
-fn test_commit_with_zero_oracle_price() {
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(1_000_000),
-    }]);
-    setup_pool_storage(&mut deps);
-
-
-    let env = mock_env();
-    let info = message_info(
-        &Addr::unchecked("user"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(1_000_000),
-        }],
-    );
-
-    let msg = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(1_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    let result = execute(deps.as_mut(), env, info, msg);
-
-    assert!(result.is_err(), "Should reject zero oracle price");
-
-    match result.unwrap_err() {
-        ContractError::InvalidOraclePrice {} => {}
-        other => panic!("Wrong error type: {:?}", other),
-    }
-}
 #[test]
 fn test_usd_calculation_overflow() {
     let mut deps = mock_dependencies_with_balance(&[Coin {
@@ -1696,74 +1350,6 @@ fn test_usd_calculation_overflow() {
     );
 
     println!("Correctly rejected overflow with error: {}", err);
-}
-
-#[test]
-fn test_rounding_error_accumulation() {
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(100_000_000_000),
-    }]);
-    setup_pool_storage(&mut deps);
-
-
-    let env = mock_env();
-
-    let mut manual_sum = Uint128::zero();
-
-    for i in 0..1000 {
-        let user = format!("user{}", i);
-        // 16M bluechip atoms @ $0.333333/bluechip ≈ $5.33 — above
-        // MIN_COMMIT_USD_PRE_THRESHOLD ($5). 1000 commits at ~$5.33
-        // accumulate to ~$5,333, well under the $25k threshold so
-        // every commit stays pre-threshold (which is what this test
-        // exercises: rounding drift in the ledger USD accumulator).
-        let amount = Uint128::new(16_000_000);
-
-        // Manual calculation
-        let expected_usd = amount * Uint128::new(333_333) / Uint128::new(1_000_000);
-        manual_sum += expected_usd;
-
-        let info = message_info(
-            &Addr::unchecked(&user),
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount,
-            }],
-        );
-
-        let msg = ExecuteMsg::Commit {
-            asset: TokenInfo {
-                info: TokenType::Native {
-                    denom: "ubluechip".to_string(),
-                },
-                amount,
-            },
-            transaction_deadline: None,
-            belief_price: None,
-            max_spread: None,
-        };
-
-        execute(deps.as_mut(), env.clone(), info, msg).unwrap();
-    }
-
-    let total_usd = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
-
-    // Check if rounding errors accumulated significantly
-    let diff = if total_usd > manual_sum {
-        total_usd - manual_sum
-    } else {
-        manual_sum - total_usd
-    };
-
-    println!("Rounding difference over 1000 commits: {}", diff);
-
-    let max_acceptable = Uint128::new(1000); // 1000 units = 0.001 USD
-    assert!(
-        diff <= max_acceptable,
-        "Rounding errors accumulated too much: {}",
-        diff
-    );
 }
 
 #[test]
@@ -2940,133 +2526,6 @@ fn test_swap_slippage_lopsided() {
         ContractError::MaxSpreadAssertion { .. } => {}
         _ => panic!("Expected MaxSpreadAssertion error due to high slippage in lopsided pool"),
     }
-}
-
-fn update_oracle_price(
-    deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
-    new_price: Uint128,
-) {
-    with_factory_oracle(deps, new_price);
-}
-
-#[test]
-fn test_commit_and_swap_with_price_change() {
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(10_000_000_000),
-    }]);
-    setup_pool_storage(&mut deps);
-
-    let env = mock_env();
-
-    // Set initial price: $1.00 per bluechip (1_000_000 = $1 with 6 decimals)
-
-    // User1 commits 1000 bluechip at $1.00 = $1000 USD
-    let commit_msg = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(1_000_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    execute(
-        deps.as_mut(),
-        env.clone(),
-        message_info(
-            &Addr::unchecked("user1"),
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: Uint128::new(1_000_000_000),
-            }],
-        ),
-        commit_msg,
-    )
-    .unwrap();
-
-    // Verify commit at $1
-    let user_commit = COMMIT_LEDGER
-        .load(&deps.storage, &Addr::unchecked("user1"))
-        .unwrap();
-    assert_eq!(user_commit, Uint128::new(1_000_000_000)); // $1000 USD
-
-    update_oracle_price(&mut deps, Uint128::new(1_500_000)); // $1.50
-
-    // User2 commits 1000 bluechip at $1.50 = $1500 USD
-    let commit_msg_2 = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(1_000_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    execute(
-        deps.as_mut(),
-        env.clone(),
-        message_info(
-            &Addr::unchecked("user2"),
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: Uint128::new(1_000_000_000),
-            }],
-        ),
-        commit_msg_2,
-    )
-    .unwrap();
-
-    // Verify user2's commit at $1.50
-    let user2_commit = COMMIT_LEDGER
-        .load(&deps.storage, &Addr::unchecked("user2"))
-        .unwrap();
-    assert_eq!(user2_commit, Uint128::new(1_500_000_000)); // $1500 USD
-
-    // Total raised should be $2500
-    let total_usd = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
-    assert_eq!(total_usd, Uint128::new(2_500_000_000));
-
-    update_oracle_price(&mut deps, Uint128::new(800_000)); // $0.80
-
-    // User3 commits at crashed price - verify they need more bluechip for same USD value
-    let commit_msg_3 = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(1_250_000_000), // 1250 bluechip
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    execute(
-        deps.as_mut(),
-        env.clone(),
-        message_info(
-            &Addr::unchecked("user3"),
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: Uint128::new(1_250_000_000),
-            }],
-        ),
-        commit_msg_3,
-    )
-    .unwrap();
-
-    // 1250 bluechip * $0.80 = $1000 USD
-    let user3_commit = COMMIT_LEDGER
-        .load(&deps.storage, &Addr::unchecked("user3"))
-        .unwrap();
-    assert_eq!(user3_commit, Uint128::new(1_000_000_000)); // $1000 USD
 }
 
 /// Regression: `process_post_threshold_commit` must reject when reserves

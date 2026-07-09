@@ -11,19 +11,11 @@ const POOL_A = "bluechip1pool_a";
 const POOL_B = "bluechip1pool_b";
 const POOL_C = "bluechip1pool_c";
 
-function makeClock(initialMs: number = 1_700_000_000_000) {
-  let t = initialMs;
-  return { get: () => t };
-}
-
 describe("retry-notify keeper", () => {
   let mock: MockContracts;
 
   beforeEach(() => {
-    mock = new MockContracts(KEEPER, {
-      now: makeClock().get,
-      factoryAddress: FACTORY,
-    });
+    mock = new MockContracts(KEEPER, { factoryAddress: FACTORY });
   });
 
   it("skips a pool whose FactoryNotifyStatus reports pending=false", async () => {
@@ -54,28 +46,19 @@ describe("retry-notify keeper", () => {
     }
   });
 
-  it("treats a 'no pending notify' tx race as a clean skip", async () => {
-    // Race: query said pending=true, but state changed before the tx
-    // landed. The contract's "No pending factory notification to retry"
-    // error is in the SKIP_MARKERS list, so the keeper classifies as
-    // a skip rather than an error.
+  it("treats a stale pending flag (already recorded on factory) as a clean skip", async () => {
+    // Race: query said pending=true, but the factory's
+    // POOL_THRESHOLD_CROSSED idempotency gate rejects because the
+    // crossing was already recorded. The contract's "Threshold crossing
+    // already recorded for this pool" error is in the SKIP_MARKERS
+    // list, so the keeper classifies it as a skip rather than an error.
     mock.setPendingFactoryNotify(POOL_A, true);
-    // Flip the flag back BEFORE the keeper's tx fires by intercepting
-    // queryContractSmart isn't available here; instead simulate by
-    // setting pending=true for the query but pre-clearing it with a
-    // direct setPendingFactoryNotify(false) just before checkAndRetryPool
-    // ... but that defeats the test. Easier: model the race directly
-    // by marking the pool pending then clearing inside a wrapped
-    // queryContractSmart-aware spy. Since our mock keeps state
-    // consistent, simulate the race with `failNextRetryNotify` (which
-    // throws "Bluechip mint already triggered") instead — same skip
-    // class.
     mock.failNextRetryNotify(POOL_A, true);
 
     const outcome = await checkAndRetryPool(mock, POOL_A);
     expect(outcome.kind).toBe("skipped");
     if (outcome.kind === "skipped" && outcome.reason === "tx_skip") {
-      expect(outcome.detail).toContain("Bluechip mint already triggered");
+      expect(outcome.detail).toContain("Threshold crossing already recorded");
     } else {
       throw new Error(`expected tx_skip outcome, got ${JSON.stringify(outcome)}`);
     }

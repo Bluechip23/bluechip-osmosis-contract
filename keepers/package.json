@@ -1,14 +1,13 @@
 {
   "name": "bluechip-keepers",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Keeper bots for the Bluechip factory/pool system. Run UpdateOraclePrice and ContinueDistribution to earn bounties.",
+  "description": "Keeper bot for the Bluechip factory/pool system. Drives ContinueDistribution batches, retries stuck factory notifies, and prunes factory rate limits.",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "oracle-keeper": "tsx src/oracle-keeper.ts",
     "distribution-keeper": "tsx src/distribution-keeper.ts",
     "test": "vitest run",
     "test:watch": "vitest",

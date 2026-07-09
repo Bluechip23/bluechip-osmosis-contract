@@ -5,18 +5,11 @@ import { runPruneIteration } from "../lib/prune-loop.js";
 const FACTORY = "bluechip1factory";
 const KEEPER = "bluechip1keeper";
 
-function makeClock() {
-  return { get: () => 1_700_000_000_000 };
-}
-
 describe("prune-loop iteration", () => {
   let mock: MockContracts;
 
   beforeEach(() => {
-    mock = new MockContracts(KEEPER, {
-      now: makeClock().get,
-      factoryAddress: FACTORY,
-    });
+    mock = new MockContracts(KEEPER, { factoryAddress: FACTORY });
   });
 
   it("dispatches PruneRateLimits with the configured batch_size", async () => {
@@ -61,8 +54,9 @@ describe("prune-loop iteration", () => {
     const outcome = await runPruneIteration(mock, FACTORY, 100);
 
     // Critical: the prune sweep must NEVER bubble up — a failed prune
-    // must not break the oracle keeper's main loop. The implementation
-    // returns `errored` (logged at warn level) rather than throwing.
+    // must not break the distribution keeper's main loop. The
+    // implementation returns `errored` (logged at warn level) rather
+    // than throwing.
     expect(outcome.kind).toBe("errored");
     if (outcome.kind === "errored") {
       expect(outcome.detail).toContain("forced failure");

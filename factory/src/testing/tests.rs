@@ -258,9 +258,17 @@ fn create_pair_fee_disabled_rejects_attached_funds() {
     );
 
     // No funds -> create succeeds and reports the disabled fee source.
+    // (Advance past the per-address create cooldown: the failed attempt
+    // above already stamped the rate-limit timestamp, and mock storage
+    // does not roll back on handler error.)
+    let mut env2 = mock_env();
+    env2.block.time = env2
+        .block
+        .time
+        .plus_seconds(crate::state::COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS + 1);
     let res = execute(
         deps.as_mut(),
-        env,
+        env2,
         message_info(&admin_addr(), &[]),
         create_pool_msg("Token1"),
     )

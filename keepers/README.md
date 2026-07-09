@@ -1,26 +1,32 @@
 # Bluechip Keepers
 
-Off-chain bots that keep the Bluechip protocol running:
+> **Strip-down note (native denomination refactor).** The factory's internal
+> price oracle, Pyth integration, keeper bounties (oracle-update and
+> distribution), expand-economy, and bluechip mint rewards were all removed
+> from the contracts. The commit threshold is now denominated directly in the
+> chain's native asset. Consequently the **oracle keeper no longer exists**,
+> and the remaining keeper actions pay **no bounty** — the operator absorbs
+> gas costs as part of running the protocol.
 
-- **Oracle keeper** — periodically calls `factory.UpdateOraclePrice` to refresh
-  the internal TWAP. Commits reject stale prices, so without this the protocol
-  effectively stops.
-- **Distribution keeper** — calls each pool's `ContinueDistribution` when it
-  has an active post-threshold distribution, so committers receive their
-  creator tokens in a reasonable timeframe.
+One off-chain bot keeps the Bluechip protocol tidy — the **distribution
+keeper**, which per sweep:
 
-Both earn USD-denominated bounties out of the factory's native balance. The
-factory converts USD → bluechip at payout using the internal oracle, so your
-keeper compensation stays roughly constant in real terms as bluechip's price
-moves.
+- calls each pool's `ContinueDistribution` when it has an active
+  post-threshold distribution, so committers receive their creator tokens in
+  a reasonable timeframe;
+- retries stuck `NotifyThresholdCrossed` submessages via each pool's
+  permissionless `RetryFactoryNotify` (query-first, so it only spends gas on
+  pools that actually report `pending=true`);
+- periodically dispatches the factory's permissionless `PruneRateLimits`
+  storage-hygiene sweep.
+
+All three actions are permissionless and bounty-less.
 
 ## Prerequisites
 
 - Node 20+
-- A funded keeper wallet (two, actually — one per process)
+- A funded keeper wallet (gas only — it will not self-replenish)
 - The factory contract address
-- A comma-separated list of pool contract addresses (for the distribution
-  keeper; skippable for an oracle-only deploy)
 
 ## One-time setup
 
@@ -36,22 +42,20 @@ npm run typecheck # confirm nothing's broken at the type level
 ## Running
 
 ```sh
-npm run oracle-keeper          # never exits; runs until SIGTERM
-npm run distribution-keeper    # same
+npm run distribution-keeper    # never exits; runs until SIGTERM
 ```
 
-In production, run each under `systemd` (or Docker, or Cloud Run). Each
+In production, run it under `systemd` (or Docker, or Cloud Run). The
 process is stateless — crash recovery is just "restart it." Do not run
-two instances of the **same** keeper with the **same** mnemonic (they'll
-fight on sequence numbers); two different keepers on two different
-mnemonics is fine.
+two instances with the **same** mnemonic (they'll fight on sequence
+numbers).
 
 ### systemd example
 
 ```ini
-# /etc/systemd/system/bluechip-oracle-keeper.service
+# /etc/systemd/system/bluechip-distribution-keeper.service
 [Unit]
-Description=Bluechip oracle keeper
+Description=Bluechip distribution keeper
 After=network.target
 
 [Service]
@@ -59,7 +63,7 @@ Type=simple
 WorkingDirectory=/opt/bluechip-keepers
 Environment=NODE_ENV=production
 EnvironmentFile=/opt/bluechip-keepers/.env
-ExecStart=/usr/bin/npm run oracle-keeper
+ExecStart=/usr/bin/npm run distribution-keeper
 Restart=always
 RestartSec=10
 User=bluechip
@@ -68,129 +72,75 @@ User=bluechip
 WantedBy=multi-user.target
 ```
 
-## Funding the factory (one-time by admin, not the keeper)
+## Funding the keeper wallet
 
-The factory contract pays bounties out of its **own** native balance. Before
-keepers will earn anything, the admin has to:
+There are no bounties, so the wallet is pure gas spend. Size it for your
+expected sweep cadence and top up when the keeper logs
+`keeper balance below threshold`. Distribution batches are the only
+recurring cost; retry-notify and prune txs fire rarely.
 
-1. Send bluechip from the main wallet to the factory contract address. This
-   is a normal `BankMsg::Send`. Size the reserve for your expected keeper
-   throughput; $100 of bluechip covers roughly 20k oracle updates at a
-   $0.005 bounty. Note that with the tightened 60s `UPDATE_INTERVAL`, the
-   keeper fires ~1440 times/day per pool instead of ~288 times/day, so plan
-   reserves for 5× the call volume relative to the pre-audit cadence.
-
-2. Enable the bounties by calling the factory as the admin:
-
-   ```sh
-   # Oracle keeper: $0.005 per call (6-decimal USD → 5000)
-   wasmd tx wasm execute $FACTORY_ADDRESS \
-     '{"set_oracle_update_bounty":{"new_bounty":"5000"}}' \
-     --from admin ...
-
-   # Distribution keeper: $0.05 per batch
-   wasmd tx wasm execute $FACTORY_ADDRESS \
-     '{"set_distribution_bounty":{"new_bounty":"50000"}}' \
-     --from admin ...
-   ```
-
-Caps are **$0.02 per call for oracle updates** (6-decimal USD = 20_000) and
-**$0.10 per batch for distribution** (6-decimal USD = 100_000). The oracle-
-update cap was lowered from $0.10 alongside the `UPDATE_INTERVAL: 300 → 60`
-cadence change so the daily admin-compromise drain budget stays unchanged
-(5× more calls × 1/5 the per-call payout = same $28.80/day worst-case).
-Above-cap values are rejected by the contract.
-
-## Funding the keeper wallets (one-time, per deployment)
-
-Each keeper wallet needs enough bluechip for initial gas before bounties
-start flowing. ~100 bluechip covers plenty of runway. After that, each
-successful call pays the bounty into this same wallet, so it self-replenishes
-as long as bounty > gas cost.
-
-## How the keepers decide when to act
-
-### Oracle keeper
-
-```
-every ORACLE_POLL_INTERVAL_MS (default 70 s — tracks the on-chain
-                               UPDATE_INTERVAL=60s plus headroom):
-  submit factory.UpdateOraclePrice {}
-  classify response:
-    paid      → log success, bluechip received
-    skipped   → log reason (disabled | underfunded | price_unavailable)
-    ok        → log success, no bounty configured
-    failed    → log error, keep going
-  catch cooldown / beaten-to-the-punch errors as info-level
-  warn if wallet balance < MIN_KEEPER_BALANCE_UBLUECHIP
-
-  # Folded-in maintenance sweep — see "Rate-limit prune" below.
-  every ORACLE_PRUNE_EVERY_N iterations (default 750 ≈ once per 14.5h):
-    submit factory.PruneRateLimits { batch_size: PRUNE_BATCH_SIZE }
-```
-
-#### Rate-limit prune
-
-The factory tracks per-address create cooldowns in
-`LAST_COMMIT_POOL_CREATE_AT` and `LAST_STANDARD_POOL_CREATE_AT`. These
-maps grow monotonically — every new creator address adds an entry that
-is never removed by the cooldown logic itself. `PruneRateLimits` is a
-permissionless handler that removes entries older than 10× the cooldown
-(currently 10 hours). The oracle keeper dispatches it once every
-`ORACLE_PRUNE_EVERY_N` iterations rather than running a separate bot
-because:
-
-- there's no bounty (no economic reason to spin up a third process)
-- the cadence is wildly relaxed (daily is plenty)
-- the oracle keeper already runs on a fast loop and absorbs the gas
-  cost as part of "running keepers"
-
-Set `ORACLE_PRUNE_EVERY_N=0` to disable the sweep entirely (e.g., on a
-testnet where storage growth doesn't matter, or if you'd rather run
-prune from a separate cron).
-
-### Distribution keeper
+## How the keeper decides when to act
 
 ```
 every DISTRIBUTION_POLL_INTERVAL_MS (default 30 min):
-  # Pre-sweep: settle any stuck factory-notify state — see "Retry-notify" below.
-  for each pool in POOL_ADDRESSES:
+  # Resolve watch list: explicit POOL_ADDRESSES if set, otherwise
+  # auto-discover every commit pool from the factory registry.
+
+  # Pre-sweep: settle any stuck factory-notify state — see "Retry-notify".
+  for each pool in watch list:
     query pool.FactoryNotifyStatus {}
     if pending=true → submit pool.RetryFactoryNotify {}
 
   # Main sweep: process pending committer payouts.
-  for each pool in POOL_ADDRESSES:
+  for each pool in watch list:
     loop (bounded):
       submit pool.ContinueDistribution {}
       if NothingToRecover → move to next pool
-      if paid/ok + distribution_complete=false → continue same pool
+      if ok + distribution_complete=false → continue same pool
       otherwise → move to next pool
+
+  warn if wallet balance < MIN_KEEPER_BALANCE_UBLUECHIP
+
+  # Folded-in maintenance — see "Rate-limit prune".
+  every PRUNE_EVERY_N_SWEEPS sweeps (default 48 ≈ once a day):
+    submit factory.PruneRateLimits { batch_size: PRUNE_BATCH_SIZE }
+
   if any pool made progress this sweep, re-sweep in ~15s instead of 30 min
 ```
 
 The per-pool inner loop is capped at 200 batches per sweep as a safety valve.
 Exceeding that is logged loudly — it means something is stuck.
 
-#### Retry-notify
+### Retry-notify
 
 When a commit pool crosses its threshold, it dispatches
-`NotifyThresholdCrossed` to the factory as a `reply_on_error` SubMsg.
-If the factory rejects (e.g., transient expand-economy issue),
-`PENDING_FACTORY_NOTIFY` flips to `true` on the pool and the bluechip
-mint reward is held until somebody calls `RetryFactoryNotify`.
+`NotifyThresholdCrossed` to the factory as a `reply_on_error` SubMsg. The
+factory records the crossing in its `POOL_THRESHOLD_CROSSED` registry. If
+the factory rejects (a transient issue), `PENDING_FACTORY_NOTIFY` flips to
+`true` on the pool until somebody calls `RetryFactoryNotify`.
 
-The contract handler is permissionless on purpose — anyone can settle
-the stuck mint. The distribution keeper polls each pool's
-`FactoryNotifyStatus` query first and only spends gas on the (rare)
-pools that report `pending=true`. The factory's
-`POOL_THRESHOLD_MINTED` idempotency gate makes a redundant retry
-harmless: at worst the keeper wastes its own gas, never a double-mint.
+The contract handler is permissionless on purpose — anyone can settle the
+stuck notify. The keeper polls each pool's `FactoryNotifyStatus` query
+first and only spends gas on the (rare) pools that report `pending=true`.
+The factory's `POOL_THRESHOLD_CROSSED` idempotency gate ("Threshold
+crossing already recorded for this pool") makes a redundant retry
+harmless: at worst the keeper wastes its own gas.
 
-No bounty exists for this action; it's folded into the distribution
-keeper rather than running as a third bot because it iterates the same
-`POOL_ADDRESSES` list at a similar cadence and a 30-minute recovery
-latency on a stuck notify is fine — the failure mode is rare and not
-time-sensitive.
+### Rate-limit prune
+
+The factory tracks per-address create cooldowns in
+`LAST_COMMIT_POOL_CREATE_AT` and `LAST_STANDARD_POOL_CREATE_AT`. These
+maps grow monotonically — every new creator address adds an entry that
+is never removed by the cooldown logic itself. `PruneRateLimits` is a
+permissionless handler that removes entries older than 10× the cooldown
+(currently 10 hours). The keeper dispatches it once every
+`PRUNE_EVERY_N_SWEEPS` sweeps rather than running a separate bot because
+the cadence is wildly relaxed (daily is plenty) and the keeper already
+runs a periodic loop.
+
+Set `PRUNE_EVERY_N_SWEEPS=0` to disable the sweep entirely (e.g., on a
+testnet where storage growth doesn't matter, or if you'd rather run
+prune from a separate cron).
 
 ## Monitoring
 
@@ -199,56 +149,45 @@ Datadog, CloudWatch). The events you want to alert on:
 
 | Level | Message | Action |
 |-------|---------|--------|
-| `error` | `oracle keeper crashed` | Page. Restart the process. |
 | `error` | `distribution keeper crashed` | Page. Restart the process. |
 | `warn` | `keeper balance below threshold` | Top up the wallet. |
-| `warn` | `bounty skipped`, reason=`insufficient_factory_balance` | Top up the factory. |
-| `warn` | `bounty skipped`, reason=`price_unavailable` | Pyth outage. Check upstream. |
+| `error` | `distribution batch tx failed` / `distribution call errored` | Investigate — a pool's distribution is stuck for an unexpected reason. |
 | `error` | `retry_factory_notify errored` | Investigate — pool reported pending notify but retry failed for an unexpected reason. |
 | `warn` | `factory_notify_status query failed` | Single-pool RPC blip; ignore unless persistent. |
 | `warn` | `rate-limit prune errored (non-fatal)` | Investigate — prune is best-effort; persistent failures should be looked at. |
 
-And a liveness check: if you haven't seen an `oracle keeper starting` or
-`sleeping` log line from the oracle keeper in >15 minutes, assume it's
-hung and restart it.
+And a liveness check: if you haven't seen a `distribution keeper starting`
+or `sleeping` log line in >45 minutes, assume it's hung and restart it.
 
 ## Testing
 
 ```sh
-npm test          # unit tests — decision logic + config
+npm test          # unit tests — decision logic + config + loop behavior
 npm run typecheck # type safety
 ```
 
-The unit tests cover every pure function driving the loops. They do not
+The unit tests cover every pure function driving the loops plus
+integration-style runs against an in-memory contract mock. They do not
 require a running chain. Before deploying to mainnet, also smoke-test
 against a testnet:
 
 1. Deploy factory + pool to a Cosmos testnet.
 2. Point `.env` at the testnet endpoint.
-3. Run both keepers for at least a week.
-4. Verify the log stream shows the expected mix of paid/skipped/ok outcomes.
+3. Run the keeper for at least a week.
+4. Verify the log stream shows the expected mix of ok/no-op outcomes.
 
 ## Failure modes you should know about
 
-- **Factory runs out of bluechip.** Bounties start reporting `skipped:
-  insufficient_factory_balance`. Oracle keeps updating (not gated on
-  bounty). Distribution keeps processing. You just stop earning.
-
-- **Pyth is down for >5 minutes.** Oracle TWAP still updates (it doesn't
-  need Pyth). Bounty payout reports `skipped: price_unavailable` because
-  the USD → bluechip conversion needs Pyth for the ATOM price. You pay
-  gas but don't earn until Pyth recovers.
-
 - **Keeper wallet runs out of gas.** Txs stop going through. You'll see
   `keeper balance below threshold` warnings before this happens if you
-  kept `MIN_KEEPER_BALANCE_UBLUECHIP` set to something sane.
+  kept `MIN_KEEPER_BALANCE_UBLUECHIP` set to something sane. There is no
+  bounty income, so this WILL eventually happen without topping up.
 
-- **Both your keeper instances crash simultaneously.** Oracle goes stale
-  after **~2 minutes** (pool's `MAX_ORACLE_STALENESS_SECONDS = 120s`,
-  tightened from 360s in the pre-launch audit), commits start rejecting.
-  Running on two separate VPS's is the cheapest defense; with the
-  tightened window the recovery budget for a keeper outage is now ~2 min
-  instead of ~6 min.
+- **Keeper is down for a while.** Nothing breaks: distributions simply
+  pause mid-flight (committers wait longer for their creator tokens),
+  stuck notifies stay pending, and rate-limit maps grow slightly. All
+  three actions are permissionless, so anyone can advance them manually
+  in the meantime.
 
 ## Layout
 
@@ -258,20 +197,19 @@ src/
 │   ├── config.ts             # env parsing (zod-validated)
 │   ├── client.ts             # CosmJS wallet + signing client
 │   ├── decisions.ts          # pure tx-outcome classification
+│   ├── balance.ts            # keeper gas-runway warning
+│   ├── discovery.ts          # commit-pool auto-discovery via factory registry
 │   ├── logger.ts             # structured JSON output
 │   ├── types.ts              # contract message + query shapes
-│   ├── oracle-loop.ts        # one UpdateOraclePrice iteration
 │   ├── distribution-loop.ts  # per-pool ContinueDistribution drain
 │   ├── prune-loop.ts         # one PruneRateLimits iteration
 │   └── retry-notify-loop.ts  # query-then-retry per pool
 ├── __tests__/
 │   ├── config.test.ts
 │   ├── decisions.test.ts
-│   ├── oracle-keeper.mock-push.test.ts
+│   ├── discovery.test.ts
 │   ├── distribution-keeper.integration.test.ts
 │   ├── prune-loop.test.ts
-│   ├── retry-notify-loop.test.ts
-│   └── factory-balance-check.test.ts
-├── oracle-keeper.ts          # entrypoint: oracle update + prune sweep
-└── distribution-keeper.ts    # entrypoint: retry-notify + distribution drain
+│   └── retry-notify-loop.test.ts
+└── distribution-keeper.ts    # entrypoint: retry-notify + distribution + prune
 ```

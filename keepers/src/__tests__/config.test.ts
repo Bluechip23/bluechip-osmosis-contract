@@ -17,7 +17,9 @@ describe("parseConfig", () => {
     const cfg = parseConfig(BASE_ENV);
     expect(cfg.RPC_ENDPOINT).toBe("http://localhost:26657");
     expect(cfg.GAS_PRICE).toBe("0.025ubluechip"); // default
-    expect(cfg.ORACLE_POLL_INTERVAL_MS).toBe(70_000); // default
+    expect(cfg.DISTRIBUTION_POLL_INTERVAL_MS).toBe(1_800_000); // default
+    expect(cfg.PRUNE_EVERY_N_SWEEPS).toBe(48); // default
+    expect(cfg.PRUNE_BATCH_SIZE).toBe(100); // default
   });
 
   it("rejects missing required fields", () => {
@@ -44,7 +46,7 @@ describe("parseConfig", () => {
     ]);
   });
 
-  it("treats missing POOL_ADDRESSES as empty list (oracle-only deploy)", () => {
+  it("treats missing POOL_ADDRESSES as empty list (auto-discovery deploy)", () => {
     const cfg = parseConfig(BASE_ENV);
     expect(cfg.POOL_ADDRESSES).toEqual([]);
   });
@@ -60,11 +62,9 @@ describe("parseConfig", () => {
   it("coerces numeric intervals", () => {
     const cfg = parseConfig({
       ...BASE_ENV,
-      ORACLE_POLL_INTERVAL_MS: "60000",
       DISTRIBUTION_POLL_INTERVAL_MS: "120000",
       DISTRIBUTION_PER_POOL_DELAY_MS: "500",
     });
-    expect(cfg.ORACLE_POLL_INTERVAL_MS).toBe(60_000);
     expect(cfg.DISTRIBUTION_POLL_INTERVAL_MS).toBe(120_000);
     expect(cfg.DISTRIBUTION_PER_POOL_DELAY_MS).toBe(500);
   });
@@ -79,19 +79,19 @@ describe("parseConfig", () => {
 
   it("rejects negative interval values", () => {
     expect(() =>
-      parseConfig({ ...BASE_ENV, ORACLE_POLL_INTERVAL_MS: "-1" }),
+      parseConfig({ ...BASE_ENV, DISTRIBUTION_POLL_INTERVAL_MS: "-1" }),
     ).toThrow(/integer/);
   });
 
   it("rejects non-numeric interval values", () => {
     expect(() =>
-      parseConfig({ ...BASE_ENV, ORACLE_POLL_INTERVAL_MS: "soon" }),
+      parseConfig({ ...BASE_ENV, DISTRIBUTION_POLL_INTERVAL_MS: "soon" }),
     ).toThrow(/integer/);
   });
 
-  it("rejects zero ORACLE_POLL_INTERVAL_MS (would busy-loop)", () => {
+  it("rejects zero DISTRIBUTION_POLL_INTERVAL_MS (would busy-loop)", () => {
     expect(() =>
-      parseConfig({ ...BASE_ENV, ORACLE_POLL_INTERVAL_MS: "0" }),
+      parseConfig({ ...BASE_ENV, DISTRIBUTION_POLL_INTERVAL_MS: "0" }),
     ).toThrow(/integer/);
   });
 
@@ -101,6 +101,20 @@ describe("parseConfig", () => {
       DISTRIBUTION_PER_POOL_DELAY_MS: "0",
     });
     expect(cfg.DISTRIBUTION_PER_POOL_DELAY_MS).toBe(0);
+  });
+
+  it("allows zero PRUNE_EVERY_N_SWEEPS (disables the prune sweep)", () => {
+    const cfg = parseConfig({
+      ...BASE_ENV,
+      PRUNE_EVERY_N_SWEEPS: "0",
+    });
+    expect(cfg.PRUNE_EVERY_N_SWEEPS).toBe(0);
+  });
+
+  it("rejects zero PRUNE_BATCH_SIZE", () => {
+    expect(() =>
+      parseConfig({ ...BASE_ENV, PRUNE_BATCH_SIZE: "0" }),
+    ).toThrow(/integer/);
   });
 
   it("rejects negative MIN_KEEPER_BALANCE_UBLUECHIP", () => {

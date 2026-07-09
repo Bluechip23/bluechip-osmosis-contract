@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  classifyBountyTx,
+  classifyTx,
   isDistributionComplete,
   nextDistributionSleepMs,
-  nextOracleSleepMs,
   readWasmAttribute,
   shouldContinueSamePool,
   type TxResult,
@@ -40,13 +39,13 @@ function failedTx(rawLog: string): TxResult {
 
 describe("readWasmAttribute", () => {
   it("returns the value for a matching wasm event attribute", () => {
-    const tx = okTxWithWasmAttrs([["bounty_paid_usd", "5000"]]);
-    expect(readWasmAttribute(tx, "bounty_paid_usd")).toBe("5000");
+    const tx = okTxWithWasmAttrs([["distribution_complete", "true"]]);
+    expect(readWasmAttribute(tx, "distribution_complete")).toBe("true");
   });
 
   it("returns undefined when the key isn't present", () => {
-    const tx = okTxWithWasmAttrs([["action", "update_oracle"]]);
-    expect(readWasmAttribute(tx, "bounty_paid_usd")).toBeUndefined();
+    const tx = okTxWithWasmAttrs([["action", "continue_distribution"]]);
+    expect(readWasmAttribute(tx, "distribution_complete")).toBeUndefined();
   });
 
   it("returns undefined when events array is absent", () => {
@@ -61,108 +60,38 @@ describe("readWasmAttribute", () => {
       events: [
         {
           type: "transfer",
-          attributes: [{ key: "bounty_paid_usd", value: "nope" }],
+          attributes: [{ key: "distribution_complete", value: "nope" }],
         },
       ],
     };
-    expect(readWasmAttribute(tx, "bounty_paid_usd")).toBeUndefined();
+    expect(readWasmAttribute(tx, "distribution_complete")).toBeUndefined();
   });
 });
 
 // ---------------------------------------------------------------------------
-// classifyBountyTx
+// classifyTx
 // ---------------------------------------------------------------------------
 
-describe("classifyBountyTx", () => {
-  it("classifies a paid tx with both USD and bluechip amounts", () => {
-    const tx = okTxWithWasmAttrs([
-      ["action", "update_oracle"],
-      ["bounty_paid_usd", "5000"],
-      ["bounty_paid_bluechip", "50000"],
-    ]);
-    expect(classifyBountyTx(tx)).toEqual({
-      kind: "paid",
-      bountyUsd: "5000",
-      bountyBluechip: "50000",
-    });
-  });
-
-  it("classifies an insufficient-balance skip", () => {
-    const tx = okTxWithWasmAttrs([
-      ["action", "update_oracle"],
-      ["bounty_skipped", "insufficient_factory_balance"],
-    ]);
-    expect(classifyBountyTx(tx)).toEqual({
-      kind: "skipped",
-      reason: "insufficient_factory_balance",
-    });
-  });
-
-  it("classifies a price-unavailable skip", () => {
-    const tx = okTxWithWasmAttrs([
-      ["bounty_skipped", "price_unavailable"],
-    ]);
-    expect(classifyBountyTx(tx)).toEqual({
-      kind: "skipped",
-      reason: "price_unavailable",
-    });
-  });
-
-  it("classifies an ok tx with no bounty attributes (bounty disabled)", () => {
-    const tx = okTxWithWasmAttrs([["action", "update_oracle"]]);
-    expect(classifyBountyTx(tx)).toEqual({ kind: "ok" });
+describe("classifyTx", () => {
+  it("classifies a successful tx as ok", () => {
+    const tx = okTxWithWasmAttrs([["action", "continue_distribution"]]);
+    expect(classifyTx(tx)).toEqual({ kind: "ok" });
   });
 
   it("classifies a failed tx", () => {
     const tx = failedTx("out of gas");
-    expect(classifyBountyTx(tx)).toEqual({ kind: "failed", rawLog: "out of gas" });
+    expect(classifyTx(tx)).toEqual({ kind: "failed", rawLog: "out of gas" });
   });
 
-  it("prefers paid over skipped if both somehow appear", () => {
-    // Shouldn't happen in practice — asserts paid wins if it does.
-    const tx = okTxWithWasmAttrs([
-      ["bounty_paid_usd", "5000"],
-      ["bounty_paid_bluechip", "50000"],
-      ["bounty_skipped", "some_reason"],
-    ]);
-    expect(classifyBountyTx(tx).kind).toBe("paid");
+  it("defaults rawLog when the failed tx carries none", () => {
+    const tx: TxResult = { code: 11, transactionHash: "X" };
+    expect(classifyTx(tx)).toEqual({ kind: "failed", rawLog: "tx failed" });
   });
 });
 
 // ---------------------------------------------------------------------------
 // Sleep heuristics
 // ---------------------------------------------------------------------------
-
-describe("nextOracleSleepMs", () => {
-  it("centered jitter: random=0.5 yields exactly the base interval", () => {
-    // centered: (0.5 - 0.5) * jitter = 0
-    const sleep = nextOracleSleepMs(300_000, 5_000, () => 0.5);
-    expect(sleep).toBe(300_000);
-  });
-
-  it("centered jitter: random=0 subtracts up to half the jitter window", () => {
-    // (0 - 0.5) * 5000 = -2500
-    const sleep = nextOracleSleepMs(300_000, 5_000, () => 0);
-    expect(sleep).toBe(300_000 - 2_500);
-  });
-
-  it("centered jitter: random close to 1 adds up to half the jitter window", () => {
-    // (0.999... - 0.5) * 5000 ≈ +2499 (floored)
-    const sleep = nextOracleSleepMs(300_000, 5_000, () => 0.9999);
-    expect(sleep).toBeGreaterThanOrEqual(300_000 + 2_499);
-    expect(sleep).toBeLessThan(300_000 + 2_500);
-  });
-
-  it("returns 0 for non-positive base interval", () => {
-    expect(nextOracleSleepMs(0)).toBe(0);
-    expect(nextOracleSleepMs(-1)).toBe(0);
-  });
-
-  it("clamps to >= 1ms even if jitter overshoots base downward", () => {
-    // Tiny base, big jitter, low random → would otherwise go negative.
-    expect(nextOracleSleepMs(10, 1_000_000, () => 0)).toBe(1);
-  });
-});
 
 describe("nextDistributionSleepMs", () => {
   it("polls quickly after making progress", () => {
@@ -207,35 +136,12 @@ describe("isDistributionComplete", () => {
 // ---------------------------------------------------------------------------
 
 describe("shouldContinueSamePool", () => {
-  it("stops when distribution is complete even on a paid outcome", () => {
-    const paid: ReturnType<typeof classifyBountyTx> = {
-      kind: "paid",
-      bountyUsd: "5000",
-      bountyBluechip: "5000",
-    };
-    expect(shouldContinueSamePool(paid, true)).toBe(false);
-  });
-
-  it("continues on paid + incomplete", () => {
-    const paid: ReturnType<typeof classifyBountyTx> = {
-      kind: "paid",
-      bountyUsd: "5000",
-      bountyBluechip: "5000",
-    };
-    expect(shouldContinueSamePool(paid, false)).toBe(true);
+  it("stops when distribution is complete even on an ok outcome", () => {
+    expect(shouldContinueSamePool({ kind: "ok" }, true)).toBe(false);
   });
 
   it("continues on ok + incomplete", () => {
     expect(shouldContinueSamePool({ kind: "ok" }, false)).toBe(true);
-  });
-
-  it("stops on skipped outcomes (likely funding issue on factory)", () => {
-    expect(
-      shouldContinueSamePool(
-        { kind: "skipped", reason: "insufficient_factory_balance" },
-        false,
-      ),
-    ).toBe(false);
   });
 
   it("stops on failed outcomes", () => {
@@ -252,23 +158,28 @@ describe("shouldContinueSamePool", () => {
 import { isExpectedSkipError } from "../lib/types.js";
 
 describe("isExpectedSkipError", () => {
-  it("treats the factory's UpdateTooSoon user-facing message as a skip", () => {
-    // Exact error string propagated from factory/src/error.rs line 21.
-    // The #[error(...)] display form is what reaches the client over RPC —
-    // NOT the Rust variant name. Matching only "UpdateTooSoon" misses it.
-    const msg =
-      "Query failed with (6): rpc error: code = Unknown desc = failed to " +
-      "execute message; message index: 0: Trying to update the oracle price " +
-      "too quickly. Please wait before updating again.: execute wasm contract failed";
-    expect(isExpectedSkipError(msg)).toBe(true);
-  });
-
-  it("still matches the Rust variant name when it appears directly", () => {
-    expect(isExpectedSkipError("UpdateTooSoon { next_update: 123 }")).toBe(true);
-  });
-
   it("treats NothingToRecover as a skip", () => {
     expect(isExpectedSkipError("NothingToRecover: distribution not in progress")).toBe(true);
+  });
+
+  it("treats the pool's no-pending-notify message as a skip", () => {
+    expect(
+      isExpectedSkipError(
+        "execute wasm contract failed: No pending factory notification to retry",
+      ),
+    ).toBe(true);
+  });
+
+  it("treats the factory's threshold-already-recorded idempotency error as a skip", () => {
+    // Exact #[error(...)] display string from the factory's
+    // NotifyThresholdCrossed idempotency gate — the display form is what
+    // reaches the client over RPC, not the Rust variant name.
+    expect(
+      isExpectedSkipError(
+        "failed to execute message; message index: 0: Threshold crossing " +
+          "already recorded for this pool: execute wasm contract failed",
+      ),
+    ).toBe(true);
   });
 
   it("does not treat arbitrary runtime errors as skips", () => {
