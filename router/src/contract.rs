@@ -189,10 +189,7 @@ fn execute_apply_config_update(
 }
 
 /// Cancels a pending proposal before its `effective_after`. Admin-only.
-fn execute_cancel_config_update(
-    deps: DepsMut,
-    info: MessageInfo,
-) -> Result<Response, RouterError> {
+fn execute_cancel_config_update(deps: DepsMut, info: MessageInfo) -> Result<Response, RouterError> {
     let config = CONFIG.load(deps.storage)?;
     if info.sender != config.admin {
         return Err(RouterError::Unauthorized);

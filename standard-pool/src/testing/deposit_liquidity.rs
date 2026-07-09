@@ -57,13 +57,18 @@ fn first_deposit_mints_position_and_emits_nft_accept() {
     let pool_state = POOL_STATE.load(&deps.storage).unwrap();
     assert_eq!(pool_state.reserve0, Uint128::new(1_000_000));
     assert_eq!(pool_state.reserve1, Uint128::new(2_000_000));
-    assert!(pool_state.nft_ownership_accepted, "flag should flip on first deposit");
+    assert!(
+        pool_state.nft_ownership_accepted,
+        "flag should flip on first deposit"
+    );
 
     // Response carries the AcceptOwnership WasmMsg directed at the
     // position-NFT contract — first deposit accepts ownership.
     let nft_contract = addrs.position_nft.to_string();
     let nft_accept_msg = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == &nft_contract
                 && String::from_utf8_lossy(msg.as_slice()).contains("update_ownership")
         }
@@ -77,7 +82,9 @@ fn first_deposit_mints_position_and_emits_nft_accept() {
 
     // Response also carries the Cw20 TransferFrom for the CreatorToken side.
     let cw20_transfer = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == addrs.creator_token.as_str()
                 && String::from_utf8_lossy(msg.as_slice()).contains("transfer_from")
         }
@@ -128,7 +135,9 @@ fn second_deposit_does_not_reemit_accept_ownership() {
 
     let nft_contract = addrs.position_nft.to_string();
     let accept_seen = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == &nft_contract
                 && String::from_utf8_lossy(msg.as_slice()).contains("update_ownership")
         }
@@ -166,12 +175,16 @@ fn deposit_refunds_overpaid_native() {
     let refund_seen = res.messages.iter().any(|sub| match &sub.msg {
         CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
             to_address == user.as_str()
-                && amount.iter().any(|c| c.denom == BLUECHIP_DENOM
-                    && c.amount == Uint128::new(500_000))
+                && amount
+                    .iter()
+                    .any(|c| c.denom == BLUECHIP_DENOM && c.amount == Uint128::new(500_000))
         }
         _ => false,
     });
-    assert!(refund_seen, "500k overpayment should be refunded as BankMsg");
+    assert!(
+        refund_seen,
+        "500k overpayment should be refunded as BankMsg"
+    );
 }
 
 #[test]
@@ -197,10 +210,7 @@ fn deposit_rejects_underpaid_native() {
     )
     .unwrap_err();
 
-    assert!(matches!(
-        err,
-        ContractError::InvalidNativeAmount { .. }
-    ));
+    assert!(matches!(err, ContractError::InvalidNativeAmount { .. }));
 }
 
 #[test]
@@ -226,7 +236,9 @@ fn deposit_rejects_zero_side_for_initial() {
 
     match err {
         ContractError::Std(e) => {
-            assert!(e.to_string().contains("Initial deposit requires both assets"));
+            assert!(e
+                .to_string()
+                .contains("Initial deposit requires both assets"));
         }
         other => panic!("expected Std error, got {:?}", other),
     }
@@ -287,7 +299,10 @@ fn deposit_slippage_guard_triggers() {
     execute(
         deps.as_mut(),
         mock_env(),
-        message_info(&addrs.pool_owner, &[Coin::new(1_000_000u128, BLUECHIP_DENOM)]),
+        message_info(
+            &addrs.pool_owner,
+            &[Coin::new(1_000_000u128, BLUECHIP_DENOM)],
+        ),
         ExecuteMsg::DepositLiquidity {
             amount0: Uint128::new(1_000_000),
             amount1: Uint128::new(2_000_000),
@@ -303,7 +318,10 @@ fn deposit_slippage_guard_triggers() {
     let err = execute(
         deps.as_mut(),
         env_after_rate_limit(),
-        message_info(&addrs.pool_owner, &[Coin::new(1_000_000u128, BLUECHIP_DENOM)]),
+        message_info(
+            &addrs.pool_owner,
+            &[Coin::new(1_000_000u128, BLUECHIP_DENOM)],
+        ),
         ExecuteMsg::DepositLiquidity {
             amount0: Uint128::new(1_000_000),
             amount1: Uint128::new(2_000_000),
@@ -328,7 +346,10 @@ fn deposit_rejects_past_deadline() {
     let err = execute(
         deps.as_mut(),
         env,
-        message_info(&addrs.pool_owner, &[Coin::new(1_000_000u128, BLUECHIP_DENOM)]),
+        message_info(
+            &addrs.pool_owner,
+            &[Coin::new(1_000_000u128, BLUECHIP_DENOM)],
+        ),
         ExecuteMsg::DepositLiquidity {
             amount0: Uint128::new(1_000_000),
             amount1: Uint128::new(2_000_000),

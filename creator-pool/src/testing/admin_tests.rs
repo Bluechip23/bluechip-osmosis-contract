@@ -98,7 +98,9 @@ fn test_pause_unpause() {
     // force IS_THRESHOLD_HIT=true at instantiate. With that flag gone in 4d,
     // creator-pool starts pre-threshold; tests that want post-threshold
     // behavior seed it explicitly.
-    crate::state::IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
+    crate::state::IS_THRESHOLD_HIT
+        .save(&mut deps.storage, &true)
+        .unwrap();
 
     // Verify initial state (not paused)
     let is_paused = POOL_PAUSED.load(&deps.storage).unwrap_or(false);
@@ -270,7 +272,9 @@ fn test_cancel_emergency_withdraw() {
     // force IS_THRESHOLD_HIT=true at instantiate. With that flag gone in 4d,
     // creator-pool starts pre-threshold; tests that want post-threshold
     // behavior seed it explicitly.
-    crate::state::IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
+    crate::state::IS_THRESHOLD_HIT
+        .save(&mut deps.storage, &true)
+        .unwrap();
     // execute_emergency_withdraw_initiate queries the factory at runtime
     // for the (admin-tunable) delay; install the mock before triggering it.
     install_factory_emergency_delay_mock(&mut deps, "factory_addr");
@@ -325,11 +329,13 @@ fn test_update_config_all() {
     // force IS_THRESHOLD_HIT=true at instantiate. With that flag gone in 4d,
     // creator-pool starts pre-threshold; tests that want post-threshold
     // behavior seed it explicitly.
-    crate::state::IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
+    crate::state::IS_THRESHOLD_HIT
+        .save(&mut deps.storage, &true)
+        .unwrap();
 
     let update = PoolConfigUpdate {
-        lp_fee: Some(Decimal::percent(5)),    // was 0.3%
-        min_commit_interval: Some(60),        // was something else
+        lp_fee: Some(Decimal::percent(5)), // was 0.3%
+        min_commit_interval: Some(60),     // was something else
         ..Default::default()
     };
 
@@ -353,7 +359,9 @@ fn test_unauthorized_admin_actions() {
     // force IS_THRESHOLD_HIT=true at instantiate. With that flag gone in 4d,
     // creator-pool starts pre-threshold; tests that want post-threshold
     // behavior seed it explicitly.
-    crate::state::IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
+    crate::state::IS_THRESHOLD_HIT
+        .save(&mut deps.storage, &true)
+        .unwrap();
 
     let hacker = message_info(&Addr::unchecked("hacker"), &[]);
 

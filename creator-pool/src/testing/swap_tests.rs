@@ -1,5 +1,4 @@
 use crate::asset::{PoolPairType, TokenInfo, TokenType};
-use crate::swap_helper::execute_simple_swap;
 use crate::error::ContractError;
 use crate::generic_helpers::calculate_effective_batch_size;
 use crate::liquidity::execute_deposit_liquidity;
@@ -8,18 +7,18 @@ use crate::state::{
     CommitLimitInfo, PoolDetails, PoolFeeState, PoolInfo, PoolSpecs, PoolState,
     ThresholdPayoutAmounts, COMMIT_INFO, COMMIT_LEDGER, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
     DEFAULT_MAX_GAS_PER_TX, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, NEXT_POSITION_ID,
-    POOL_FEE_STATE, POOL_PAUSED, POOL_SPECS, POOL_STATE, REENTRANCY_LOCK,
-    USD_RAISED_FROM_COMMIT,
+    POOL_FEE_STATE, POOL_PAUSED, POOL_SPECS, POOL_STATE, REENTRANCY_LOCK, USD_RAISED_FROM_COMMIT,
 };
+use crate::swap_helper::execute_simple_swap;
 use crate::{
     contract::{execute, instantiate},
-    swap_helper::execute_swap_cw20,
     generic_helpers::trigger_threshold_payout,
     msg::{CommitFeeInfo, Cw20HookMsg, PoolInstantiateMsg},
     state::{
         DistributionState, COMMITFEEINFO, COMMIT_LIMIT_INFO, DISTRIBUTION_STATE, POOL_INFO,
         THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
     },
+    swap_helper::execute_swap_cw20,
     testing::liquidity_tests::{setup_pool_post_threshold, setup_pool_storage},
 };
 use cosmwasm_std::{
@@ -31,6 +30,28 @@ use cosmwasm_std::{
     OwnedDeps, SystemError, SystemResult, Timestamp, Uint128, WasmQuery,
 };
 use cw20::Cw20ReceiveMsg;
+
+/// Legacy fixture retained for call-site compatibility. The commit flow no
+/// longer queries any oracle — a commit's value toward the threshold IS its
+/// native amount — so this now just installs a deny-all cross-contract
+/// querier. That matches the old fixture's behavior for every non-oracle
+/// query (fail-soft callers like resolve_live_bluechip_wallet fall back to
+/// their snapshots). The rate parameter is ignored.
+pub fn with_factory_oracle(
+    deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
+    _legacy_rate: Uint128,
+) {
+    deps.querier.update_wasm(move |query| match query {
+        WasmQuery::Smart { msg, .. } => SystemResult::Err(SystemError::InvalidRequest {
+            error: "no cross-contract queries expected".to_string(),
+            request: msg.clone(),
+        }),
+        _ => SystemResult::Err(SystemError::InvalidRequest {
+            error: "unsupported wasm query".to_string(),
+            request: Binary::default(),
+        }),
+    });
+}
 
 fn mock_dependencies_with_balance(
     balances: &[Coin],
@@ -106,7 +127,6 @@ fn test_race_condition_commits_crossing_threshold() {
     USD_RAISED_FROM_COMMIT
         .save(&mut deps.storage, &Uint128::new(24_900_000_000))
         .unwrap();
-
 
     let commit_amount = Uint128::new(200_000_000); // $200 per commit
     let env = mock_env();
@@ -278,7 +298,6 @@ fn test_commit_post_threshold_swap() {
 
     let env = mock_env();
     let commit_amount = Uint128::new(100_000_000); // 100 bluechip
-
 
     let info = message_info(
         &Addr::unchecked("commiter"),
@@ -847,7 +866,6 @@ fn test_commit_rate_limiting() {
         }],
     );
 
-
     let msg = ExecuteMsg::Commit {
         asset: TokenInfo {
             info: TokenType::Native {
@@ -1224,7 +1242,7 @@ fn test_factory_impersonation_prevented() {
         },
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
-        commit_threshold_limit_usd: Uint128::new(350_000_000_000),
+        commit_threshold_limit: Uint128::new(350_000_000_000),
         position_nft_address: Addr::unchecked("NFT_contract"),
         token_address: Addr::unchecked("token_contract"),
     };
@@ -1244,7 +1262,6 @@ fn test_usd_tracking_consistency_across_commits() {
         amount: Uint128::new(100_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
-
 
     let env = mock_env();
 
@@ -1312,7 +1329,6 @@ fn test_usd_calculation_overflow() {
         amount: Uint128::new(u128::MAX / 1000),
     }]);
     setup_pool_storage(&mut deps);
-
 
     let env = mock_env();
     let info = message_info(
@@ -1759,10 +1775,7 @@ fn test_race_condition_not_manually_set() {
                 env.block.height
             );
         }
-        other => panic!(
-            "Expected PostThresholdCooldownActive, got {:?}",
-            other
-        ),
+        other => panic!("Expected PostThresholdCooldownActive, got {:?}", other),
     }
 
     let pool_state = POOL_STATE.load(&deps.storage).unwrap();
@@ -1880,8 +1893,13 @@ fn test_concurrent_commits_both_recorded() {
     };
 
     // Same-block follower: rejected by post-threshold cooldown.
-    let same_block_err =
-        execute(deps.as_mut(), env.clone(), bob_info.clone(), bob_msg.clone()).unwrap_err();
+    let same_block_err = execute(
+        deps.as_mut(),
+        env.clone(),
+        bob_info.clone(),
+        bob_msg.clone(),
+    )
+    .unwrap_err();
     match same_block_err {
         ContractError::PostThresholdCooldownActive { .. } => {}
         other => panic!(
@@ -1916,8 +1934,7 @@ fn test_concurrent_commits_both_recorded() {
     // Advance time too so the per-user `min_commit_interval` rate-limit
     // (13s) doesn't reject the retry under the same-block timestamp.
     env_after_cooldown.block.time = env_after_cooldown.block.time.plus_seconds(60);
-    let bob_res =
-        execute(deps.as_mut(), env_after_cooldown, bob_info.clone(), bob_msg).unwrap();
+    let bob_res = execute(deps.as_mut(), env_after_cooldown, bob_info.clone(), bob_msg).unwrap();
 
     assert!(
         bob_res
@@ -1994,11 +2011,11 @@ pub fn setup_pool_with_reserves(
     POOL_SPECS.save(&mut deps.storage, &pool_specs).unwrap();
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000), // $25k with 6 decimals
+        commit_amount_for_threshold: Uint128::new(25_000_000_000), // $25k with 6 decimals
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
+        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
     };
     COMMIT_LIMIT_INFO
         .save(&mut deps.storage, &commit_config)
@@ -2022,15 +2039,6 @@ pub fn setup_pool_with_reserves(
     COMMITFEEINFO
         .save(&mut deps.storage, &commit_fee_info)
         .unwrap();
-
-    // Mirrors production instantiate semantics: `oracle_addr` is set to
-    // the factory address by default (factory hosts the internal oracle).
-    // Tests that exercise the operator-rotatable oracle endpoint should
-    // overwrite ORACLE_INFO after this fixture runs.
-    let oracle_info = OracleInfo {
-        oracle_addr: Addr::unchecked("factory_contract"),
-    };
-    ORACLE_INFO.save(&mut deps.storage, &oracle_info).unwrap();
 
     THRESHOLD_PROCESSING
         .save(&mut deps.storage, &false)
@@ -2073,7 +2081,8 @@ fn test_swap_fails_when_reserves_below_pause_threshold() {
         None,
         None,
         None,
-        None);
+        None,
+    );
 
     // Swap must be rejected when a side is below MINIMUM_LIQUIDITY. The drain
     // guard no longer tries to persist POOL_PAUSED on this path — a Wasm Err
@@ -2084,7 +2093,11 @@ fn test_swap_fails_when_reserves_below_pause_threshold() {
         Err(ContractError::InsufficientReserves {})
     ));
     assert!(
-        POOL_PAUSED.may_load(&deps.storage).unwrap().unwrap_or(false) == false,
+        POOL_PAUSED
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or(false)
+            == false,
         "POOL_PAUSED should not be set by the drain guard (save would be rolled back on chain)"
     );
 }
@@ -2116,7 +2129,8 @@ fn test_swap_fails_when_pool_already_paused() {
         None,
         None,
         None,
-        None);
+        None,
+    );
 
     assert!(matches!(
         result,
@@ -2216,7 +2230,8 @@ fn test_swap_triggers_pause_at_threshold() {
         None,
         Some(Decimal::percent(50)),
         None,
-        None);
+        None,
+    );
 
     // The drain guard rejects the swap. On chain, any attempt to persist
     // POOL_PAUSED here would be rolled back with the Err, so the guard
@@ -2228,7 +2243,11 @@ fn test_swap_triggers_pause_at_threshold() {
         result
     );
     assert!(
-        POOL_PAUSED.may_load(&deps.storage).unwrap().unwrap_or(false) == false,
+        POOL_PAUSED
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or(false)
+            == false,
         "POOL_PAUSED flag must stay unset on the drain-guard path (rollback semantics)"
     );
 }
@@ -2340,7 +2359,8 @@ fn test_both_reserves_checked() {
         None,
         None,
         None,
-        None);
+        None,
+    );
 
     assert!(matches!(
         result1,
@@ -2373,7 +2393,8 @@ fn test_both_reserves_checked() {
         None,
         None,
         None,
-        None);
+        None,
+    );
 
     assert!(matches!(
         result2,
@@ -2406,7 +2427,8 @@ fn test_pause_state_persistence() {
         None,
         None,
         None,
-        None);
+        None,
+    );
     assert!(matches!(first, Err(ContractError::InsufficientReserves {})));
 
     let second = execute_simple_swap(
@@ -2423,14 +2445,19 @@ fn test_pause_state_persistence() {
         None,
         None,
         None,
-        None);
+        None,
+    );
     assert!(
         matches!(second, Err(ContractError::InsufficientReserves {})),
         "Second swap should still hit the reserve pre-check, not the pause branch. Got: {:?}",
         second
     );
     assert!(
-        POOL_PAUSED.may_load(&deps.storage).unwrap().unwrap_or(false) == false,
+        POOL_PAUSED
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or(false)
+            == false,
         "POOL_PAUSED must stay unset — the swap path never persists it"
     );
 }

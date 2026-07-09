@@ -291,9 +291,9 @@ fn test_update_specific_pool_from_registry() {
     // Advance time past 48-hour timelock
     let mut future_env = mock_env();
     future_env.block.time = future_env
-    .block
-    .time
-    .plus_seconds(crate::state::ADMIN_TIMELOCK_SECONDS + 1);
+        .block
+        .time
+        .plus_seconds(crate::state::ADMIN_TIMELOCK_SECONDS + 1);
 
     let apply_msg = ExecuteMsg::ExecutePoolConfigUpdate { pool_id };
     let res = execute(deps.as_mut(), future_env, admin_info, apply_msg).unwrap();
@@ -314,7 +314,11 @@ fn test_migration_with_large_pool_count() {
     setup_factory_custom(&mut deps);
 
     for i in 1..=25 {
-        register_test_pool_addr(&mut deps.storage, i, &Addr::unchecked(format!("pool_{}", i)));
+        register_test_pool_addr(
+            &mut deps.storage,
+            i,
+            &Addr::unchecked(format!("pool_{}", i)),
+        );
     }
 
     let env = mock_env();
@@ -383,7 +387,10 @@ fn test_migration_with_large_pool_count() {
     .unwrap();
     assert_eq!(res.messages.len(), 5);
     assert!(
-        PENDING_POOL_UPGRADE.may_load(&deps.storage).unwrap().is_none(),
+        PENDING_POOL_UPGRADE
+            .may_load(&deps.storage)
+            .unwrap()
+            .is_none(),
         "PENDING_POOL_UPGRADE should be cleared after final batch"
     );
 }
@@ -401,7 +408,11 @@ fn test_upgrade_skips_paused_pools() {
     setup_factory_custom(&mut deps);
 
     for i in 1..=3 {
-        register_test_pool_addr(&mut deps.storage, i, &Addr::unchecked(format!("pool_{}", i)));
+        register_test_pool_addr(
+            &mut deps.storage,
+            i,
+            &Addr::unchecked(format!("pool_{}", i)),
+        );
     }
 
     // Mark pool_2 as paused via the mock querier.
@@ -486,12 +497,14 @@ fn test_upgrade_first_pass_fails_closed_on_query_error() {
     setup_factory_custom(&mut deps);
 
     for i in 1..=2 {
-        register_test_pool_addr(&mut deps.storage, i, &Addr::unchecked(format!("pool_{}", i)));
+        register_test_pool_addr(
+            &mut deps.storage,
+            i,
+            &Addr::unchecked(format!("pool_{}", i)),
+        );
     }
 
-    deps.querier
-        .query_error_pools
-        .insert("pool_1".to_string());
+    deps.querier.query_error_pools.insert("pool_1".to_string());
 
     let env = mock_env();
     let admin_info = message_info(&admin_addr(), &[]);
@@ -544,7 +557,11 @@ fn test_upgrade_retry_path_migrates_unpaused_pool() {
     setup_factory_custom(&mut deps);
 
     for i in 1..=3 {
-        register_test_pool_addr(&mut deps.storage, i, &Addr::unchecked(format!("pool_{}", i)));
+        register_test_pool_addr(
+            &mut deps.storage,
+            i,
+            &Addr::unchecked(format!("pool_{}", i)),
+        );
     }
     deps.querier.paused_pools.insert("pool_2".to_string());
 
@@ -614,7 +631,10 @@ fn test_upgrade_retry_path_migrates_unpaused_pool() {
     assert_eq!(mode, "retry");
 
     assert!(
-        PENDING_POOL_UPGRADE.may_load(&deps.storage).unwrap().is_none(),
+        PENDING_POOL_UPGRADE
+            .may_load(&deps.storage)
+            .unwrap()
+            .is_none(),
         "PENDING_POOL_UPGRADE should be cleared once first pass is done AND pending_retry is empty"
     );
 }
@@ -627,7 +647,11 @@ fn test_upgrade_retry_path_keeps_still_paused_pool() {
     setup_factory_custom(&mut deps);
 
     for i in 1..=2 {
-        register_test_pool_addr(&mut deps.storage, i, &Addr::unchecked(format!("pool_{}", i)));
+        register_test_pool_addr(
+            &mut deps.storage,
+            i,
+            &Addr::unchecked(format!("pool_{}", i)),
+        );
     }
     deps.querier.paused_pools.insert("pool_2".to_string());
 
@@ -659,7 +683,10 @@ fn test_upgrade_retry_path_keeps_still_paused_pool() {
     )
     .unwrap();
     assert_eq!(
-        PENDING_POOL_UPGRADE.load(&deps.storage).unwrap().pending_retry,
+        PENDING_POOL_UPGRADE
+            .load(&deps.storage)
+            .unwrap()
+            .pending_retry,
         vec![2u64]
     );
 
@@ -705,7 +732,11 @@ fn test_cancel_pool_upgrade() {
     setup_factory(&mut deps);
 
     for i in 1..=3 {
-        register_test_pool_addr(&mut deps.storage, i, &Addr::unchecked(format!("pool_{}", i)));
+        register_test_pool_addr(
+            &mut deps.storage,
+            i,
+            &Addr::unchecked(format!("pool_{}", i)),
+        );
     }
 
     let env = mock_env();
@@ -809,7 +840,11 @@ fn test_upgrade_retry_queue_rotates_when_head_stays_paused() {
     // 11 pools — one more than `batch_size = 10` so the head/tail
     // distinction is meaningful. All start paused.
     for i in 1..=11u64 {
-        register_test_pool_addr(&mut deps.storage, i, &Addr::unchecked(format!("pool_{}", i)));
+        register_test_pool_addr(
+            &mut deps.storage,
+            i,
+            &Addr::unchecked(format!("pool_{}", i)),
+        );
         deps.querier.paused_pools.insert(format!("pool_{}", i));
     }
 
@@ -869,9 +904,7 @@ fn test_upgrade_retry_queue_rotates_when_head_stays_paused() {
     .unwrap();
 
     let post_retry = PENDING_POOL_UPGRADE.load(&deps.storage).unwrap();
-    let expected_rotated: Vec<u64> = std::iter::once(11u64)
-        .chain(1u64..=10u64)
-        .collect();
+    let expected_rotated: Vec<u64> = std::iter::once(11u64).chain(1u64..=10u64).collect();
     assert_eq!(
         post_retry.pending_retry, expected_rotated,
         "after retry with all head pools still paused, queue must rotate so pool 11 (previously at the back) moves to the front"

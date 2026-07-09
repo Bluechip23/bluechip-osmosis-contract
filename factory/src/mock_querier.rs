@@ -34,8 +34,7 @@ pub struct WasmMockQuerier {
     // contract address; when present, the override is returned verbatim.
     // Falls back to the default 50B/10B reserves below if no override is
     // registered for the queried address.
-    pub pool_state_overrides:
-        std::collections::HashMap<String, PoolStateResponseForFactory>,
+    pub pool_state_overrides: std::collections::HashMap<String, PoolStateResponseForFactory>,
 }
 
 impl Querier for WasmMockQuerier {
@@ -140,7 +139,6 @@ impl WasmMockQuerier {
     /// 50B/10B response. Used by integration tests that need to model
     /// drained / lopsided / healthy pools side-by-side.
     pub fn set_pool_state(&mut self, addr: &str, state: PoolStateResponseForFactory) {
-        self.pool_state_overrides
-            .insert(addr.to_string(), state);
+        self.pool_state_overrides.insert(addr.to_string(), state);
     }
 }

@@ -28,9 +28,9 @@ use cw_storage_plus::Bound;
 use crate::error::ContractError;
 use crate::state::{
     DistributionState, PendingMint, PoolInfo, COMMITFEEINFO, COMMIT_LEDGER,
-    DISTRIBUTION_STALL_TIMEOUT_SECONDS, DISTRIBUTION_STATE,
-    MAX_CONSECUTIVE_DISTRIBUTION_FAILURES, MAX_DISTRIBUTIONS_PER_TX, NEXT_DIST_MINT_REPLY_ID,
-    PENDING_MINT_REPLIES, REPLY_ID_DISTRIBUTION_MINT_BASE,
+    DISTRIBUTION_STALL_TIMEOUT_SECONDS, DISTRIBUTION_STATE, MAX_CONSECUTIVE_DISTRIBUTION_FAILURES,
+    MAX_DISTRIBUTIONS_PER_TX, NEXT_DIST_MINT_REPLY_ID, PENDING_MINT_REPLIES,
+    REPLY_ID_DISTRIBUTION_MINT_BASE,
 };
 
 /// Build a `SubMsg::reply_always` that mints `amount` of the pool's
@@ -63,18 +63,16 @@ pub(crate) fn build_distribution_mint_submsg(
     let counter = NEXT_DIST_MINT_REPLY_ID
         .may_load(storage)?
         .unwrap_or_default();
-    let next = counter
-        .checked_add(1)
-        .ok_or_else(|| cosmwasm_std::StdError::generic_err(
-            "NEXT_DIST_MINT_REPLY_ID counter overflow",
-        ))?;
+    let next = counter.checked_add(1).ok_or_else(|| {
+        cosmwasm_std::StdError::generic_err("NEXT_DIST_MINT_REPLY_ID counter overflow")
+    })?;
     NEXT_DIST_MINT_REPLY_ID.save(storage, &next)?;
 
     let reply_id = REPLY_ID_DISTRIBUTION_MINT_BASE
         .checked_add(counter)
-        .ok_or_else(|| cosmwasm_std::StdError::generic_err(
-            "distribution mint reply id space exhausted",
-        ))?;
+        .ok_or_else(|| {
+            cosmwasm_std::StdError::generic_err("distribution mint reply id space exhausted")
+        })?;
 
     PENDING_MINT_REPLIES.save(
         storage,

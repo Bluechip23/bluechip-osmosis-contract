@@ -77,7 +77,9 @@ pub enum HookMsg {
 #[cw_serde]
 pub enum QueryMsg {
     Pair {},
-    Simulation { offer_asset: TokenInfo },
+    Simulation {
+        offer_asset: TokenInfo,
+    },
     IsFullyCommited {},
     /// Test-only introspection: the `max_spread` the router forwarded
     /// on the most recent swap against this mock.

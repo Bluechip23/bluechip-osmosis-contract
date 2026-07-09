@@ -153,7 +153,10 @@ fn execute_claim_creator_excess_inner(
     Ok(Response::new().add_messages(messages).add_attributes(vec![
         ("action", "claim_creator_excess".to_string()),
         ("creator", excess_position.creator.to_string()),
-        ("bluechip_amount", excess_position.bluechip_amount.to_string()),
+        (
+            "bluechip_amount",
+            excess_position.bluechip_amount.to_string(),
+        ),
         ("token_amount", excess_position.token_amount.to_string()),
         ("pool_contract", env.contract.address.to_string()),
         ("block_height", env.block.height.to_string()),

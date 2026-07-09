@@ -118,7 +118,9 @@ pub fn execute(
         ExecuteMsg::Create {
             pool_msg,
             token_info,
-        } => pool_lifecycle::create::execute_create_creator_pool(deps, env, info, pool_msg, token_info),
+        } => pool_lifecycle::create::execute_create_creator_pool(
+            deps, env, info, pool_msg, token_info,
+        ),
         ExecuteMsg::UpgradePools {
             new_code_id,
             pool_ids,
@@ -137,9 +139,10 @@ pub fn execute(
         ExecuteMsg::CancelPoolConfigUpdate { pool_id } => {
             execute_cancel_pool_config_update(deps, info, pool_id)
         }
-        ExecuteMsg::NotifyThresholdCrossed { pool_id, crossed_at } => {
-            execute_notify_threshold_crossed(deps, env, info, pool_id, crossed_at)
-        }
+        ExecuteMsg::NotifyThresholdCrossed {
+            pool_id,
+            crossed_at,
+        } => execute_notify_threshold_crossed(deps, env, info, pool_id, crossed_at),
         ExecuteMsg::PausePool { pool_id } => execute_pause_pool(deps, info, pool_id),
         ExecuteMsg::UnpausePool { pool_id } => execute_unpause_pool(deps, info, pool_id),
         ExecuteMsg::EmergencyWithdrawPool { pool_id } => {
@@ -158,7 +161,13 @@ pub fn execute(
         ExecuteMsg::CreateStandardPool {
             pool_token_info,
             label,
-        } => pool_lifecycle::create::execute_create_standard_pool(deps, env, info, pool_token_info, label),
+        } => pool_lifecycle::create::execute_create_standard_pool(
+            deps,
+            env,
+            info,
+            pool_token_info,
+            label,
+        ),
         ExecuteMsg::PruneRateLimits { batch_size } => {
             execute_prune_rate_limits(deps, env, batch_size)
         }
@@ -287,9 +296,7 @@ pub fn pool_creation_reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Respon
         SET_TOKENS => set_tokens(deps, env, msg, pool_id),
         MINT_CREATE_POOL => mint_create_pool(deps, env, msg, pool_id),
         FINALIZE_POOL => finalize_pool(deps, env, msg, pool_id),
-        MINT_STANDARD_NFT => {
-            crate::pool_creation_reply::mint_standard_nft(deps, env, msg, pool_id)
-        }
+        MINT_STANDARD_NFT => crate::pool_creation_reply::mint_standard_nft(deps, env, msg, pool_id),
         FINALIZE_STANDARD_POOL => {
             crate::pool_creation_reply::finalize_standard_pool(deps, env, msg, pool_id)
         }

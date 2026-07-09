@@ -6,10 +6,10 @@
 //! to the factory when the initial submsg's reply_on_error handler
 //! set PENDING_FACTORY_NOTIFY=true.
 
+use crate::state::PENDING_FACTORY_NOTIFY;
 use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
 use cosmwasm_std::{Addr, CosmosMsg, SubMsg, Uint128, WasmMsg};
 use pool_core::state::{CreatorFeePot, CREATOR_FEE_POT};
-use crate::state::PENDING_FACTORY_NOTIFY;
 
 use crate::contract::{execute, execute_retry_factory_notify};
 use crate::error::ContractError;
@@ -52,12 +52,16 @@ fn claim_creator_fees_empties_pot_and_emits_transfers() {
     let bank_sent = res.messages.iter().any(|sub| match &sub.msg {
         CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
             to_address == "creator_wallet"
-                && amount.iter().any(|c| c.denom == "ubluechip" && c.amount == Uint128::new(10_000))
+                && amount
+                    .iter()
+                    .any(|c| c.denom == "ubluechip" && c.amount == Uint128::new(10_000))
         }
         _ => false,
     });
     let cw20_sent = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == "token_contract"
                 && String::from_utf8_lossy(msg.as_slice()).contains("transfer")
                 && String::from_utf8_lossy(msg.as_slice()).contains("20000")
@@ -65,7 +69,10 @@ fn claim_creator_fees_empties_pot_and_emits_transfers() {
         _ => false,
     });
     assert!(bank_sent, "should emit BankMsg for native pot slice");
-    assert!(cw20_sent, "should emit CW20 Transfer for creator-token pot slice");
+    assert!(
+        cw20_sent,
+        "should emit CW20 Transfer for creator-token pot slice"
+    );
 
     // Pot reset to zero (after messages are built).
     let pot = CREATOR_FEE_POT.load(&deps.storage).unwrap();
@@ -170,8 +177,16 @@ fn claim_creator_fees_with_only_native_side() {
     )
     .unwrap();
 
-    let bank_count = res.messages.iter().filter(|sub| matches!(sub.msg, CosmosMsg::Bank(_))).count();
-    let cw20_count = res.messages.iter().filter(|sub| matches!(sub.msg, CosmosMsg::Wasm(_))).count();
+    let bank_count = res
+        .messages
+        .iter()
+        .filter(|sub| matches!(sub.msg, CosmosMsg::Bank(_)))
+        .count();
+    let cw20_count = res
+        .messages
+        .iter()
+        .filter(|sub| matches!(sub.msg, CosmosMsg::Wasm(_)))
+        .count();
     assert_eq!(bank_count, 1);
     assert_eq!(cw20_count, 0);
 }
@@ -184,7 +199,9 @@ fn retry_factory_notify_dispatches_submsg_when_pending() {
     setup_pool_storage(&mut deps);
     // Arm the pending flag (production flow sets this from the
     // reply_on_error handler when the initial factory notify fails).
-    PENDING_FACTORY_NOTIFY.save(&mut deps.storage, &true).unwrap();
+    PENDING_FACTORY_NOTIFY
+        .save(&mut deps.storage, &true)
+        .unwrap();
     // Production flow sets THRESHOLD_CROSSED_AT inside
     // `trigger_threshold_payout` alongside IS_THRESHOLD_HIT. The retry
     // handler `load`s it (not `may_load`) so the snapshot must be
@@ -203,7 +220,9 @@ fn retry_factory_notify_dispatches_submsg_when_pending() {
     assert_eq!(res.messages.len(), 1);
     let sub: &SubMsg = &res.messages[0];
     match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             assert_eq!(contract_addr, "factory_contract");
             let body = String::from_utf8_lossy(msg.as_slice());
             assert!(body.contains("notify_threshold_crossed"));
@@ -234,7 +253,9 @@ fn retry_factory_notify_rejects_when_no_pending() {
 fn retry_factory_notify_rejects_when_flag_false() {
     let mut deps = mock_dependencies();
     setup_pool_storage(&mut deps);
-    PENDING_FACTORY_NOTIFY.save(&mut deps.storage, &false).unwrap();
+    PENDING_FACTORY_NOTIFY
+        .save(&mut deps.storage, &false)
+        .unwrap();
 
     let info = message_info(&Addr::unchecked("anyone"), &[]);
     let err = execute_retry_factory_notify(deps.as_mut(), mock_env(), info).unwrap_err();
@@ -309,11 +330,9 @@ mod reply_handler_tests {
             .attributes
             .iter()
             .any(|a| a.key == "action" && a.value == "factory_notify_deferred"));
-        assert!(res
-            .attributes
-            .iter()
-            .any(|a| a.key == "reason"
-                && a.value.contains("factory rejected: pool not registered")));
+        assert!(res.attributes.iter().any(
+            |a| a.key == "reason" && a.value.contains("factory rejected: pool not registered")
+        ));
 
         // Pending flag is now armed — RetryFactoryNotify can be invoked.
         assert!(PENDING_FACTORY_NOTIFY.load(&deps.storage).unwrap());
@@ -328,7 +347,9 @@ mod reply_handler_tests {
         let mut deps = mock_dependencies();
         setup_pool_storage(&mut deps);
         // Pre-set to true to verify it's NOT touched on Ok.
-        PENDING_FACTORY_NOTIFY.save(&mut deps.storage, &true).unwrap();
+        PENDING_FACTORY_NOTIFY
+            .save(&mut deps.storage, &true)
+            .unwrap();
 
         let r = synthetic_reply(REPLY_ID_FACTORY_NOTIFY_INITIAL, true, None);
         let res = reply(deps.as_mut(), mock_env(), r).expect("Ok branch must return Ok response");
@@ -345,7 +366,9 @@ mod reply_handler_tests {
     fn reply_retry_on_ok_clears_pending_flag() {
         let mut deps = mock_dependencies();
         setup_pool_storage(&mut deps);
-        PENDING_FACTORY_NOTIFY.save(&mut deps.storage, &true).unwrap();
+        PENDING_FACTORY_NOTIFY
+            .save(&mut deps.storage, &true)
+            .unwrap();
 
         let r = synthetic_reply(REPLY_ID_FACTORY_NOTIFY_RETRY, true, None);
         let res = reply(deps.as_mut(), mock_env(), r).expect("retry success path must Ok");
@@ -365,13 +388,11 @@ mod reply_handler_tests {
     fn reply_retry_on_error_keeps_pending_flag() {
         let mut deps = mock_dependencies();
         setup_pool_storage(&mut deps);
-        PENDING_FACTORY_NOTIFY.save(&mut deps.storage, &true).unwrap();
+        PENDING_FACTORY_NOTIFY
+            .save(&mut deps.storage, &true)
+            .unwrap();
 
-        let r = synthetic_reply(
-            REPLY_ID_FACTORY_NOTIFY_RETRY,
-            false,
-            Some("factory paused"),
-        );
+        let r = synthetic_reply(REPLY_ID_FACTORY_NOTIFY_RETRY, false, Some("factory paused"));
         let res = reply(deps.as_mut(), mock_env(), r)
             .expect("retry failure must NOT propagate as Err — gas-trap risk");
 

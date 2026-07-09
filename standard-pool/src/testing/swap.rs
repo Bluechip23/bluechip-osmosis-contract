@@ -13,11 +13,14 @@ use crate::error::ContractError;
 use crate::msg::ExecuteMsg;
 
 /// Seed a deposit so subsequent swaps have reserves to work with.
-fn seed_pool(deps: &mut cosmwasm_std::OwnedDeps<
-    cosmwasm_std::testing::MockStorage,
-    cosmwasm_std::testing::MockApi,
-    cosmwasm_std::testing::MockQuerier,
->, user: &cosmwasm_std::Addr) {
+fn seed_pool(
+    deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::testing::MockStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    user: &cosmwasm_std::Addr,
+) {
     let funds = vec![Coin::new(1_000_000_000u128, BLUECHIP_DENOM)];
     execute(
         deps.as_mut(),
@@ -63,13 +66,18 @@ fn simple_swap_native_to_cw20_returns_token_transfer() {
 
     // Should emit a CW20 Transfer to the trader for the ask token.
     let cw20_transfer = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == addrs.creator_token.as_str()
                 && String::from_utf8_lossy(msg.as_slice()).contains("transfer")
         }
         _ => false,
     });
-    assert!(cw20_transfer, "swap should emit CW20 Transfer of return amount");
+    assert!(
+        cw20_transfer,
+        "swap should emit CW20 Transfer of return amount"
+    );
 
     // Analytics bumped.
     let analytics = POOL_ANALYTICS.load(&deps.storage).unwrap();
@@ -157,7 +165,9 @@ fn cw20_hook_swap_dispatches_via_receive() {
     let bank_send = res.messages.iter().any(|sub| match &sub.msg {
         CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
             to_address == trader.as_str()
-                && amount.iter().any(|c| c.denom == BLUECHIP_DENOM && !c.amount.is_zero())
+                && amount
+                    .iter()
+                    .any(|c| c.denom == BLUECHIP_DENOM && !c.amount.is_zero())
         }
         _ => false,
     });

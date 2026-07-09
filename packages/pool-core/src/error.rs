@@ -146,9 +146,7 @@ pub enum ContractError {
     // `Std(StdError::generic_err(...))` sites so off-chain consumers can
     // match structurally rather than regex an English message.
     // ---------------------------------------------------------------------
-    #[error(
-        "lp_fee {got} is outside the allowed range [{min}, {max}] (set via UpdateFees)"
-    )]
+    #[error("lp_fee {got} is outside the allowed range [{min}, {max}] (set via UpdateFees)")]
     LpFeeOutOfRange {
         got: Decimal,
         min: Decimal,

@@ -16,25 +16,23 @@
 //! flow, so standard-pool doesn't need them.
 
 pub use pool_core::admin::{
-    ensure_not_drained, execute_cancel_emergency_withdraw,
-    execute_claim_emergency_share, execute_emergency_withdraw_dispatch, execute_pause,
-    execute_sweep_unclaimed_emergency_shares, execute_unpause,
-    execute_update_config_from_factory, CoreDrainResult,
+    ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_emergency_share,
+    execute_emergency_withdraw_dispatch, execute_pause, execute_sweep_unclaimed_emergency_shares,
+    execute_unpause, execute_update_config_from_factory, CoreDrainResult,
 };
 
 use crate::error::ContractError;
 use crate::state::{
     DistributionState, RecoveryType, COMMITFEEINFO, COMMIT_LEDGER, CREATOR_EXCESS_POSITION,
     DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX, DISTRIBUTION_STATE,
-    FAILED_MINTS, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
-    MAX_CONSECUTIVE_DISTRIBUTION_FAILURES, PENDING_EMERGENCY_WITHDRAW, POOL_INFO,
-    PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, REENTRANCY_LOCK,
-    STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS,
-    THRESHOLD_PROCESSING,
+    FAILED_MINTS, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT, MAX_CONSECUTIVE_DISTRIBUTION_FAILURES,
+    PENDING_EMERGENCY_WITHDRAW, POOL_INFO, PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS,
+    REENTRANCY_LOCK, STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS,
+    STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS, THRESHOLD_PROCESSING,
 };
 use cosmwasm_std::{
-    Addr, DepsMut, Env, MessageInfo, Order, Response, StdResult, Storage, SubMsg,
-    Timestamp, Uint128,
+    Addr, DepsMut, Env, MessageInfo, Order, Response, StdResult, Storage, SubMsg, Timestamp,
+    Uint128,
 };
 
 // ---------------------------------------------------------------------------
@@ -78,10 +76,7 @@ pub fn execute_emergency_withdraw(
     // stranded forever. The correct recovery path for a pre-threshold
     // pool is a future cancel/refund flow; until that exists, refuse to
     // run emergency withdraw at all before the threshold has crossed.
-    if !IS_THRESHOLD_HIT
-        .may_load(deps.storage)?
-        .unwrap_or(false)
-    {
+    if !IS_THRESHOLD_HIT.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::EmergencyWithdrawPreThreshold);
     }
 
@@ -381,7 +376,10 @@ pub fn execute_self_recover_distribution(
         .add_attribute("recovered_by", info.sender.to_string())
         .add_attribute("stall_elapsed_seconds", elapsed.to_string())
         .add_attribute("remaining_committers", remaining_committers.to_string())
-        .add_attribute("pool_contract", pool_info.pool_info.contract_addr.to_string())
+        .add_attribute(
+            "pool_contract",
+            pool_info.pool_info.contract_addr.to_string(),
+        )
         .add_attribute("block_time", env.block.time.seconds().to_string()))
 }
 
@@ -462,6 +460,9 @@ pub fn execute_claim_failed_distribution(
         .add_attribute("committer", info.sender.to_string())
         .add_attribute("recipient", recipient_addr.to_string())
         .add_attribute("amount", owed.to_string())
-        .add_attribute("pool_contract", pool_info.pool_info.contract_addr.to_string())
+        .add_attribute(
+            "pool_contract",
+            pool_info.pool_info.contract_addr.to_string(),
+        )
         .add_attribute("block_time", env.block.time.seconds().to_string()))
 }

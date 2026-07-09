@@ -59,9 +59,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         } => to_json_binary(&query_positions_by_owner(deps, owner, start_after, limit)?),
         QueryMsg::PoolInfo {} => to_json_binary(&query_pool_info(deps)?),
         QueryMsg::Analytics {} => to_json_binary(&query_analytics(deps)?),
-        QueryMsg::GetPoolState {} => {
-            query_for_factory(deps, env, PoolQueryMsg::GetPoolState {})
-        }
+        QueryMsg::GetPoolState {} => query_for_factory(deps, env, PoolQueryMsg::GetPoolState {}),
         QueryMsg::GetAllPools {} => query_for_factory(deps, env, PoolQueryMsg::GetAllPools {}),
         QueryMsg::IsPaused {} => query_for_factory(deps, env, PoolQueryMsg::IsPaused {}),
     }

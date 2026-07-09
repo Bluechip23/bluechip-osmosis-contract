@@ -609,8 +609,7 @@ pub fn post_threshold_swap_cap(
     }
     // Linear interpolation: cap_bps = START + (END - START) * blocks / RAMP.
     let cap_bps = POST_THRESHOLD_SWAP_CAP_START_BPS
-        + (POST_THRESHOLD_SWAP_CAP_END_BPS - POST_THRESHOLD_SWAP_CAP_START_BPS)
-            * blocks_since
+        + (POST_THRESHOLD_SWAP_CAP_END_BPS - POST_THRESHOLD_SWAP_CAP_START_BPS) * blocks_since
             / POST_THRESHOLD_SWAP_RAMP_BLOCKS;
     let cap = offer_reserve.multiply_ratio(cap_bps, 10_000u128);
     Ok(Some(cap))
@@ -784,12 +783,8 @@ mod post_threshold_swap_cap_tests {
     #[test]
     fn returns_none_when_cooldown_unset() {
         let deps = mock_dependencies();
-        let cap = post_threshold_swap_cap(
-            &deps.storage,
-            1_000_000,
-            Uint128::new(1_000_000_000),
-        )
-        .unwrap();
+        let cap =
+            post_threshold_swap_cap(&deps.storage, 1_000_000, Uint128::new(1_000_000_000)).unwrap();
         assert!(cap.is_none(), "no cooldown → no cap");
     }
 
@@ -805,12 +800,7 @@ mod post_threshold_swap_cap_tests {
             .save(&mut deps.storage, &100)
             .unwrap();
         // Block 99 is still inside the cooldown window.
-        let cap = post_threshold_swap_cap(
-            &deps.storage,
-            99,
-            Uint128::new(1_000_000_000),
-        )
-        .unwrap();
+        let cap = post_threshold_swap_cap(&deps.storage, 99, Uint128::new(1_000_000_000)).unwrap();
         assert!(cap.is_none(), "in cooldown → no cap (separate gate)");
     }
 
@@ -822,13 +812,9 @@ mod post_threshold_swap_cap_tests {
         POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
             .save(&mut deps.storage, &100)
             .unwrap();
-        let cap = post_threshold_swap_cap(
-            &deps.storage,
-            100,
-            Uint128::new(1_000_000_000),
-        )
-        .unwrap()
-        .expect("ramp active at cooldown_end");
+        let cap = post_threshold_swap_cap(&deps.storage, 100, Uint128::new(1_000_000_000))
+            .unwrap()
+            .expect("ramp active at cooldown_end");
         // 0.5% of 1B = 5M.
         assert_eq!(cap, Uint128::new(5_000_000));
     }
@@ -879,20 +865,12 @@ mod post_threshold_swap_cap_tests {
         POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
             .save(&mut deps.storage, &100)
             .unwrap();
-        let cap_high = post_threshold_swap_cap(
-            &deps.storage,
-            100,
-            Uint128::new(1_000_000_000),
-        )
-        .unwrap()
-        .unwrap();
-        let cap_low = post_threshold_swap_cap(
-            &deps.storage,
-            100,
-            Uint128::new(100_000_000),
-        )
-        .unwrap()
-        .unwrap();
+        let cap_high = post_threshold_swap_cap(&deps.storage, 100, Uint128::new(1_000_000_000))
+            .unwrap()
+            .unwrap();
+        let cap_low = post_threshold_swap_cap(&deps.storage, 100, Uint128::new(100_000_000))
+            .unwrap()
+            .unwrap();
         // 10× the reserve → 10× the absolute cap.
         assert_eq!(cap_high, cap_low.checked_mul(Uint128::new(10)).unwrap());
     }

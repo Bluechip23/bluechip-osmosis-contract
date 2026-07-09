@@ -211,7 +211,10 @@ fn reply_succeeds_and_clears_context_when_post_balance_matches_expected() {
     // Context must be cleared — leaving it would let a future deposit's
     // reply consume a stale snapshot.
     assert!(
-        DEPOSIT_VERIFY_CTX.may_load(&deps.storage).unwrap().is_none(),
+        DEPOSIT_VERIFY_CTX
+            .may_load(&deps.storage)
+            .unwrap()
+            .is_none(),
         "transient verify context must be removed on success"
     );
 }

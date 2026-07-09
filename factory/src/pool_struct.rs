@@ -307,7 +307,10 @@ mod threshold_payout_validate_tests {
     #[test]
     fn canonical_default_passes() {
         let payout = ThresholdPayoutAmounts::default();
-        assert!(payout.validate().is_ok(), "canonical default must pass validate");
+        assert!(
+            payout.validate().is_ok(),
+            "canonical default must pass validate"
+        );
     }
 
     /// Off-by-one on the creator share is rejected with the creator field
@@ -322,7 +325,9 @@ mod threshold_payout_validate_tests {
             .creator_reward_amount
             .checked_add(Uint128::new(1))
             .unwrap();
-        let err = payout.validate().expect_err("non-canonical creator must reject");
+        let err = payout
+            .validate()
+            .expect_err("non-canonical creator must reject");
         let msg = err.to_string();
         assert!(
             msg.contains("creator_reward_amount"),
@@ -340,7 +345,9 @@ mod threshold_payout_validate_tests {
     fn rejects_bluechip_reward_drift() {
         let mut payout = ThresholdPayoutAmounts::default();
         payout.bluechip_reward_amount = Uint128::new(1);
-        let err = payout.validate().expect_err("non-canonical bluechip must reject");
+        let err = payout
+            .validate()
+            .expect_err("non-canonical bluechip must reject");
         let msg = err.to_string();
         assert!(
             msg.contains("bluechip_reward_amount"),
@@ -356,7 +363,9 @@ mod threshold_payout_validate_tests {
             .pool_seed_amount
             .checked_sub(Uint128::new(1))
             .unwrap();
-        let err = payout.validate().expect_err("non-canonical pool_seed must reject");
+        let err = payout
+            .validate()
+            .expect_err("non-canonical pool_seed must reject");
         let msg = err.to_string();
         assert!(
             msg.contains("pool_seed_amount"),
@@ -404,7 +413,9 @@ mod threshold_payout_validate_tests {
     #[test]
     fn canonical_total_matches_total_constant() {
         let payout = ThresholdPayoutAmounts::default();
-        let total = payout.total_mint().expect("total_mint must succeed on canonical");
+        let total = payout
+            .total_mint()
+            .expect("total_mint must succeed on canonical");
         assert_eq!(
             total,
             Uint128::new(THRESHOLD_PAYOUT_TOTAL_BASE_UNITS),

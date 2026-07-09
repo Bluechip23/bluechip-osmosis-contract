@@ -12,19 +12,18 @@
 
 use crate::asset::{TokenInfo, TokenInfoPoolExt};
 use crate::error::ContractError;
-use crate::msg::PoolConfigUpdate;
 use crate::liquidity_helpers::{sync_position_on_transfer, verify_position_ownership};
+use crate::msg::PoolConfigUpdate;
 use crate::state::{
     EmergencyDrainSnapshot, EmergencyWithdrawalInfo, COMMITFEEINFO, CREATOR_FEE_POT,
     EMERGENCY_CLAIM_DORMANCY_SECONDS, EMERGENCY_DRAINED, EMERGENCY_DRAIN_SNAPSHOT,
-    EMERGENCY_WITHDRAWAL, LIQUIDITY_POSITIONS,
-    PENDING_EMERGENCY_WITHDRAW, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO,
-    POOL_SPECS, POOL_STATE,
+    EMERGENCY_WITHDRAWAL, LIQUIDITY_POSITIONS, PENDING_EMERGENCY_WITHDRAW, POOL_FEE_STATE,
+    POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO, POOL_SPECS, POOL_STATE,
 };
-use pool_factory_interfaces::{EmergencyWithdrawDelayResponse, FactoryQueryMsg};
 use cosmwasm_std::{
     Addr, CosmosMsg, Decimal, DepsMut, Env, MessageInfo, Response, StdError, Storage, Uint128,
 };
+use pool_factory_interfaces::{EmergencyWithdrawDelayResponse, FactoryQueryMsg};
 
 /// Bundle returned by `execute_emergency_withdraw_core_drain`. Callers
 /// turn it into a `Response` — either directly (standard-pool) or after
@@ -255,12 +254,12 @@ pub fn execute_emergency_withdraw_core_drain(
     // fails for any reason, fall back to the snapshot in COMMITFEEINFO
     // so the drain can complete; in steady-state the snapshot and
     // live values are identical and the fallback is unobservable.
-    let recipient = match deps.querier.query_wasm_smart::<
-        pool_factory_interfaces::BluechipWalletResponse,
-    >(
-        pool_info.factory_addr.to_string(),
-        &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
-    ) {
+    let recipient = match deps
+        .querier
+        .query_wasm_smart::<pool_factory_interfaces::BluechipWalletResponse>(
+            pool_info.factory_addr.to_string(),
+            &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+        ) {
         Ok(resp) => resp.address,
         Err(_) => fee_info.bluechip_wallet_address.clone(),
     };
@@ -380,10 +379,7 @@ pub fn execute_claim_emergency_share(
     // Pool must actually be drained — otherwise there's nothing to
     // claim against. Mirrors the inverse semantics of
     // `ensure_not_drained` used everywhere else.
-    if !EMERGENCY_DRAINED
-        .may_load(deps.storage)?
-        .unwrap_or(false)
-    {
+    if !EMERGENCY_DRAINED.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::NoEmergencyDrainSnapshot);
     }
 
@@ -431,22 +427,18 @@ pub fn execute_claim_emergency_share(
 
     // Pro-rata math: principal share + fee share, both weighted by
     // `position.liquidity / total_liquidity_at_drain`.
-    let principal_0 = snapshot.reserve0_at_drain.multiply_ratio(
-        position.liquidity,
-        snapshot.total_liquidity_at_drain,
-    );
-    let principal_1 = snapshot.reserve1_at_drain.multiply_ratio(
-        position.liquidity,
-        snapshot.total_liquidity_at_drain,
-    );
-    let fee_share_0 = snapshot.fee_reserve_0_at_drain.multiply_ratio(
-        position.liquidity,
-        snapshot.total_liquidity_at_drain,
-    );
-    let fee_share_1 = snapshot.fee_reserve_1_at_drain.multiply_ratio(
-        position.liquidity,
-        snapshot.total_liquidity_at_drain,
-    );
+    let principal_0 = snapshot
+        .reserve0_at_drain
+        .multiply_ratio(position.liquidity, snapshot.total_liquidity_at_drain);
+    let principal_1 = snapshot
+        .reserve1_at_drain
+        .multiply_ratio(position.liquidity, snapshot.total_liquidity_at_drain);
+    let fee_share_0 = snapshot
+        .fee_reserve_0_at_drain
+        .multiply_ratio(position.liquidity, snapshot.total_liquidity_at_drain);
+    let fee_share_1 = snapshot
+        .fee_reserve_1_at_drain
+        .multiply_ratio(position.liquidity, snapshot.total_liquidity_at_drain);
     let total_0 = principal_0.checked_add(fee_share_0)?;
     let total_1 = principal_1.checked_add(fee_share_1)?;
 
@@ -549,10 +541,7 @@ pub fn execute_sweep_unclaimed_emergency_shares(
     if info.sender != pool_info.factory_addr {
         return Err(ContractError::Unauthorized {});
     }
-    if !EMERGENCY_DRAINED
-        .may_load(deps.storage)?
-        .unwrap_or(false)
-    {
+    if !EMERGENCY_DRAINED.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::NoEmergencyDrainSnapshot);
     }
 
@@ -601,12 +590,12 @@ pub fn execute_sweep_unclaimed_emergency_shares(
     // pool-instantiate-time snapshot. Falls back to COMMITFEEINFO if
     // the factory is unreachable so a stale-factory configuration
     // can't strand the residual.
-    let recipient = match deps.querier.query_wasm_smart::<
-        pool_factory_interfaces::BluechipWalletResponse,
-    >(
-        pool_info.factory_addr.to_string(),
-        &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
-    ) {
+    let recipient = match deps
+        .querier
+        .query_wasm_smart::<pool_factory_interfaces::BluechipWalletResponse>(
+            pool_info.factory_addr.to_string(),
+            &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+        ) {
         Ok(resp) => resp.address,
         Err(_) => fee_info.bluechip_wallet_address,
     };
@@ -637,7 +626,10 @@ pub fn execute_sweep_unclaimed_emergency_shares(
         .add_attribute("recipient", recipient.to_string())
         .add_attribute("residual_0", residual_0.to_string())
         .add_attribute("residual_1", residual_1.to_string())
-        .add_attribute("dormancy_expired_at", snapshot.dormancy_expires_at.to_string())
+        .add_attribute(
+            "dormancy_expired_at",
+            snapshot.dormancy_expires_at.to_string(),
+        )
         .add_attribute(
             "pool_contract",
             pool_info.pool_info.contract_addr.to_string(),

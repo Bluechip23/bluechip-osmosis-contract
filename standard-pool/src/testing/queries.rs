@@ -14,11 +14,14 @@ use crate::contract::execute;
 use crate::msg::{ExecuteMsg, QueryMsg};
 use crate::query::query;
 
-fn seed(mut_deps: &mut cosmwasm_std::OwnedDeps<
-    cosmwasm_std::testing::MockStorage,
-    cosmwasm_std::testing::MockApi,
-    cosmwasm_std::testing::MockQuerier,
->, user: &cosmwasm_std::Addr) {
+fn seed(
+    mut_deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::testing::MockStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    user: &cosmwasm_std::Addr,
+) {
     execute(
         mut_deps.as_mut(),
         mock_env(),
@@ -43,10 +46,7 @@ fn query_pair_returns_pool_details() {
     // MockEnv.contract.address returns. Just verify it's non-empty rather
     // than pinning to a specific MockApi-internal value.
     assert!(!details.contract_addr.as_str().is_empty());
-    assert!(matches!(
-        details.asset_infos[0],
-        TokenType::Native { .. }
-    ));
+    assert!(matches!(details.asset_infos[0], TokenType::Native { .. }));
     match &details.asset_infos[1] {
         TokenType::CreatorToken { contract_addr } => {
             assert_eq!(contract_addr, &addrs.creator_token)
@@ -74,7 +74,10 @@ fn query_fee_info_returns_placeholder() {
     // recipient.
     assert_eq!(resp.fee_info.bluechip_wallet_address, addrs.bluechip_wallet);
     assert_ne!(resp.fee_info.bluechip_wallet_address, addrs.factory);
-    assert_eq!(resp.fee_info.commit_fee_bluechip, cosmwasm_std::Decimal::zero());
+    assert_eq!(
+        resp.fee_info.commit_fee_bluechip,
+        cosmwasm_std::Decimal::zero()
+    );
 }
 
 #[test]
@@ -149,7 +152,10 @@ fn query_analytics_always_fully_committed() {
     let resp: PoolAnalyticsResponse = from_json(&bin).unwrap();
     // Standard pools report FullyCommitted + zero raised, regardless of
     // activity (no commit ledger).
-    assert!(matches!(resp.threshold_status, CommitStatus::FullyCommitted));
+    assert!(matches!(
+        resp.threshold_status,
+        CommitStatus::FullyCommitted
+    ));
     assert_eq!(resp.total_usd_raised, Uint128::zero());
     assert_eq!(resp.total_bluechip_raised, Uint128::zero());
 }

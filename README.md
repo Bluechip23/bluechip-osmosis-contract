@@ -1,5 +1,15 @@
 # bluechip-contracts
 
+> **⚠️ Strip-down notice (chain-portable relaunch).** The internal price
+> oracle (TWAP + Pyth), keeper bounties, the expand-economy reservoir, and
+> the bluechip mint-reward machinery have been **removed** from the
+> contracts. Pools now pair against the host chain's main native asset
+> (`bluechip_denom`, e.g. `uatom`), and the commit threshold is denominated
+> directly in that asset (`commit_threshold_limit`, base units) — no USD
+> conversion anywhere. Sections of this document describing the oracle,
+> bounties, expand-economy, or USD-denominated thresholds are **historical**
+> and no longer reflect the deployed contracts.
+
 A decentralized subscription and creator economy protocol built on Cosmos SDK using CosmWasm smart contracts.
 
 ## Overview

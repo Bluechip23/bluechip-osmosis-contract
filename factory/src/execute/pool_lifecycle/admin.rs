@@ -28,7 +28,9 @@ enum PoolAdminMsg {
     Unpause {},
     EmergencyWithdraw {},
     CancelEmergencyWithdraw {},
-    RecoverStuckStates { recovery_type: crate::pool_struct::RecoveryType },
+    RecoverStuckStates {
+        recovery_type: crate::pool_struct::RecoveryType,
+    },
     /// post-1y-dormancy sweep of the unclaimed
     /// emergency-drain residual. Factory forwards; the pool's handler
     /// verifies dormancy elapsed and `info.sender == factory_addr`
@@ -70,7 +72,13 @@ pub fn execute_pause_pool(
     info: MessageInfo,
     pool_id: u64,
 ) -> Result<Response, ContractError> {
-    forward_pool_admin(deps.as_ref(), info, pool_id, "pause_pool", PoolAdminMsg::Pause {})
+    forward_pool_admin(
+        deps.as_ref(),
+        info,
+        pool_id,
+        "pause_pool",
+        PoolAdminMsg::Pause {},
+    )
 }
 
 pub fn execute_unpause_pool(
@@ -78,7 +86,13 @@ pub fn execute_unpause_pool(
     info: MessageInfo,
     pool_id: u64,
 ) -> Result<Response, ContractError> {
-    forward_pool_admin(deps.as_ref(), info, pool_id, "unpause_pool", PoolAdminMsg::Unpause {})
+    forward_pool_admin(
+        deps.as_ref(),
+        info,
+        pool_id,
+        "unpause_pool",
+        PoolAdminMsg::Unpause {},
+    )
 }
 
 pub fn execute_emergency_withdraw_pool(

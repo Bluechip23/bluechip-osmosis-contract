@@ -35,8 +35,7 @@ use crate::admin::ensure_not_drained;
 use crate::asset::{get_native_denom, TokenInfo, TokenType};
 use crate::error::ContractError;
 use crate::generic_helpers::{
-    check_rate_limit, enforce_transaction_deadline, get_bank_transfer_to_msg,
-    with_reentrancy_guard,
+    check_rate_limit, enforce_transaction_deadline, get_bank_transfer_to_msg, with_reentrancy_guard,
 };
 use crate::msg::CommitFeeInfo;
 use crate::state::{

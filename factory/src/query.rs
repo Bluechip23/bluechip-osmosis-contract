@@ -149,11 +149,13 @@ pub fn query_pool_by_address(
 ) -> StdResult<Option<pool_factory_interfaces::RegisteredPoolResponse>> {
     let addr = deps.api.addr_validate(&pool_addr)?;
     let details = crate::state::lookup_pool_by_addr(deps, &addr)?;
-    Ok(details.map(|d| pool_factory_interfaces::RegisteredPoolResponse {
-        pool_id: d.pool_id,
-        pool_token_info: d.pool_token_info,
-        pool_kind: d.pool_kind,
-    }))
+    Ok(
+        details.map(|d| pool_factory_interfaces::RegisteredPoolResponse {
+            pool_id: d.pool_id,
+            pool_token_info: d.pool_token_info,
+            pool_kind: d.pool_kind,
+        }),
+    )
 }
 
 pub fn query_pool_creation_status(
@@ -214,11 +216,7 @@ pub fn query_creator_token_info(deps: Deps, pool_id: u64) -> StdResult<CreatorTo
     })
 }
 
-pub fn handle_pool_factory_query(
-    deps: Deps,
-    _env: Env,
-    msg: FactoryQueryMsg,
-) -> StdResult<Binary> {
+pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) -> StdResult<Binary> {
     match msg {
         FactoryQueryMsg::EmergencyWithdrawDelaySeconds {} => {
             // Pools call this from `pool-core::execute_emergency_withdraw_initiate`

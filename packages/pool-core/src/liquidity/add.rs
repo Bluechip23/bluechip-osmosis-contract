@@ -10,9 +10,7 @@
 //! downstream crates (and future helpers) can call it without the
 //! rate-limit layer if they've already handled rate limiting.
 
-use cosmwasm_std::{
-    Addr, CosmosMsg, DepsMut, Env, MessageInfo, Response, Timestamp, Uint128,
-};
+use cosmwasm_std::{Addr, CosmosMsg, DepsMut, Env, MessageInfo, Response, Timestamp, Uint128};
 
 use crate::error::ContractError;
 use crate::generic::{
@@ -156,9 +154,7 @@ fn add_to_position_internal(
         .checked_sub(fees_owed_1)?
         .checked_sub(clipped_1)?;
 
-    let mut pot = CREATOR_FEE_POT
-        .may_load(deps.storage)?
-        .unwrap_or_default();
+    let mut pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
     pot.amount_0 = pot.amount_0.checked_add(clipped_0)?;
     pot.amount_1 = pot.amount_1.checked_add(clipped_1)?;
     CREATOR_FEE_POT.save(deps.storage, &pot)?;
@@ -191,11 +187,20 @@ fn add_to_position_internal(
         ("fees_collected_1", fees_owed_1.to_string()),
         ("reserve0_after", pool_state.reserve0.to_string()),
         ("reserve1_after", pool_state.reserve1.to_string()),
-        ("total_liquidity_after", pool_state.total_liquidity.to_string()),
-        ("pool_contract", pool_state.pool_contract_address.to_string()),
+        (
+            "total_liquidity_after",
+            pool_state.total_liquidity.to_string(),
+        ),
+        (
+            "pool_contract",
+            pool_state.pool_contract_address.to_string(),
+        ),
         ("block_height", env.block.height.to_string()),
         ("block_time", env.block.time.seconds().to_string()),
-        ("total_lp_deposit_count", analytics.total_lp_deposit_count.to_string()),
+        (
+            "total_lp_deposit_count",
+            analytics.total_lp_deposit_count.to_string(),
+        ),
     ];
     let fee_msgs = build_fee_transfer_msgs(&prep.pool_info, &user, fees_owed_0, fees_owed_1)?;
     messages.extend(fee_msgs);

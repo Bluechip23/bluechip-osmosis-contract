@@ -13,8 +13,8 @@ use crate::admin::ensure_not_drained;
 use crate::error::ContractError;
 use crate::generic_helpers::process_distribution_batch;
 use crate::state::{
-    CONTINUE_DISTRIBUTION_RATE_LIMIT_SECONDS, DISTRIBUTION_STATE,
-    LAST_CONTINUE_DISTRIBUTION_AT, POOL_INFO, POOL_PAUSED,
+    CONTINUE_DISTRIBUTION_RATE_LIMIT_SECONDS, DISTRIBUTION_STATE, LAST_CONTINUE_DISTRIBUTION_AT,
+    POOL_INFO, POOL_PAUSED,
 };
 
 pub fn execute_continue_distribution(
@@ -49,9 +49,7 @@ pub fn execute_continue_distribution(
     // tx records the call; a tx that errors below atomically reverts
     // the stamp along with everything else.
     let now = env.block.time.seconds();
-    if let Some(prev) =
-        LAST_CONTINUE_DISTRIBUTION_AT.may_load(deps.storage, &info.sender)?
-    {
+    if let Some(prev) = LAST_CONTINUE_DISTRIBUTION_AT.may_load(deps.storage, &info.sender)? {
         let earliest_next = prev.saturating_add(CONTINUE_DISTRIBUTION_RATE_LIMIT_SECONDS);
         if now < earliest_next {
             return Err(ContractError::ContinueDistributionRateLimited {

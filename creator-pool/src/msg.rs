@@ -21,14 +21,14 @@ use crate::state::{CreatorFeePot, RecoveryType};
 // on `TokenInfo` / `RecoveryType` would still get reported), and folds
 // the four prior `#[allow(unused_imports)]` directives into a single
 // block.
+use cosmwasm_schema::{cw_serde, QueryResponses};
+use cosmwasm_std::{Addr, Binary, Decimal, Timestamp, Uint128};
+use cw20::Cw20ReceiveMsg;
 #[allow(unused_imports)]
 use {
     crate::state::{Committing, PoolDetails},
     pool_factory_interfaces::{AllPoolsResponse, PoolStateResponseForFactory},
 };
-use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::{Addr, Binary, Decimal, Timestamp, Uint128};
-use cw20::Cw20ReceiveMsg;
 
 #[cw_serde]
 pub enum ExecuteMsg {

@@ -92,7 +92,9 @@ pub fn remove_all_liquidity(
     let total_amount_0 = user_share_0.checked_add(fees_owed_0)?;
     let total_amount_1 = user_share_1.checked_add(fees_owed_1)?;
 
-    pool_state.total_liquidity = pool_state.total_liquidity.checked_sub(removable_liquidity)?;
+    pool_state.total_liquidity = pool_state
+        .total_liquidity
+        .checked_sub(removable_liquidity)?;
 
     liquidity_position.fee_growth_inside_0_last = pool_fee_state.fee_growth_global_0;
     liquidity_position.fee_growth_inside_1_last = pool_fee_state.fee_growth_global_1;
@@ -109,9 +111,7 @@ pub fn remove_all_liquidity(
         .checked_sub(fees_owed_1)?
         .checked_sub(clipped_1)?;
 
-    let mut pot = CREATOR_FEE_POT
-        .may_load(deps.storage)?
-        .unwrap_or_default();
+    let mut pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
     pot.amount_0 = pot.amount_0.checked_add(clipped_0)?;
     pot.amount_1 = pot.amount_1.checked_add(clipped_1)?;
     CREATOR_FEE_POT.save(deps.storage, &pot)?;
@@ -178,11 +178,20 @@ pub fn remove_all_liquidity(
         ("total_1", total_amount_1.to_string()),
         ("reserve0_after", pool_state.reserve0.to_string()),
         ("reserve1_after", pool_state.reserve1.to_string()),
-        ("total_liquidity_after", pool_state.total_liquidity.to_string()),
-        ("pool_contract", pool_state.pool_contract_address.to_string()),
+        (
+            "total_liquidity_after",
+            pool_state.total_liquidity.to_string(),
+        ),
+        (
+            "pool_contract",
+            pool_state.pool_contract_address.to_string(),
+        ),
         ("block_height", env.block.height.to_string()),
         ("block_time", env.block.time.seconds().to_string()),
-        ("total_lp_withdrawal_count", analytics.total_lp_withdrawal_count.to_string()),
+        (
+            "total_lp_withdrawal_count",
+            analytics.total_lp_withdrawal_count.to_string(),
+        ),
         ("auto_paused", auto_paused_now.to_string()),
     ]);
     let transfer_msgs =
@@ -364,9 +373,7 @@ pub fn remove_partial_liquidity(
     // previously orphaned in fee_reserve — now flows to the creator
     // wallet via ClaimCreatorFees (creator-pool) or to bluechip_wallet
     // at emergency drain (both paths).
-    let mut pot = CREATOR_FEE_POT
-        .may_load(deps.storage)?
-        .unwrap_or_default();
+    let mut pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
     pot.amount_0 = pot
         .amount_0
         .checked_add(clipped_0)?
@@ -415,7 +422,10 @@ pub fn remove_partial_liquidity(
         ("position_id", position_id),
         ("withdrawer", info.sender.to_string()),
         ("liquidity_removed", liquidity_to_remove.to_string()),
-        ("remaining_liquidity", liquidity_position.liquidity.to_string()),
+        (
+            "remaining_liquidity",
+            liquidity_position.liquidity.to_string(),
+        ),
         ("principal_0", withdrawal_amount_0.to_string()),
         ("principal_1", withdrawal_amount_1.to_string()),
         ("fees_0", fees_owed_0.to_string()),
@@ -426,11 +436,20 @@ pub fn remove_partial_liquidity(
         ("total_1", total_amount_1.to_string()),
         ("reserve0_after", pool_state.reserve0.to_string()),
         ("reserve1_after", pool_state.reserve1.to_string()),
-        ("total_liquidity_after", pool_state.total_liquidity.to_string()),
-        ("pool_contract", pool_state.pool_contract_address.to_string()),
+        (
+            "total_liquidity_after",
+            pool_state.total_liquidity.to_string(),
+        ),
+        (
+            "pool_contract",
+            pool_state.pool_contract_address.to_string(),
+        ),
         ("block_height", env.block.height.to_string()),
         ("block_time", env.block.time.seconds().to_string()),
-        ("total_lp_withdrawal_count", analytics.total_lp_withdrawal_count.to_string()),
+        (
+            "total_lp_withdrawal_count",
+            analytics.total_lp_withdrawal_count.to_string(),
+        ),
         ("auto_paused", auto_paused_now.to_string()),
     ]);
     let transfer_msgs =

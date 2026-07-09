@@ -26,7 +26,9 @@ impl TokenInfo {
 
 #[cw_serde]
 pub enum TokenType {
-    CreatorToken { contract_addr: Addr },
+    CreatorToken {
+        contract_addr: Addr,
+    },
     /// Any native bank denom on the chain — bluechip itself (`ubluechip`),
     /// IBC-wrapped remote assets (e.g. `ibc/...` for ATOM), tokenfactory
     /// denoms, etc. Name was formerly `Bluechip`, which was semantically
@@ -36,7 +38,9 @@ pub enum TokenType {
     /// scripts, and frontend integrations continue to round-trip without
     /// a coordinated migration.
     #[serde(rename = "bluechip")]
-    Native { denom: String },
+    Native {
+        denom: String,
+    },
 }
 
 impl fmt::Display for TokenType {
@@ -61,9 +65,7 @@ impl TokenType {
             TokenType::CreatorToken { contract_addr, .. } => {
                 query_token_balance(querier, contract_addr.clone(), pool_addr)
             }
-            TokenType::Native { denom, .. } => {
-                query_balance(querier, pool_addr, denom.to_string())
-            }
+            TokenType::Native { denom, .. } => query_balance(querier, pool_addr, denom.to_string()),
         }
     }
 
@@ -89,9 +91,7 @@ impl TokenType {
             TokenType::CreatorToken { contract_addr, .. } => {
                 query_token_balance_strict(querier, contract_addr, &pool_addr)
             }
-            TokenType::Native { denom, .. } => {
-                query_balance(querier, pool_addr, denom.to_string())
-            }
+            TokenType::Native { denom, .. } => query_balance(querier, pool_addr, denom.to_string()),
         }
     }
 

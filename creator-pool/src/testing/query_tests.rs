@@ -712,14 +712,13 @@ fn simulation_prices_against_accounting_reserves_not_balances() {
         .unwrap();
     let pool_specs = crate::state::POOL_SPECS.load(&deps.storage).unwrap();
     let offer_amount = Uint128::new(1_000_000_000);
-    let (expected_return, expected_spread, expected_commission) =
-        crate::swap_helper::compute_swap(
-            pool_state.reserve0,
-            pool_state.reserve1,
-            offer_amount,
-            pool_specs.lp_fee,
-        )
-        .unwrap();
+    let (expected_return, expected_spread, expected_commission) = crate::swap_helper::compute_swap(
+        pool_state.reserve0,
+        pool_state.reserve1,
+        offer_amount,
+        pool_specs.lp_fee,
+    )
+    .unwrap();
 
     let res = query(
         deps.as_ref(),

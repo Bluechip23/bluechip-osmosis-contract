@@ -52,9 +52,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::CumulativePrices {} => to_json_binary(&query_cumulative_prices(deps, env)?),
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
         QueryMsg::FeeInfo {} => to_json_binary(&query_fee_info(deps)?),
-        QueryMsg::GetPoolState {} => {
-            query_for_factory(deps, env, PoolQueryMsg::GetPoolState {})
-        }
+        QueryMsg::GetPoolState {} => query_for_factory(deps, env, PoolQueryMsg::GetPoolState {}),
         QueryMsg::GetAllPools {} => query_for_factory(deps, env, PoolQueryMsg::GetAllPools {}),
         QueryMsg::IsPaused {} => query_for_factory(deps, env, PoolQueryMsg::IsPaused {}),
 

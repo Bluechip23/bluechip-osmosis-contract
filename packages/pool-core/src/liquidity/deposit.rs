@@ -512,13 +512,29 @@ fn execute_deposit_liquidity_inner(
         ("offered_amount1", amount1.to_string()),
         ("reserve0_after", pool_state.reserve0.to_string()),
         ("reserve1_after", pool_state.reserve1.to_string()),
-        ("total_liquidity_after", pool_state.total_liquidity.to_string()),
+        (
+            "total_liquidity_after",
+            pool_state.total_liquidity.to_string(),
+        ),
         ("share_of_pool_bps", share_of_pool_bps),
-        ("pool_contract", pool_state.pool_contract_address.to_string()),
+        (
+            "pool_contract",
+            pool_state.pool_contract_address.to_string(),
+        ),
         ("block_height", env.block.height.to_string()),
         ("block_time", env.block.time.seconds().to_string()),
-        ("total_lp_deposit_count", analytics.total_lp_deposit_count.to_string()),
-        ("pool_unpaused", if unpaused { "true".to_string() } else { "false".to_string() }),
+        (
+            "total_lp_deposit_count",
+            analytics.total_lp_deposit_count.to_string(),
+        ),
+        (
+            "pool_unpaused",
+            if unpaused {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            },
+        ),
     ];
 
     finalize_deposit_response(
@@ -626,9 +642,7 @@ pub(crate) fn finalize_deposit_response(
     let snapshot = match pre_snapshot {
         Some(s) => s,
         None => {
-            return Ok(Response::new()
-                .add_messages(messages)
-                .add_attributes(attrs));
+            return Ok(Response::new().add_messages(messages).add_attributes(attrs));
         }
     };
 
@@ -643,9 +657,7 @@ pub(crate) fn finalize_deposit_response(
 
     if cw20_side0_addr.is_none() && cw20_side1_addr.is_none() {
         // Native+Native shape: nothing to verify.
-        return Ok(Response::new()
-            .add_messages(messages)
-            .add_attributes(attrs));
+        return Ok(Response::new().add_messages(messages).add_attributes(attrs));
     }
 
     // messages is non-empty here: every successful deposit emits at
@@ -676,10 +688,7 @@ pub(crate) fn finalize_deposit_response(
 
     // Convert the last CosmosMsg into a reply_on_success SubMsg; everything
     // else stays as fire-and-forget.
-    let mut sub_msgs: Vec<SubMsg> = messages
-        .into_iter()
-        .map(SubMsg::new)
-        .collect();
+    let mut sub_msgs: Vec<SubMsg> = messages.into_iter().map(SubMsg::new).collect();
     let last_idx = sub_msgs.len() - 1;
     sub_msgs[last_idx] =
         SubMsg::reply_on_success(sub_msgs[last_idx].msg.clone(), DEPOSIT_VERIFY_REPLY_ID);

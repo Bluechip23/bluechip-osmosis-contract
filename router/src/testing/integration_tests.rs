@@ -171,8 +171,7 @@ fn setup_world() -> World {
     let pool_empty = instantiate_pool(&mut app, pool_code, &admin, &creator_empty, true, false);
     // A standard pool: real ones reject the commit-only IsFullyCommited
     // query, which the mock reproduces when `standard: true`.
-    let pool_std =
-        instantiate_standard_pool(&mut app, pool_code, &admin, &creator_std);
+    let pool_std = instantiate_standard_pool(&mut app, pool_code, &admin, &creator_std);
 
     // Stand up the mock factory with every pool registered against its
     // canonical pair, then point the router at it. The router queries this
@@ -615,7 +614,9 @@ fn route_with_mislabeled_pair_rejected() {
         .unwrap_err();
 
     assert!(
-        err.root_cause().to_string().contains("not this pool's pair"),
+        err.root_cause()
+            .to_string()
+            .contains("not this pool's pair"),
         "expected HopPairMismatch, got: {err}"
     );
 }

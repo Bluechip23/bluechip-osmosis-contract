@@ -1,5 +1,5 @@
 //! Threshold-crossing commit handler. Fires when a single commit carries
-//! the pool over its `commit_amount_for_threshold_usd` target.
+//! the pool over its `commit_amount_for_threshold` target.
 //!
 //! Responsibilities (in order):
 //! 1. Split the incoming commit into a threshold portion (up to the
@@ -105,10 +105,9 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // `pools_bluechip_seed = NATIVE_RAISED_FROM_COMMIT` exact in
     // `trigger_threshold_payout`, no `(1 - fee_rate)` recovery
     // multiply needed.
-    NATIVE_RAISED_FROM_COMMIT
-        .update::<_, ContractError>(deps.storage, |r| {
-            Ok(r.checked_add(threshold_portion_after_fees)?)
-        })?;
+    NATIVE_RAISED_FROM_COMMIT.update::<_, ContractError>(deps.storage, |r| {
+        Ok(r.checked_add(threshold_portion_after_fees)?)
+    })?;
 
     // IS_THRESHOLD_HIT.save(true) MOVED into trigger_threshold_payout
     // (called below). That function holds the structural no-double-mint
@@ -268,7 +267,6 @@ pub(crate) fn process_threshold_crossing_with_excess(
                 refunded_excess,
             )?);
         }
-
     }
 
     // Single consolidated commit-info update covering BOTH the threshold
@@ -276,8 +274,8 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // value and use `commit_value` (= threshold + excess) so
     // `last_payment_*` reflects the user's full crossing commit rather
     // than the excess-only snapshot the prior two-call structure left.
-    let bluechip_committed = bluechip_to_threshold
-        .checked_add(bluechip_excess.checked_sub(refunded_excess)?)?;
+    let bluechip_committed =
+        bluechip_to_threshold.checked_add(bluechip_excess.checked_sub(refunded_excess)?)?;
     update_commit_info(
         deps.storage,
         &sender,

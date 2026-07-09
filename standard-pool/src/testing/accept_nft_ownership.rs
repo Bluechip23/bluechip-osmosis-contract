@@ -212,7 +212,9 @@ fn first_deposit_after_factory_accept_does_not_re_emit_accept() {
     // Confirm no AcceptOwnership inside the deposit response — only
     // the CW20 TransferFrom + position-NFT mint + verify-anchor.
     let nft_accept_in_deposit = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == addrs.position_nft.as_str()
                 && String::from_utf8_lossy(msg.as_slice()).contains("accept_ownership")
         }

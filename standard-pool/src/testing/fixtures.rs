@@ -131,16 +131,19 @@ pub fn standard_instantiate_msg(addrs: &FixtureAddrs) -> StandardPoolInstantiate
 /// Runs standard-pool's `instantiate` with the default shape. Returns
 /// the `OwnedDeps` for follow-up execute/query calls and the addresses
 /// the fixture chose.
-pub fn instantiate_default_pool() -> (
-    OwnedDeps<MockStorage, MockApi, MockQuerier>,
-    FixtureAddrs,
-) {
+pub fn instantiate_default_pool() -> (OwnedDeps<MockStorage, MockApi, MockQuerier>, FixtureAddrs) {
     let addrs = fixture_addrs();
     let mut deps = mock_deps_with_nft_owner(addrs.pool_owner.clone(), addrs.position_nft.clone());
     let info = MessageInfo {
         sender: addrs.factory.clone(),
         funds: vec![],
     };
-    instantiate(deps.as_mut(), mock_env(), info, standard_instantiate_msg(&addrs)).unwrap();
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        standard_instantiate_msg(&addrs),
+    )
+    .unwrap();
     (deps, addrs)
 }

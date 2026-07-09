@@ -17,9 +17,8 @@ use cosmwasm_std::{
 use cw2::set_contract_version;
 use pool_core::admin::{
     ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_emergency_share,
-    execute_emergency_withdraw_dispatch, execute_pause,
-    execute_sweep_unclaimed_emergency_shares, execute_unpause,
-    execute_update_config_from_factory,
+    execute_emergency_withdraw_dispatch, execute_pause, execute_sweep_unclaimed_emergency_shares,
+    execute_unpause, execute_update_config_from_factory,
 };
 use pool_core::asset::{PoolPairType, TokenInfoPoolExt, TokenType};
 use pool_core::balance_verify::handle_deposit_verify_reply;
@@ -31,11 +30,11 @@ use pool_core::liquidity::{
 };
 use pool_core::msg::CommitFeeInfo;
 use pool_core::state::{
-    pause_kind, ExpectedFactory, PauseKind, PoolAnalytics, PoolDetails, PoolFeeState,
-    PoolInfo, PoolSpecs, PoolState, Position, COMMITFEEINFO, DEFAULT_LP_FEE,
-    DEFAULT_SWAP_RATE_LIMIT_SECS, DEPOSIT_VERIFY_REPLY_ID, EXPECTED_FACTORY, IS_THRESHOLD_HIT,
-    LIQUIDITY_POSITIONS, MAX_LP_FEE, MIN_LP_FEE, NEXT_POSITION_ID, OWNER_POSITIONS,
-    POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_KIND_STANDARD, POOL_SPECS, POOL_STATE,
+    pause_kind, ExpectedFactory, PauseKind, PoolAnalytics, PoolDetails, PoolFeeState, PoolInfo,
+    PoolSpecs, PoolState, Position, COMMITFEEINFO, DEFAULT_LP_FEE, DEFAULT_SWAP_RATE_LIMIT_SECS,
+    DEPOSIT_VERIFY_REPLY_ID, EXPECTED_FACTORY, IS_THRESHOLD_HIT, LIQUIDITY_POSITIONS, MAX_LP_FEE,
+    MIN_LP_FEE, NEXT_POSITION_ID, OWNER_POSITIONS, POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO,
+    POOL_KIND_STANDARD, POOL_SPECS, POOL_STATE,
 };
 use pool_core::swap::{execute_swap_cw20, simple_swap};
 use pool_factory_interfaces::cw721_msgs::{Action as Cw721Action, Cw721ExecuteMsg};
@@ -118,7 +117,6 @@ pub fn instantiate(
     let fee_info = build_zero_fee_info(&msg.bluechip_wallet_address);
     let pool_state = build_initial_pool_state(&env);
     let pool_fee_state = build_zero_pool_fee_state();
-
 
     COMMITFEEINFO.save(deps.storage, &fee_info)?;
     // Standard pools are "threshold-hit" from birth — shared swap and
@@ -346,9 +344,7 @@ pub fn execute(
             // is sufficient.
             offer_asset.confirm_sent_native_balance(&info)?;
             let sender = info.sender.clone();
-            let to_addr: Option<Addr> = to
-                .map(|s| deps.api.addr_validate(&s))
-                .transpose()?;
+            let to_addr: Option<Addr> = to.map(|s| deps.api.addr_validate(&s)).transpose()?;
             simple_swap(
                 deps,
                 env,
@@ -557,7 +553,10 @@ fn execute_accept_nft_ownership(
         // the entire create-pool transaction.
         return Ok(Response::new()
             .add_attribute("action", "accept_nft_ownership_noop")
-            .add_attribute("pool_contract", pool_info.pool_info.contract_addr.to_string()));
+            .add_attribute(
+                "pool_contract",
+                pool_info.pool_info.contract_addr.to_string(),
+            ));
     }
 
     let accept_msg = WasmMsg::Execute {
@@ -573,7 +572,10 @@ fn execute_accept_nft_ownership(
     Ok(Response::new()
         .add_message(CosmosMsg::Wasm(accept_msg))
         .add_attribute("action", "accept_nft_ownership")
-        .add_attribute("pool_contract", pool_info.pool_info.contract_addr.to_string())
+        .add_attribute(
+            "pool_contract",
+            pool_info.pool_info.contract_addr.to_string(),
+        )
         .add_attribute("nft", pool_info.position_nft_address.to_string()))
 }
 
@@ -608,11 +610,7 @@ fn execute_emergency_withdraw(
 /// upstream `pool-core` upgrade that introduced a new reply path
 /// without wiring it here.
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn reply(
-    deps: DepsMut,
-    env: Env,
-    msg: cosmwasm_std::Reply,
-) -> Result<Response, ContractError> {
+pub fn reply(deps: DepsMut, env: Env, msg: cosmwasm_std::Reply) -> Result<Response, ContractError> {
     match msg.id {
         // The verify handler returns `ContractError`; previously it was
         // `.to_string()`'d into a `StdError::generic_err`, erasing the
@@ -652,18 +650,19 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
     // (legacy pre-cw2 / test fixtures) by skipping the check; production
     // pools always set cw2 at instantiate time.
     if let Ok(stored_version) = cw2::get_contract_version(deps.storage) {
-        let stored_semver: semver::Version = stored_version
-            .version
-            .parse()
-            .map_err(|e: semver::Error| ContractError::StoredVersionInvalid {
-                version: stored_version.version.clone(),
-                msg: e.to_string(),
+        let stored_semver: semver::Version =
+            stored_version.version.parse().map_err(|e: semver::Error| {
+                ContractError::StoredVersionInvalid {
+                    version: stored_version.version.clone(),
+                    msg: e.to_string(),
+                }
             })?;
-        let current_semver: semver::Version = CONTRACT_VERSION
-            .parse()
-            .map_err(|e: semver::Error| ContractError::CurrentVersionInvalid {
-                version: CONTRACT_VERSION.to_string(),
-                msg: e.to_string(),
+        let current_semver: semver::Version =
+            CONTRACT_VERSION.parse().map_err(|e: semver::Error| {
+                ContractError::CurrentVersionInvalid {
+                    version: CONTRACT_VERSION.to_string(),
+                    msg: e.to_string(),
+                }
             })?;
         if stored_semver > current_semver {
             return Err(ContractError::DowngradeRefused {

@@ -584,7 +584,6 @@ pub fn sync_position_on_transfer(
     Ok(true)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,9 +620,9 @@ mod tests {
         // multiplier = 1.0 → nothing clipped
         let (owed, clipped) = calculate_fees_owed_split(
             Uint128::new(1_000_000),
-            Decimal::percent(10),       // fee_growth_global
-            Decimal::zero(),             // fee_growth_last
-            Decimal::one(),              // multiplier
+            Decimal::percent(10), // fee_growth_global
+            Decimal::zero(),      // fee_growth_last
+            Decimal::one(),       // multiplier
         )
         .unwrap();
         assert_eq!(owed, Uint128::new(100_000));
@@ -677,10 +676,7 @@ mod tests {
     #[test]
     fn check_slippage_rejects_below_min() {
         let r = check_slippage(Uint128::new(99), Some(Uint128::new(100)), "asset0");
-        assert!(matches!(
-            r,
-            Err(ContractError::SlippageExceeded { .. })
-        ));
+        assert!(matches!(r, Err(ContractError::SlippageExceeded { .. })));
     }
 
     #[test]

@@ -61,16 +61,14 @@ pub fn handle_deposit_verify_reply(
 
     // Load + immediately remove the context so a future deposit can never
     // see a stale snapshot.
-    let ctx = DEPOSIT_VERIFY_CTX
-        .may_load(deps.storage)?
-        .ok_or_else(|| {
-            ContractError::Std(StdError::generic_err(
-                "deposit verify reply fired without a saved context — \
+    let ctx = DEPOSIT_VERIFY_CTX.may_load(deps.storage)?.ok_or_else(|| {
+        ContractError::Std(StdError::generic_err(
+            "deposit verify reply fired without a saved context — \
                  indicates the parent handler returned without saving \
                  DEPOSIT_VERIFY_CTX before emitting the reply_on_success \
                  SubMsg, or a stale reply id collided",
-            ))
-        })?;
+        ))
+    })?;
     DEPOSIT_VERIFY_CTX.remove(deps.storage);
 
     // For each CW20 side: query post-balance, assert the net-flow

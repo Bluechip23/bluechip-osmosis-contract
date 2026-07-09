@@ -6,8 +6,7 @@ use crate::admin::{
     ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_emergency_share,
     execute_claim_failed_distribution, execute_emergency_withdraw, execute_pause,
     execute_recover_stuck_states, execute_self_recover_distribution,
-    execute_sweep_unclaimed_emergency_shares, execute_unpause,
-    execute_update_config_from_factory,
+    execute_sweep_unclaimed_emergency_shares, execute_unpause, execute_update_config_from_factory,
 };
 use crate::asset::{PoolPairType, TokenInfoPoolExt, TokenType};
 use crate::commit::{commit, execute_continue_distribution};
@@ -22,24 +21,23 @@ use crate::liquidity_helpers::{execute_claim_creator_excess, execute_claim_creat
 use crate::msg::{ExecuteMsg, MigrateMsg, PoolInstantiateMsg};
 use crate::query::query_check_commit;
 use crate::state::{
-    CommitLimitInfo, DEFAULT_LP_FEE, DEFAULT_SWAP_RATE_LIMIT_SECS, ExpectedFactory, MAX_LP_FEE,
-    MIN_LP_FEE, PoolAnalytics,
-    PoolDetails, PoolFeeState, PoolInfo, PoolSpecs, PoolState, Position, ThresholdPayoutAmounts,
-    COMMITFEEINFO, COMMIT_LIMIT_INFO, EXPECTED_FACTORY, IS_THRESHOLD_HIT, LIQUIDITY_POSITIONS,
-    DEPOSIT_VERIFY_REPLY_ID, FAILED_MINTS, NATIVE_RAISED_FROM_COMMIT, NEXT_POSITION_ID,
-    OWNER_POSITIONS, PENDING_FACTORY_NOTIFY, PENDING_MINT_REPLIES, POOL_ANALYTICS,
-    POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
-    REPLY_ID_DISTRIBUTION_MINT_BASE, REPLY_ID_FACTORY_NOTIFY_INITIAL,
+    CommitLimitInfo, ExpectedFactory, PoolAnalytics, PoolDetails, PoolFeeState, PoolInfo,
+    PoolSpecs, PoolState, Position, ThresholdPayoutAmounts, COMMITFEEINFO, COMMIT_LIMIT_INFO,
+    DEFAULT_LP_FEE, DEFAULT_SWAP_RATE_LIMIT_SECS, DEPOSIT_VERIFY_REPLY_ID, EXPECTED_FACTORY,
+    FAILED_MINTS, IS_THRESHOLD_HIT, LIQUIDITY_POSITIONS, MAX_LP_FEE, MIN_LP_FEE,
+    NATIVE_RAISED_FROM_COMMIT, NEXT_POSITION_ID, OWNER_POSITIONS, PENDING_FACTORY_NOTIFY,
+    PENDING_MINT_REPLIES, POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS,
+    POOL_STATE, REPLY_ID_DISTRIBUTION_MINT_BASE, REPLY_ID_FACTORY_NOTIFY_INITIAL,
     REPLY_ID_FACTORY_NOTIFY_RETRY, THRESHOLD_PAYOUT_AMOUNTS, USD_RAISED_FROM_COMMIT,
 };
 // Swap orchestration moved to pool_core::swap; re-exported via swap_helper.
 use crate::swap_helper::{execute_swap_cw20, simple_swap};
-use pool_core::balance_verify::handle_deposit_verify_reply;
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, CosmosMsg, Decimal, DepsMut, Env, MessageInfo,
     Reply, Response, StdError, StdResult, Storage, SubMsg, SubMsgResult, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
+use pool_core::balance_verify::handle_deposit_verify_reply;
 
 /// cw2 contract name. Includes the `creator` discriminator so a
 /// migration tool inspecting cw2 names can distinguish a creator-pool
@@ -216,7 +214,6 @@ pub fn instantiate(
         .add_attribute("pool_contract", env.contract.address.to_string()))
 }
 
-
 // ---------------------------------------------------------------------------
 // Execute dispatch
 // ---------------------------------------------------------------------------
@@ -346,9 +343,7 @@ pub fn execute(
                 max_spread,
             )
         }
-        ExecuteMsg::ContinueDistribution {} => {
-            execute_continue_distribution(deps, env, info)
-        }
+        ExecuteMsg::ContinueDistribution {} => execute_continue_distribution(deps, env, info),
 
         // --- Swap ---
         ExecuteMsg::SimpleSwap {
@@ -540,7 +535,9 @@ pub fn execute(
                 max_ratio_deviation_bps,
             )
         }
-        ExecuteMsg::ClaimCreatorExcessLiquidity { transaction_deadline } => {
+        ExecuteMsg::ClaimCreatorExcessLiquidity {
+            transaction_deadline,
+        } => {
             // Creator excess exists only when a commit-pool threshold is crossed
             // with more raised-bluechip than `max_bluechip_lock_per_pool`
             // absorbs. Standard pools have no commit phase and no excess
@@ -548,7 +545,9 @@ pub fn execute(
             check_pool_writable(deps.storage)?;
             execute_claim_creator_excess(deps, env, info, transaction_deadline)
         }
-        ExecuteMsg::ClaimCreatorFees { transaction_deadline } => {
+        ExecuteMsg::ClaimCreatorFees {
+            transaction_deadline,
+        } => {
             // The creator fee pot is seeded by the fee_size_multiplier
             // clip on commit-pool LP fees. Standard pools have no creator
             // concept, so the pot is always empty and this handler is N/A.
@@ -687,7 +686,10 @@ fn execute_accept_nft_ownership(
     if pool_state.nft_ownership_accepted {
         return Ok(Response::new()
             .add_attribute("action", "accept_nft_ownership_noop")
-            .add_attribute("pool_contract", pool_info.pool_info.contract_addr.to_string()));
+            .add_attribute(
+                "pool_contract",
+                pool_info.pool_info.contract_addr.to_string(),
+            ));
     }
 
     let accept_msg = WasmMsg::Execute {
@@ -705,7 +707,10 @@ fn execute_accept_nft_ownership(
     Ok(Response::new()
         .add_message(CosmosMsg::Wasm(accept_msg))
         .add_attribute("action", "accept_nft_ownership")
-        .add_attribute("pool_contract", pool_info.pool_info.contract_addr.to_string())
+        .add_attribute(
+            "pool_contract",
+            pool_info.pool_info.contract_addr.to_string(),
+        )
         .add_attribute("nft", pool_info.position_nft_address.to_string()))
 }
 
@@ -825,10 +830,8 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
         // "balance delta does not match" substring that
         // `handle_deposit_verify_reply` emits on a fee-on-transfer or
         // rebasing CW20.
-        DEPOSIT_VERIFY_REPLY_ID => {
-            handle_deposit_verify_reply(deps, env, msg)
-                .map_err(|e| StdError::generic_err(e.to_string()))
-        }
+        DEPOSIT_VERIFY_REPLY_ID => handle_deposit_verify_reply(deps, env, msg)
+            .map_err(|e| StdError::generic_err(e.to_string())),
         id if id >= REPLY_ID_DISTRIBUTION_MINT_BASE
             && PENDING_MINT_REPLIES.has(deps.storage, id) =>
         {
@@ -900,14 +903,10 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
             }
         }
         other => Err(StdError::generic_err(
-            pool_core::generic::unknown_reply_id_msg(
-                pool_core::state::POOL_KIND_COMMIT,
-                other,
-            ),
+            pool_core::generic::unknown_reply_id_msg(pool_core::state::POOL_KIND_COMMIT, other),
         )),
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Migrate
@@ -933,20 +932,19 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
     // `set_contract_version` at instantiate time.
     if let Ok(stored_version) = cw2::get_contract_version(deps.storage) {
         let stored_semver: semver::Version =
-            stored_version
-                .version
-                .parse()
-                .map_err(|e: semver::Error| ContractError::StoredVersionInvalid {
+            stored_version.version.parse().map_err(|e: semver::Error| {
+                ContractError::StoredVersionInvalid {
                     version: stored_version.version.clone(),
                     msg: e.to_string(),
-                })?;
+                }
+            })?;
         let current_semver: semver::Version =
-            CONTRACT_VERSION
-                .parse()
-                .map_err(|e: semver::Error| ContractError::CurrentVersionInvalid {
+            CONTRACT_VERSION.parse().map_err(|e: semver::Error| {
+                ContractError::CurrentVersionInvalid {
                     version: CONTRACT_VERSION.to_string(),
                     msg: e.to_string(),
-                })?;
+                }
+            })?;
         if stored_semver > current_semver {
             return Err(ContractError::DowngradeRefused {
                 stored: stored_semver.to_string(),

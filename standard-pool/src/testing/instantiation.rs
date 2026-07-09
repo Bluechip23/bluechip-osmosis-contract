@@ -73,8 +73,13 @@ fn instantiate_rejects_non_factory_sender() {
         sender: MockApi::default().addr_make("attacker"),
         funds: vec![],
     };
-    let err =
-        instantiate(deps.as_mut(), mock_env(), info, standard_instantiate_msg(&addrs)).unwrap_err();
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        standard_instantiate_msg(&addrs),
+    )
+    .unwrap_err();
     assert!(matches!(err, ContractError::Unauthorized {}));
 }
 

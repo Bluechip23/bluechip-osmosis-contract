@@ -14,11 +14,14 @@ use crate::contract::execute;
 use crate::error::ContractError;
 use crate::msg::ExecuteMsg;
 
-fn seed(deps: &mut cosmwasm_std::OwnedDeps<
-    cosmwasm_std::testing::MockStorage,
-    cosmwasm_std::testing::MockApi,
-    cosmwasm_std::testing::MockQuerier,
->, user: &Addr) {
+fn seed(
+    deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::testing::MockStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    user: &Addr,
+) {
     execute(
         deps.as_mut(),
         mock_env(),
@@ -156,8 +159,7 @@ fn phase2_escrows_lp_funds_and_records_snapshot() {
     assert_eq!(snap.fee_reserve_0_at_drain, fees_before.fee_reserve_0);
     assert_eq!(snap.fee_reserve_1_at_drain, fees_before.fee_reserve_1);
     assert_eq!(
-        snap.total_liquidity_at_drain,
-        state_before.total_liquidity,
+        snap.total_liquidity_at_drain, state_before.total_liquidity,
         "snapshot must record total_liquidity for pro-rata claim math"
     );
     assert_eq!(snap.total_claimed_0, Uint128::zero());
@@ -249,10 +251,7 @@ fn drain_recipient_is_bluechip_wallet_not_factory() {
                     body
                 );
                 assert!(
-                    !body.contains(&format!(
-                        "\"recipient\":\"{}\"",
-                        addrs.factory.as_str()
-                    )),
+                    !body.contains(&format!("\"recipient\":\"{}\"", addrs.factory.as_str())),
                     "cw20 transfer must not target the factory contract"
                 );
             }

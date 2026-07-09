@@ -144,8 +144,7 @@ pub struct PendingMint {
     pub amount: Uint128,
 }
 
-pub const PENDING_MINT_REPLIES: Map<u64, PendingMint> =
-    Map::new("pending_mint_replies");
+pub const PENDING_MINT_REPLIES: Map<u64, PendingMint> = Map::new("pending_mint_replies");
 
 /// Per-user accumulator of distribution-mint amounts whose dispatch
 /// failed (e.g., the recipient is a contract that rejects CW20 receive,

@@ -19,8 +19,8 @@ fn test_pool_update_config_from_factory() {
     // Only factory can update
     let factory_info = message_info(&Addr::unchecked("factory_contract"), &[]);
     let update = PoolConfigUpdate {
-        lp_fee: Some(Decimal::permille(3)),   // 0.3% LP fee
-        min_commit_interval: Some(120),       // 2 minutes between commits
+        lp_fee: Some(Decimal::permille(3)), // 0.3% LP fee
+        min_commit_interval: Some(120),     // 2 minutes between commits
         ..Default::default()
     };
 
@@ -35,8 +35,8 @@ fn test_pool_update_config_from_factory() {
     assert!(res.messages.is_empty());
 
     let update_for_hacker = PoolConfigUpdate {
-        lp_fee: Some(Decimal::permille(3)),   // 0.3% LP fee
-        min_commit_interval: Some(120),       // 2 minutes between commits
+        lp_fee: Some(Decimal::permille(3)), // 0.3% LP fee
+        min_commit_interval: Some(120),     // 2 minutes between commits
         ..Default::default()
     };
 

@@ -17,10 +17,10 @@ use crate::error::ContractError;
 use crate::msg::{CreatorTokenInfo, TokenInstantiateMsg};
 use crate::pool_struct::{CreatePool, TempPoolCreation};
 use crate::state::{
-    canonical_pair_key, CreationStatus,
+    canonical_pair_key, CreationStatus, PoolCreationContext, PoolCreationState,
     COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS, FACTORYINSTANTIATEINFO, LAST_COMMIT_POOL_CREATE_AT,
     LAST_STANDARD_POOL_CREATE_AT, PAIRS, POOL_COUNTER, POOL_CREATION_CONTEXT,
-    PoolCreationContext, PoolCreationState, STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS,
+    STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS,
 };
 
 use super::super::{encode_reply_id, MINT_STANDARD_NFT, SET_TOKENS};
@@ -171,8 +171,7 @@ pub(crate) fn execute_create_creator_pool(
     // misleading "insufficient fee" error (when the actual block
     // is the cooldown, not the fee).
     let now = env.block.time;
-    let prior_stamp =
-        LAST_COMMIT_POOL_CREATE_AT.may_load(deps.storage, info.sender.clone())?;
+    let prior_stamp = LAST_COMMIT_POOL_CREATE_AT.may_load(deps.storage, info.sender.clone())?;
     if let Some(last) = prior_stamp {
         let next_allowed = last.plus_seconds(COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS);
         if now < next_allowed {
@@ -254,7 +253,10 @@ pub(crate) fn execute_create_creator_pool(
     if paid_bluechip < required_bluechip {
         return Err(ContractError::Std(StdError::generic_err(format!(
             "Insufficient commit-pool creation fee: required {} {}, paid {} {}",
-            required_bluechip, factory_cw20.bluechip_denom, paid_bluechip, factory_cw20.bluechip_denom
+            required_bluechip,
+            factory_cw20.bluechip_denom,
+            paid_bluechip,
+            factory_cw20.bluechip_denom
         ))));
     }
     let surplus = paid_bluechip.checked_sub(required_bluechip)?;
@@ -419,12 +421,14 @@ fn validate_standard_pool_token_info(
                 }
             }
             TokenType::CreatorToken { contract_addr } => {
-                deps.api.addr_validate(contract_addr.as_str()).map_err(|e| {
-                    ContractError::Std(StdError::generic_err(format!(
-                        "Standard pool: invalid CreatorToken address {}: {}",
-                        contract_addr, e
-                    )))
-                })?;
+                deps.api
+                    .addr_validate(contract_addr.as_str())
+                    .map_err(|e| {
+                        ContractError::Std(StdError::generic_err(format!(
+                            "Standard pool: invalid CreatorToken address {}: {}",
+                            contract_addr, e
+                        )))
+                    })?;
                 // Verify the address actually responds to a CW20 TokenInfo
                 // query. Catches typos pointing at random contracts and
                 // pre-instantiate addresses. The query is cheap and the
@@ -598,7 +602,10 @@ pub(crate) fn execute_create_standard_pool(
     if paid_bluechip < required_bluechip {
         return Err(ContractError::Std(StdError::generic_err(format!(
             "Insufficient creation fee: required {} {}, paid {} {}",
-            required_bluechip, factory_config.bluechip_denom, paid_bluechip, factory_config.bluechip_denom
+            required_bluechip,
+            factory_config.bluechip_denom,
+            paid_bluechip,
+            factory_config.bluechip_denom
         ))));
     }
 

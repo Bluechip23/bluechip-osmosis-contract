@@ -41,11 +41,16 @@ fn deposit(
 
 /// Directly seeds fee_growth_global + fee_reserve to simulate
 /// swap-accumulated fees.
-fn seed_fees(deps: &mut cosmwasm_std::OwnedDeps<
-    cosmwasm_std::testing::MockStorage,
-    cosmwasm_std::testing::MockApi,
-    cosmwasm_std::testing::MockQuerier,
->, growth: Decimal, reserve_0: Uint128, reserve_1: Uint128) {
+fn seed_fees(
+    deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::testing::MockStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    growth: Decimal,
+    reserve_0: Uint128,
+    reserve_1: Uint128,
+) {
     POOL_FEE_STATE
         .save(
             &mut deps.storage,
@@ -97,7 +102,9 @@ fn collect_fees_emits_transfers_and_debits_reserve() {
         _ => false,
     });
     let cw20_transfer = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == addrs.creator_token.as_str()
                 && String::from_utf8_lossy(msg.as_slice()).contains("transfer")
         }
@@ -216,7 +223,10 @@ fn standard_pool_rejects_dust_deposit() {
     .unwrap_err();
     match err {
         ContractError::DustStandardPoolDeposit { liquidity, minimum } => {
-            assert!(liquidity < minimum, "error should report sub-floor liquidity");
+            assert!(
+                liquidity < minimum,
+                "error should report sub-floor liquidity"
+            );
             assert_eq!(
                 minimum,
                 pool_core::liquidity_helpers::MIN_STANDARD_POOL_POSITION_LIQUIDITY,
@@ -273,12 +283,16 @@ fn collect_fees_on_zero_growth_returns_zero_transfers() {
     )
     .unwrap();
 
-    let transfer_msgs = res.messages.iter().filter(|sub| {
-        matches!(
-            sub.msg,
-            CosmosMsg::Bank(_) | CosmosMsg::Wasm(WasmMsg::Execute { .. })
-        )
-    }).count();
+    let transfer_msgs = res
+        .messages
+        .iter()
+        .filter(|sub| {
+            matches!(
+                sub.msg,
+                CosmosMsg::Bank(_) | CosmosMsg::Wasm(WasmMsg::Execute { .. })
+            )
+        })
+        .count();
     // build_fee_transfer_msgs skips zero amounts, so no transfer messages.
     assert_eq!(transfer_msgs, 0, "zero-growth collect emits no transfers");
 }

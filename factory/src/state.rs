@@ -32,8 +32,7 @@ pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config")
 // two halves out of sync. On any failure the whole tx reverts (every step
 // uses `SubMsg::reply_on_success`), so no retry/cleanup bookkeeping is
 // needed: a failed create leaves no trace in this map.
-pub const POOL_CREATION_CONTEXT: Map<u64, PoolCreationContext> =
-    Map::new("pool_creation_ctx_v3");
+pub const POOL_CREATION_CONTEXT: Map<u64, PoolCreationContext> = Map::new("pool_creation_ctx_v3");
 pub const PENDING_CONFIG: Item<PendingConfig> = Item::new("pending_config");
 pub const POOL_COUNTER: Item<u64> = Item::new("pool_counter");
 
@@ -87,8 +86,7 @@ pub const PENDING_POOL_CONFIG: Map<u64, PendingPoolConfig> = Map::new("pending_p
 // bloat the registry and gas-amplify any future per-pool storage scan.
 // Per-address (not global) so coordinated multi-address spam still has
 // to fund + sign from each address it rotates through.
-pub const LAST_COMMIT_POOL_CREATE_AT: Map<Addr, Timestamp> =
-    Map::new("last_commit_pool_create_at");
+pub const LAST_COMMIT_POOL_CREATE_AT: Map<Addr, Timestamp> = Map::new("last_commit_pool_create_at");
 
 /// Time-ordered secondary index over `LAST_COMMIT_POOL_CREATE_AT`,
 /// keyed by `(timestamp_secs, Addr)`. Exists so the permissionless
@@ -104,8 +102,7 @@ pub const LAST_COMMIT_POOL_CREATE_AT: Map<Addr, Timestamp> =
 /// from BOTH on each stale entry it processes. Both updates ride in
 /// the same tx as the primary save, so a failure reverts both maps
 /// atomically and they cannot drift.
-pub const COMMIT_POOL_CREATE_TS_INDEX: Map<(u64, Addr), ()> =
-    Map::new("commit_pool_create_ts_idx");
+pub const COMMIT_POOL_CREATE_TS_INDEX: Map<(u64, Addr), ()> = Map::new("commit_pool_create_ts_idx");
 
 /// Minimum seconds between consecutive `Create` calls from the same
 /// `info.sender`. 3600s = 1h. Reasonable for legitimate creator-pool
@@ -121,16 +118,14 @@ pub const COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS: u64 = 30;
 // commit-pool rate limit; defends against the same registry-bloat
 // shape. The flat native creation fee is the primary economic barrier;
 // the cooldown backstops deployments that disable the fee.
-pub const LAST_STANDARD_POOL_CREATE_AT: Map<Addr, Timestamp> =
-    Map::new("last_std_pool_create_at");
+pub const LAST_STANDARD_POOL_CREATE_AT: Map<Addr, Timestamp> = Map::new("last_std_pool_create_at");
 
 /// Time-ordered secondary index for `LAST_STANDARD_POOL_CREATE_AT`.
 /// Mirror of `COMMIT_POOL_CREATE_TS_INDEX`; same invariant — every
 /// write to the primary updates this index in the same tx; prune walks
 /// in ascending timestamp order with an early-exit on the first
 /// non-stale entry.
-pub const STANDARD_POOL_CREATE_TS_INDEX: Map<(u64, Addr), ()> =
-    Map::new("std_pool_create_ts_idx");
+pub const STANDARD_POOL_CREATE_TS_INDEX: Map<(u64, Addr), ()> = Map::new("std_pool_create_ts_idx");
 
 #[cfg(not(feature = "integration_short_timing"))]
 pub const STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS: u64 = 3600;
@@ -352,7 +347,11 @@ fn token_fingerprint(t: &TokenType) -> String {
 pub fn canonical_pair_key(pair: &[TokenType; 2]) -> (String, String) {
     let a = token_fingerprint(&pair[0]);
     let b = token_fingerprint(&pair[1]);
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// Atomically register a freshly created pool across all three registry

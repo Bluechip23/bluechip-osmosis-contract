@@ -54,12 +54,12 @@ pub fn resolve_live_bluechip_wallet(
     factory_addr: &Addr,
     snapshot_fallback: &Addr,
 ) -> Addr {
-    match deps.querier.query_wasm_smart::<
-        pool_factory_interfaces::BluechipWalletResponse,
-    >(
-        factory_addr.to_string(),
-        &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
-    ) {
+    match deps
+        .querier
+        .query_wasm_smart::<pool_factory_interfaces::BluechipWalletResponse>(
+            factory_addr.to_string(),
+            &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+        ) {
         Ok(resp) => resp.address,
         Err(_) => snapshot_fallback.clone(),
     }

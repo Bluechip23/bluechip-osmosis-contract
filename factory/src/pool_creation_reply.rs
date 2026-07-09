@@ -6,13 +6,16 @@ use crate::{
     pool_create_cleanup::{extract_contract_address, give_pool_ownership_cw20_and_nft},
     pool_struct::{CommitFeeInfo, PoolDetails},
     state::{
-        CreationStatus, FACTORYINSTANTIATEINFO, POOL_CREATION_CONTEXT, STANDARD_POOL_CREATION_CONTEXT,
+        CreationStatus, FACTORYINSTANTIATEINFO, POOL_CREATION_CONTEXT,
+        STANDARD_POOL_CREATION_CONTEXT,
     },
 };
 use cosmwasm_std::{
     to_json_binary, CosmosMsg, DepsMut, Env, Reply, Response, StdError, StdResult, SubMsg, WasmMsg,
 };
-use pool_factory_interfaces::{cw721_msgs::Cw721InstantiateMsg, PoolKind, StandardPoolInstantiateMsg};
+use pool_factory_interfaces::{
+    cw721_msgs::Cw721InstantiateMsg, PoolKind, StandardPoolInstantiateMsg,
+};
 
 /// CW721 NFT branding for liquidity-position NFTs minted on commit-pool
 /// creation. Hoisted to module scope so a deployment-specific re-skin
@@ -41,12 +44,13 @@ pub fn set_tokens(
     pool_id: u64,
 ) -> Result<Response, ContractError> {
     let reply_id = msg.id;
-    let result = msg.result.into_result().map_err(|e| {
-        ContractError::ReplyOnSuccessSawError {
+    let result = msg
+        .result
+        .into_result()
+        .map_err(|e| ContractError::ReplyOnSuccessSawError {
             id: reply_id,
             msg: format!("set_tokens: {}", e),
-        }
-    })?;
+        })?;
 
     let mut ctx = POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
     let token_address = extract_contract_address(&deps, &result)?;
@@ -89,12 +93,13 @@ pub fn mint_create_pool(
     pool_id: u64,
 ) -> Result<Response, ContractError> {
     let reply_id = msg.id;
-    let result = msg.result.into_result().map_err(|e| {
-        ContractError::ReplyOnSuccessSawError {
+    let result = msg
+        .result
+        .into_result()
+        .map_err(|e| ContractError::ReplyOnSuccessSawError {
             id: reply_id,
             msg: format!("mint_create_pool: {}", e),
-        }
-    })?;
+        })?;
 
     let mut ctx = POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
     let nft_address = extract_contract_address(&deps, &result)?;
@@ -106,12 +111,14 @@ pub fn mint_create_pool(
     POOL_CREATION_CONTEXT.save(deps.storage, pool_id, &ctx)?;
 
     let factory_config = FACTORYINSTANTIATEINFO.load(deps.storage)?;
-    let token_address = ctx.temp.creator_token_addr.clone().ok_or(
-        ContractError::ReplyMissingAddress {
-            step: "mint_create_pool",
-            kind: "token",
-        },
-    )?;
+    let token_address =
+        ctx.temp
+            .creator_token_addr
+            .clone()
+            .ok_or(ContractError::ReplyMissingAddress {
+                step: "mint_create_pool",
+                kind: "token",
+            })?;
 
     // Threshold-payout splits live on `FactoryInstantiate` so they
     // ride the standard 48h propose/apply flow. `validate()` is also
@@ -128,7 +135,9 @@ pub fn mint_create_pool(
     let mut updated_asset_infos = ctx.temp.temp_pool_info.pool_token_info.clone();
     for asset_info in updated_asset_infos.iter_mut() {
         if let TokenType::CreatorToken { contract_addr } = asset_info {
-            if contract_addr.as_str() == crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL {
+            if contract_addr.as_str()
+                == crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL
+            {
                 *contract_addr = token_address.clone();
             }
         }
@@ -175,28 +184,33 @@ pub fn finalize_pool(
     pool_id: u64,
 ) -> Result<Response, ContractError> {
     let reply_id = msg.id;
-    let result = msg.result.into_result().map_err(|e| {
-        ContractError::ReplyOnSuccessSawError {
+    let result = msg
+        .result
+        .into_result()
+        .map_err(|e| ContractError::ReplyOnSuccessSawError {
             id: reply_id,
             msg: format!("finalize_pool: {}", e),
-        }
-    })?;
+        })?;
 
     let ctx = POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
     let pool_address = extract_contract_address(&deps, &result)?;
 
-    let token_address = ctx.temp.creator_token_addr.clone().ok_or(
-        ContractError::ReplyMissingAddress {
-            step: "finalize_pool",
-            kind: "token",
-        },
-    )?;
-    let nft_address = ctx.temp.nft_addr.clone().ok_or(
-        ContractError::ReplyMissingAddress {
+    let token_address =
+        ctx.temp
+            .creator_token_addr
+            .clone()
+            .ok_or(ContractError::ReplyMissingAddress {
+                step: "finalize_pool",
+                kind: "token",
+            })?;
+    let nft_address = ctx
+        .temp
+        .nft_addr
+        .clone()
+        .ok_or(ContractError::ReplyMissingAddress {
             step: "finalize_pool",
             kind: "nft",
-        },
-    )?;
+        })?;
 
     // Rebuild `pool_token_info` from the source of truth for the
     // creator-token address, which is `ctx.temp.creator_token_addr`
@@ -294,12 +308,13 @@ pub fn mint_standard_nft(
     pool_id: u64,
 ) -> Result<Response, ContractError> {
     let reply_id = msg.id;
-    let result = msg.result.into_result().map_err(|e| {
-        ContractError::ReplyOnSuccessSawError {
+    let result = msg
+        .result
+        .into_result()
+        .map_err(|e| ContractError::ReplyOnSuccessSawError {
             id: reply_id,
             msg: format!("mint_standard_nft: {}", e),
-        }
-    })?;
+        })?;
 
     let mut ctx = STANDARD_POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
     let nft_address = extract_contract_address(&deps, &result)?;
@@ -355,21 +370,23 @@ pub fn finalize_standard_pool(
     pool_id: u64,
 ) -> Result<Response, ContractError> {
     let reply_id = msg.id;
-    let result = msg.result.into_result().map_err(|e| {
-        ContractError::ReplyOnSuccessSawError {
+    let result = msg
+        .result
+        .into_result()
+        .map_err(|e| ContractError::ReplyOnSuccessSawError {
             id: reply_id,
             msg: format!("finalize_standard_pool: {}", e),
-        }
-    })?;
+        })?;
 
     let ctx = STANDARD_POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
     let pool_address = extract_contract_address(&deps, &result)?;
-    let nft_address = ctx.nft_addr.clone().ok_or(
-        ContractError::ReplyMissingAddress {
+    let nft_address = ctx
+        .nft_addr
+        .clone()
+        .ok_or(ContractError::ReplyMissingAddress {
             step: "finalize_standard_pool",
             kind: "nft",
-        },
-    )?;
+        })?;
 
     let pool_details = PoolDetails {
         pool_id,
@@ -441,7 +458,10 @@ fn build_pool_accept_nft_ownership_call(pool_addr: &cosmwasm_std::Addr) -> StdRe
 /// CW20 minter handoff, which standard pools don't need; rather than
 /// branching that helper, we keep the two flows clean with separate
 /// builders.
-fn give_pool_nft_ownership(nft_addr: &cosmwasm_std::Addr, pool_addr: &cosmwasm_std::Addr) -> StdResult<CosmosMsg> {
+fn give_pool_nft_ownership(
+    nft_addr: &cosmwasm_std::Addr,
+    pool_addr: &cosmwasm_std::Addr,
+) -> StdResult<CosmosMsg> {
     use pool_factory_interfaces::cw721_msgs::{Action, Cw721ExecuteMsg};
     Ok(WasmMsg::Execute {
         contract_addr: nft_addr.to_string(),

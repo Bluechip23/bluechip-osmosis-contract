@@ -89,7 +89,9 @@ fn remove_all_liquidity_drains_position() {
         _ => false,
     });
     let cw20_transfer = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == addrs.creator_token.as_str()
                 && String::from_utf8_lossy(msg.as_slice()).contains("transfer")
         }

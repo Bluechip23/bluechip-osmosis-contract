@@ -69,12 +69,7 @@ pub fn instantiate(
 /// No-op: the router only ever *queries* the factory. Present because
 /// `ContractWrapper` requires an execute entry point.
 #[entry_point]
-pub fn execute(
-    _deps: DepsMut,
-    _env: Env,
-    _info: MessageInfo,
-    _msg: Empty,
-) -> StdResult<Response> {
+pub fn execute(_deps: DepsMut, _env: Env, _info: MessageInfo, _msg: Empty) -> StdResult<Response> {
     Ok(Response::new())
 }
 
@@ -85,13 +80,14 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         // exactly the shape the real factory returns, so the router's
         // `Option<RegisteredPoolResponse>` decode is identical here.
         QueryMsg::PoolByAddress { pool_addr } => {
-            let resp = POOLS
-                .may_load(deps.storage, &pool_addr)?
-                .map(|(pool_token_info, pool_kind)| RegisteredPoolResponse {
-                    pool_id: 0,
-                    pool_token_info,
-                    pool_kind,
-                });
+            let resp =
+                POOLS
+                    .may_load(deps.storage, &pool_addr)?
+                    .map(|(pool_token_info, pool_kind)| RegisteredPoolResponse {
+                        pool_id: 0,
+                        pool_token_info,
+                        pool_kind,
+                    });
             to_json_binary(&resp)
         }
     }

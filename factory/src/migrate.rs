@@ -55,7 +55,10 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
     for pool_id in pool_ids {
         let details = crate::state::POOLS_BY_ID.load(deps.storage, pool_id)?;
         let key = crate::state::canonical_pair_key(&details.pool_token_info);
-        if crate::state::PAIRS.may_load(deps.storage, key.clone())?.is_none() {
+        if crate::state::PAIRS
+            .may_load(deps.storage, key.clone())?
+            .is_none()
+        {
             crate::state::PAIRS.save(deps.storage, key, &pool_id)?;
             backfilled += 1;
         } else {
@@ -81,7 +84,10 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
         .add_attribute("from", stored_version.version)
         .add_attribute("to", CONTRACT_VERSION)
         .add_attribute("pairs_backfilled", backfilled.to_string())
-        .add_attribute("legacy_duplicate_pairs_skipped", legacy_duplicates.to_string())
+        .add_attribute(
+            "legacy_duplicate_pairs_skipped",
+            legacy_duplicates.to_string(),
+        )
         .add_attribute(
             "pool_id_by_address_backfilled",
             addr_index_backfilled.to_string(),

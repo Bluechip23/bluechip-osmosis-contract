@@ -25,10 +25,9 @@ use crate::{
     liquidity_helpers::calculate_fee_size_multiplier,
     msg::CommitFeeInfo,
     state::{
-        CommitLimitInfo, PoolFeeState, PoolInfo, PoolSpecs, PoolState,
-        ThresholdPayoutAmounts, COMMITFEEINFO, COMMIT_LIMIT_INFO, LIQUIDITY_POSITIONS,
-        NATIVE_RAISED_FROM_COMMIT, POOL_INFO, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
-        THRESHOLD_PROCESSING,
+        CommitLimitInfo, PoolFeeState, PoolInfo, PoolSpecs, PoolState, ThresholdPayoutAmounts,
+        COMMITFEEINFO, COMMIT_LIMIT_INFO, LIQUIDITY_POSITIONS, NATIVE_RAISED_FROM_COMMIT,
+        POOL_INFO, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
     },
 };
 const OPTIMAL_LIQUIDITY: u128 = 1_000_000;
@@ -369,8 +368,16 @@ fn test_remove_all_liquidity() {
     let pos = LIQUIDITY_POSITIONS
         .load(&deps.storage, "1")
         .expect("position row must persist after full removal");
-    assert_eq!(pos.liquidity, Uint128::zero(), "non-first-depositor exit drops to zero");
-    assert_eq!(pos.locked_liquidity, Uint128::zero(), "no lock on non-first-depositor positions");
+    assert_eq!(
+        pos.liquidity,
+        Uint128::zero(),
+        "non-first-depositor exit drops to zero"
+    );
+    assert_eq!(
+        pos.locked_liquidity,
+        Uint128::zero(),
+        "no lock on non-first-depositor positions"
+    );
     assert_eq!(pos.unclaimed_fees_0, Uint128::zero());
     assert_eq!(pos.unclaimed_fees_1, Uint128::zero());
     // Verify pool liquidity decreased back to initial amount
@@ -1005,7 +1012,8 @@ fn test_multiple_positions_independent_fee_tracking() {
 
     // User1 collects fees - should get fees from 0 to 200
     let info1 = message_info(&Addr::unchecked("user1"), &[]);
-    let res1 = execute_collect_fees(deps.as_mut(), env.clone(), info1, "1".to_string(), None).unwrap();
+    let res1 =
+        execute_collect_fees(deps.as_mut(), env.clone(), info1, "1".to_string(), None).unwrap();
     let fees_user1 = Uint128::from_str(
         &res1
             .attributes

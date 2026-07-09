@@ -109,7 +109,6 @@ pub fn register_test_pool_addr(
 fn proper_initialization() {
     let mut deps = mock_dependencies(&[]);
 
-
     let the_admin = addr0000();
     let msg = FactoryInstantiate {
         factory_admin_address: the_admin.clone(),
@@ -158,7 +157,6 @@ fn proper_initialization() {
 fn create_pair() {
     let mut deps = mock_dependencies(&[]);
 
-
     let the_admin = addr0000();
     let msg = FactoryInstantiate {
         factory_admin_address: the_admin.clone(),
@@ -200,7 +198,9 @@ fn create_pair() {
         env,
         info,
         ExecuteMsg::Create {
-            pool_msg: CreatePool { pool_token_info: pool_token_info.clone() },
+            pool_msg: CreatePool {
+                pool_token_info: pool_token_info.clone(),
+            },
             token_info: CreatorTokenInfo {
                 name: "Test Token".to_string(),
                 symbol: "TEST".to_string(),
@@ -285,7 +285,6 @@ fn create_pair_fee_disabled_rejects_attached_funds() {
 fn test_create_pair_with_custom_params() {
     let mut deps = mock_dependencies(&[]);
 
-
     let msg = FactoryInstantiate {
         factory_admin_address: admin_addr(),
         cw721_nft_contract_id: 58,
@@ -314,14 +313,16 @@ fn test_create_pair_with_custom_params() {
     // of truth. This test now exercises the simplified shape.)
 
     let create_msg = ExecuteMsg::Create {
-        pool_msg: CreatePool { pool_token_info: [
+        pool_msg: CreatePool {
+            pool_token_info: [
                 TokenType::Native {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
                     contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
                 },
-            ] },
+            ],
+        },
         token_info: CreatorTokenInfo {
             name: "Custom Token".to_string(),
             symbol: "CUSTOM".to_string(),
@@ -344,14 +345,16 @@ fn test_create_pair_with_custom_params() {
 
 fn create_pool_msg(name: &str) -> ExecuteMsg {
     ExecuteMsg::Create {
-        pool_msg: CreatePool { pool_token_info: [
+        pool_msg: CreatePool {
+            pool_token_info: [
                 TokenType::Native {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
                     contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
                 },
-            ] },
+            ],
+        },
         token_info: CreatorTokenInfo {
             name: name.to_string(),
             // Uppercase so the symbol passes factory validation (A-Z, 0-9 only).
@@ -422,7 +425,6 @@ pub fn create_instantiate_reply(id: u64, contract_addr: &str) -> Reply {
 fn test_multiple_pool_creation() {
     let mut deps = mock_dependencies(&[]);
 
-
     let msg = create_default_instantiate_msg();
     let env = mock_env();
     let info = message_info(&admin_addr(), &[]);
@@ -492,7 +494,6 @@ fn test_multiple_pool_creation() {
 fn test_complete_pool_creation_flow() {
     let mut deps = mock_dependencies(&[]);
 
-
     let msg = FactoryInstantiate {
         factory_admin_address: admin_addr(),
         cw721_nft_contract_id: 58,
@@ -516,14 +517,16 @@ fn test_complete_pool_creation_flow() {
     instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
 
     // Create the pool message
-    let pool_msg = CreatePool { pool_token_info: [
+    let pool_msg = CreatePool {
+        pool_token_info: [
             TokenType::Native {
                 denom: "ubluechip".to_string(),
             },
             TokenType::CreatorToken {
                 contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
             },
-        ] };
+        ],
+    };
 
     let create_msg = ExecuteMsg::Create {
         pool_msg: pool_msg.clone(),
@@ -669,7 +672,6 @@ fn test_config() {
 fn test_reply_handling() {
     let mut deps = mock_dependencies(&[]);
 
-
     let the_admin = addr0000();
     let msg = FactoryInstantiate {
         factory_admin_address: the_admin.clone(),
@@ -697,14 +699,16 @@ fn test_reply_handling() {
     let pool_id = 1u64;
 
     // Create the pool message
-    let pool_msg = CreatePool { pool_token_info: [
+    let pool_msg = CreatePool {
+        pool_token_info: [
             TokenType::Native {
                 denom: "ubluechip".to_string(),
             },
             TokenType::CreatorToken {
                 contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"), // Use placeholder
             },
-        ] };
+        ],
+    };
 
     let ctx = PoolCreationContext {
         temp: TempPoolCreation {
@@ -1037,10 +1041,10 @@ fn test_validate_rejects_wrong_decimals() {
 fn test_validate_name_length_boundaries() {
     // Name must be 3..=50 inclusive.
     let cases: &[(usize, bool)] = &[
-        (0, false),  // empty
+        (0, false), // empty
         (1, false),
-        (2, false),  // just below min
-        (3, true),   // exactly min
+        (2, false), // just below min
+        (3, true),  // exactly min
         (4, true),
         (25, true),
         (49, true),
@@ -1067,11 +1071,11 @@ fn test_validate_name_rejects_non_ascii() {
     // Non-ASCII should be rejected — common spoofing vector (Cyrillic
     // lookalikes, fullwidth chars, etc.).
     let bad_names = [
-        "Nameе",     // trailing Cyrillic 'e'
-        "名前テスト",    // CJK
-        "Pool🚀",    // emoji
-        "Café",      // accented Latin
-        "Ｔｅｓｔ",    // fullwidth ASCII
+        "Nameе",      // trailing Cyrillic 'e'
+        "名前テスト", // CJK
+        "Pool🚀",     // emoji
+        "Café",       // accented Latin
+        "Ｔｅｓｔ",   // fullwidth ASCII
     ];
     for name in bad_names {
         let mut info = valid_token_info();
@@ -1205,7 +1209,15 @@ fn test_validate_symbol_rejects_non_ascii() {
 
 #[test]
 fn test_validate_symbol_accepts_uppercase_and_digits() {
-    let good_symbols = ["ABC", "USDC", "BTC", "ETH2", "USD1", "AAA123", "AAAAAAAAAAAA"];
+    let good_symbols = [
+        "ABC",
+        "USDC",
+        "BTC",
+        "ETH2",
+        "USD1",
+        "AAA123",
+        "AAAAAAAAAAAA",
+    ];
     for symbol in good_symbols {
         let mut info = valid_token_info();
         info.symbol = symbol.to_string();
@@ -1345,7 +1357,6 @@ mod validate_pool_token_info_tests {
     }
 }
 
-
 #[test]
 fn create_pair_sets_marketing_admin_to_creator() {
     let mut deps = mock_dependencies(&[]);
@@ -1368,7 +1379,13 @@ fn create_pair_sets_marketing_admin_to_creator() {
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
-    instantiate(deps.as_mut(), mock_env(), message_info(&the_admin, &[]), msg).unwrap();
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&the_admin, &[]),
+        msg,
+    )
+    .unwrap();
 
     let creator = make_addr("creator0001");
     let res = execute(
@@ -1404,7 +1421,9 @@ fn create_pair_sets_marketing_admin_to_creator() {
         .iter()
         .find_map(|sub| match &sub.msg {
             cosmwasm_std::CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Instantiate {
-                code_id, msg, ..
+                code_id,
+                msg,
+                ..
             }) if *code_id == 10 => {
                 Some(cosmwasm_std::from_json::<crate::msg::TokenInstantiateMsg>(msg).unwrap())
             }

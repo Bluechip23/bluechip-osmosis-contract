@@ -302,10 +302,9 @@ pub fn trigger_threshold_payout(
                 creator: fee_info.creator_wallet_address.clone(),
                 bluechip_amount: excess_bluechip,
                 token_amount: excess_creator_tokens,
-                unlock_time: env
-                    .block
-                    .time
-                    .plus_seconds(commit_config.creator_excess_liquidity_lock_days * SECONDS_PER_DAY),
+                unlock_time: env.block.time.plus_seconds(
+                    commit_config.creator_excess_liquidity_lock_days * SECONDS_PER_DAY,
+                ),
                 excess_nft_id: None,
             },
         )?;

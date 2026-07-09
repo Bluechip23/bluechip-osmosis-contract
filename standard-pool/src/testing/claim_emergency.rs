@@ -173,9 +173,18 @@ fn claim_emergency_share_happy_path_sends_pro_rata_and_bumps_snapshot() {
     // Snapshot tally bumped to exactly the drained-side totals (sole LP
     // owns 100% of total_liquidity_at_drain).
     let post = EMERGENCY_DRAIN_SNAPSHOT.load(&deps.storage).unwrap();
-    assert_eq!(post.total_claimed_0, pre.reserve0_at_drain + pre.fee_reserve_0_at_drain);
-    assert_eq!(post.total_claimed_1, pre.reserve1_at_drain + pre.fee_reserve_1_at_drain);
-    assert!(!post.residual_swept, "single claim must not flip the sweep flag");
+    assert_eq!(
+        post.total_claimed_0,
+        pre.reserve0_at_drain + pre.fee_reserve_0_at_drain
+    );
+    assert_eq!(
+        post.total_claimed_1,
+        pre.reserve1_at_drain + pre.fee_reserve_1_at_drain
+    );
+    assert!(
+        !post.residual_swept,
+        "single claim must not flip the sweep flag"
+    );
 
     // Outgoing transfers: a Bank Send for the native side, a CW20
     // Transfer for the creator-token side, both addressed to the
@@ -183,14 +192,21 @@ fn claim_emergency_share_happy_path_sends_pro_rata_and_bumps_snapshot() {
     let bank_to_owner_native = res.messages.iter().any(|sub| match &sub.msg {
         CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
             to_address == addrs.pool_owner.as_str()
-                && amount.iter().any(|c| c.denom == BLUECHIP_DENOM && !c.amount.is_zero())
+                && amount
+                    .iter()
+                    .any(|c| c.denom == BLUECHIP_DENOM && !c.amount.is_zero())
         }
         _ => false,
     });
-    assert!(bank_to_owner_native, "expected native pro-rata bank send to claimant");
+    assert!(
+        bank_to_owner_native,
+        "expected native pro-rata bank send to claimant"
+    );
 
     let cw20_to_owner = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == &addrs.creator_token.to_string()
                 && String::from_utf8_lossy(msg.as_slice()).contains(addrs.pool_owner.as_str())
         }
@@ -382,7 +398,10 @@ fn sweep_post_dormancy_sends_residual_to_wallet_and_flips_flag() {
     .unwrap();
 
     let post = EMERGENCY_DRAIN_SNAPSHOT.load(&deps.storage).unwrap();
-    assert!(post.residual_swept, "sweep must flip the residual_swept flag");
+    assert!(
+        post.residual_swept,
+        "sweep must flip the residual_swept flag"
+    );
 
     // Every outgoing transfer must address the bluechip wallet (the
     // factory's live-queried wallet — rewired by the fixture).
@@ -393,14 +412,22 @@ fn sweep_post_dormancy_sends_residual_to_wallet_and_flips_flag() {
         _ => false,
     });
     let cw20_to_wallet = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute { contract_addr, msg, .. }) => {
+        CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) => {
             contract_addr == &addrs.creator_token.to_string()
                 && String::from_utf8_lossy(msg.as_slice()).contains(addrs.bluechip_wallet.as_str())
         }
         _ => false,
     });
-    assert!(bank_to_wallet, "sweep must Bank-send the native residual to bluechip wallet");
-    assert!(cw20_to_wallet, "sweep must CW20-transfer the creator-token residual to bluechip wallet");
+    assert!(
+        bank_to_wallet,
+        "sweep must Bank-send the native residual to bluechip wallet"
+    );
+    assert!(
+        cw20_to_wallet,
+        "sweep must CW20-transfer the creator-token residual to bluechip wallet"
+    );
 }
 
 #[test]

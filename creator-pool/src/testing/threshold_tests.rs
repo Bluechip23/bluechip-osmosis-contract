@@ -21,17 +21,16 @@ use cosmwasm_std::{
     testing::{message_info, mock_dependencies, mock_env},
     to_json_binary, Addr, ContractResult, CosmosMsg, SystemResult, Uint128, WasmMsg,
 };
-use pool_factory_interfaces::ConversionResponse;
 
 pub fn setup_pool_with_excess_config(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>) {
     setup_pool_storage(deps);
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
+        commit_amount_for_threshold: Uint128::new(25_000_000_000),
         max_bluechip_lock_per_pool: Uint128::new(100_000),
         creator_excess_liquidity_lock_days: 14,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
+        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
     };
 
     COMMIT_LIMIT_INFO
@@ -79,12 +78,12 @@ fn test_threshold_with_excess_creates_position() {
 
     deps.querier.update_wasm(|query| match query {
         WasmQuery::Smart { .. } => {
-            let response = ConversionResponse {
-                amount: Uint128::new(1_000_000_000),
-                rate_used: Uint128::new(1_000_000_000),
-                timestamp: 1571797419u64, // matches mock_env block time
-            };
-            SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
+            // The commit flow no longer performs any oracle conversion;
+            // deny all cross-contract queries (fail-soft callers fall back).
+            SystemResult::Err(SystemError::InvalidRequest {
+                error: "no cross-contract queries expected".to_string(),
+                request: Binary::default(),
+            })
         }
         _ => SystemResult::Err(SystemError::InvalidRequest {
             error: "Unknown query".to_string(),
@@ -167,7 +166,9 @@ fn test_claim_excess_before_unlock_fails() {
         .unwrap();
 
     let info = message_info(&Addr::unchecked("creator"), &[]);
-    let msg = ExecuteMsg::ClaimCreatorExcessLiquidity { transaction_deadline: None };
+    let msg = ExecuteMsg::ClaimCreatorExcessLiquidity {
+        transaction_deadline: None,
+    };
 
     let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
 
@@ -208,7 +209,9 @@ fn test_claim_excess_after_unlock_succeeds() {
         .unwrap();
 
     let info = message_info(&Addr::unchecked("creator"), &[]);
-    let msg = ExecuteMsg::ClaimCreatorExcessLiquidity { transaction_deadline: None };
+    let msg = ExecuteMsg::ClaimCreatorExcessLiquidity {
+        transaction_deadline: None,
+    };
 
     let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
     // Should have 2 messages: bank send for bluechip + CW20 transfer for creator tokens
@@ -260,7 +263,9 @@ fn test_claim_excess_wrong_user_fails() {
         .unwrap();
 
     let info = message_info(&Addr::unchecked("hacker"), &[]);
-    let msg = ExecuteMsg::ClaimCreatorExcessLiquidity { transaction_deadline: None };
+    let msg = ExecuteMsg::ClaimCreatorExcessLiquidity {
+        transaction_deadline: None,
+    };
 
     let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
     assert!(matches!(err, ContractError::Unauthorized {}));
@@ -293,15 +298,12 @@ fn test_no_excess_when_under_cap() {
 
     deps.querier.update_wasm(move |query| match query {
         WasmQuery::Smart { msg: _, .. } => {
-            // Return $5 USD regardless of input so the pre-threshold
-            // minimum commit check ($5) passes. Tests below don't
-            // depend on the exact USD_RAISED delta.
-            let response = ConversionResponse {
-                amount: Uint128::new(5_000_000),
-                rate_used: Uint128::new(1_000_000),
-                timestamp: 1571797419u64, // matches mock_env block time
-            };
-            SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
+            // The commit flow no longer performs any oracle conversion;
+            // deny all cross-contract queries (fail-soft callers fall back).
+            SystemResult::Err(SystemError::InvalidRequest {
+                error: "no cross-contract queries expected".to_string(),
+                request: Binary::default(),
+            })
         }
         _ => SystemResult::Err(SystemError::InvalidRequest {
             error: "Unknown query".to_string(),
@@ -481,7 +483,7 @@ fn test_commit_threshold_overshoot_split() {
     assert_eq!(
         attrs
             .iter()
-            .find(|a| a.key == "threshold_amount_usd")
+            .find(|a| a.key == "threshold_amount_bluechip")
             .unwrap()
             .value,
         "1000000"
@@ -489,10 +491,10 @@ fn test_commit_threshold_overshoot_split() {
     assert_eq!(
         attrs
             .iter()
-            .find(|a| a.key == "swap_amount_usd")
+            .find(|a| a.key == "total_amount_bluechip")
             .unwrap()
             .value,
-        "4000000"
+        "5000000"
     );
     let bluechip_excess = attrs
         .iter()
@@ -781,7 +783,8 @@ fn test_distribution_timeout_triggers_error() {
     // need to call RecoverPoolStuckStates::StuckDistribution.
     use crate::query::query_distribution_state;
     let mut env_for_query = mock_env();
-    env_for_query.block.time = old_time.plus_seconds(crate::state::DISTRIBUTION_STALL_TIMEOUT_SECONDS + 1);
+    env_for_query.block.time =
+        old_time.plus_seconds(crate::state::DISTRIBUTION_STALL_TIMEOUT_SECONDS + 1);
     let response = query_distribution_state(deps.as_ref(), &env_for_query)
         .unwrap()
         .expect("DISTRIBUTION_STATE should still exist (the failed tx reverted any state changes)");
@@ -896,12 +899,12 @@ fn test_accumulated_bluechips_respected() {
     // Mock oracle price at /bin/bash.50 (500,000 micros)
     deps.querier.update_wasm(|query| match query {
         WasmQuery::Smart { .. } => {
-            let response = ConversionResponse {
-                amount: Uint128::new(2_000_000_000), // 000 = 2000 bluechips
-                rate_used: Uint128::new(500_000),    // /bin/bash.50
-                timestamp: 1571797419u64,            // matches mock_env block time
-            };
-            SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
+            // The commit flow no longer performs any oracle conversion;
+            // deny all cross-contract queries (fail-soft callers fall back).
+            SystemResult::Err(SystemError::InvalidRequest {
+                error: "no cross-contract queries expected".to_string(),
+                request: Binary::default(),
+            })
         }
         _ => SystemResult::Err(SystemError::InvalidRequest {
             error: "Unknown query".to_string(),
@@ -910,10 +913,11 @@ fn test_accumulated_bluechips_respected() {
     });
 
     let env = mock_env();
-    // Commit remaining ,000 (requires 2,000 bluechips at /bin/bash.50)
+    // Commit exactly the remaining 1,000 native units to the 25k
+    // threshold (native-denominated: 25_000e6 - 24_000e6 = 1_000e6).
     let info = message_info(
         &Addr::unchecked("final_committer"),
-        &[coin(2_000_000_000, "ubluechip")],
+        &[coin(1_000_000_000, "ubluechip")],
     );
 
     let msg = ExecuteMsg::Commit {
@@ -921,7 +925,7 @@ fn test_accumulated_bluechips_respected() {
             info: TokenType::Native {
                 denom: "ubluechip".to_string(),
             },
-            amount: Uint128::new(2_000_000_000),
+            amount: Uint128::new(1_000_000_000),
         },
         transaction_deadline: None,
         belief_price: None,
@@ -1170,15 +1174,12 @@ fn test_unpaused_pool_accepts_commit_after_previously_paused() {
     // Needs oracle query; wire the conversion mock.
     deps.querier.update_wasm(move |query| match query {
         WasmQuery::Smart { msg: _, .. } => {
-            // Return $5 USD regardless of input so the pre-threshold
-            // minimum commit check ($5) passes. Tests below don't
-            // depend on the exact USD_RAISED delta.
-            let response = ConversionResponse {
-                amount: Uint128::new(5_000_000),
-                rate_used: Uint128::new(1_000_000),
-                timestamp: 1571797419u64, // matches mock_env block time
-            };
-            SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
+            // The commit flow no longer performs any oracle conversion;
+            // deny all cross-contract queries (fail-soft callers fall back).
+            SystemResult::Err(SystemError::InvalidRequest {
+                error: "no cross-contract queries expected".to_string(),
+                request: Binary::default(),
+            })
         }
         _ => SystemResult::Err(SystemError::InvalidRequest {
             error: "Unknown query".to_string(),
@@ -1214,7 +1215,7 @@ fn test_commit_rejects_below_pre_threshold_floor() {
     with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
     // One micro under the default pre-threshold floor ($5.000000).
-    let pre_floor = crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD;
+    let pre_floor = crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD;
     let just_below = pre_floor.checked_sub(Uint128::one()).unwrap();
 
     let info = message_info(
@@ -1259,7 +1260,7 @@ fn test_commit_rejects_below_post_threshold_floor() {
     IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
     with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
-    let post_floor = crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD;
+    let post_floor = crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD;
     let just_below = post_floor.checked_sub(Uint128::one()).unwrap();
 
     let info = message_info(
@@ -1368,8 +1369,7 @@ mod native_raised_net_semantics_tests {
             post
         );
         assert_ne!(
-            post,
-            commit_amount,
+            post, commit_amount,
             "regression guard: NATIVE_RAISED must NOT equal the gross asset.amount"
         );
     }
@@ -1494,8 +1494,8 @@ mod native_raised_net_semantics_tests {
             max_spread: None,
         };
 
-        let res = execute(deps.as_mut(), env, info, msg)
-            .expect("threshold-crossing commit must succeed");
+        let res =
+            execute(deps.as_mut(), env, info, msg).expect("threshold-crossing commit must succeed");
 
         // Verify we landed on threshold_crossing branch.
         let phase = res
@@ -1630,8 +1630,8 @@ mod native_raised_net_semantics_tests {
         use crate::commit::threshold_crossing::process_threshold_hit_exact;
         use crate::msg::CommitFeeInfo;
         use crate::state::{
-            CommitLimitInfo, IS_THRESHOLD_HIT, PoolAnalytics, PoolInfo, POOL_FEE_STATE,
-            POOL_INFO, POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS,
+            CommitLimitInfo, PoolAnalytics, PoolInfo, IS_THRESHOLD_HIT, POOL_FEE_STATE, POOL_INFO,
+            POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS,
         };
 
         let mut deps = mock_dependencies();
@@ -1663,7 +1663,7 @@ mod native_raised_net_semantics_tests {
             },
             Uint128::new(1_000_000),
             Uint128::new(5_000_000),
-            commit_config.commit_amount_for_threshold_usd,
+            commit_config.commit_amount_for_threshold,
             &mut pool_state,
             &mut pool_fee_state,
             &pool_info,
@@ -1763,7 +1763,10 @@ mod native_raised_net_semantics_tests {
         // setup_pool_storage) or set explicitly to false — either way
         // the entry gate passes.
         assert_eq!(
-            IS_THRESHOLD_HIT.may_load(&deps.storage).unwrap().unwrap_or(false),
+            IS_THRESHOLD_HIT
+                .may_load(&deps.storage)
+                .unwrap()
+                .unwrap_or(false),
             false,
             "pre-trigger: flag must be false"
         );
@@ -1815,7 +1818,7 @@ mod crossed_at_snapshot_tests {
     use crate::commit::threshold_payout::trigger_threshold_payout;
     use crate::msg::CommitFeeInfo;
     use crate::state::{
-        CommitLimitInfo, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, PoolInfo, POOL_FEE_STATE,
+        CommitLimitInfo, PoolInfo, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_FEE_STATE,
         POOL_INFO, POOL_STATE, THRESHOLD_CROSSED_AT, THRESHOLD_PAYOUT_AMOUNTS,
     };
 

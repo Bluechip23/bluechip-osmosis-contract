@@ -13,8 +13,8 @@
 use cosmwasm_std::{to_json_binary, Decimal, Deps, QueryRequest, StdError, Uint128, WasmQuery};
 use pool_factory_interfaces::asset::TokenInfo;
 use pool_factory_interfaces::routing::{
-    FactoryRouteQueryMsg, PoolSwapQueryMsg, RouterPoolCommitStatus,
-    RouterSwapSimulationResponse, SwapOperation,
+    FactoryRouteQueryMsg, PoolSwapQueryMsg, RouterPoolCommitStatus, RouterSwapSimulationResponse,
+    SwapOperation,
 };
 use pool_factory_interfaces::{PoolKind, RegisteredPoolResponse};
 

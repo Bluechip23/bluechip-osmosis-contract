@@ -18,8 +18,8 @@ use crate::asset::TokenInfo;
 use crate::error::ContractError;
 use crate::generic_helpers::{update_commit_info, update_pool_fee_growth};
 use crate::state::{
-    PoolAnalytics, PoolFeeState, PoolInfo, PoolSpecs, PoolState, MINIMUM_LIQUIDITY,
-    POOL_FEE_STATE, POOL_PAUSED, POOL_STATE, POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK,
+    PoolAnalytics, PoolFeeState, PoolInfo, PoolSpecs, PoolState, MINIMUM_LIQUIDITY, POOL_FEE_STATE,
+    POOL_PAUSED, POOL_STATE, POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK,
 };
 use crate::swap_helper::{assert_max_spread, compute_swap, update_price_accumulator};
 
@@ -71,11 +71,9 @@ pub(super) fn process_post_threshold_commit(
     // Mirrors the gate in pool_core::swap::execute_simple_swap so
     // commits and simple swaps face the same per-tx cap during the
     // ramp window.
-    if let Some(cap) = pool_core::state::post_threshold_swap_cap(
-        deps.storage,
-        env.block.height,
-        offer_pool,
-    )? {
+    if let Some(cap) =
+        pool_core::state::post_threshold_swap_cap(deps.storage, env.block.height, offer_pool)?
+    {
         if swap_amount > cap {
             return Err(ContractError::PostThresholdSwapCapExceeded {
                 offer: swap_amount,

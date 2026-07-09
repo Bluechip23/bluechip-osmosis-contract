@@ -16,8 +16,10 @@
 
 use crate::asset::{TokenInfo, TokenInfoPoolExt, TokenType};
 use crate::error::ContractError;
-use crate::generic::{check_rate_limit, decimal2decimal256, enforce_transaction_deadline,
-    update_pool_fee_growth, with_reentrancy_guard};
+use crate::generic::{
+    check_rate_limit, decimal2decimal256, enforce_transaction_deadline, update_pool_fee_growth,
+    with_reentrancy_guard,
+};
 use crate::msg::Cw20HookMsg;
 use crate::state::{
     PoolCtx, PoolInfo, PoolState, CREATOR_FEE_POT, IS_THRESHOLD_HIT, MINIMUM_LIQUIDITY,
@@ -138,12 +140,8 @@ pub fn update_price_accumulator(
             .map_err(ContractError::from)?
             .checked_div(r1)
             .map_err(|_| ContractError::DivideByZero)?;
-        let price0_increment: Uint128 = price0_increment_u256
-            .try_into()
-            .unwrap_or(Uint128::MAX);
-        let price1_increment: Uint128 = price1_increment_u256
-            .try_into()
-            .unwrap_or(Uint128::MAX);
+        let price0_increment: Uint128 = price0_increment_u256.try_into().unwrap_or(Uint128::MAX);
+        let price1_increment: Uint128 = price1_increment_u256.try_into().unwrap_or(Uint128::MAX);
         pool_state.price0_cumulative_last = pool_state
             .price0_cumulative_last
             .saturating_add(price0_increment);
@@ -351,24 +349,29 @@ pub fn execute_swap_cw20(
             // `*_with_verify`.
             let pool_state = POOL_STATE.load(deps.storage)?;
             let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-            let creator_pot = CREATOR_FEE_POT
-                .may_load(deps.storage)?
-                .unwrap_or_default();
+            let creator_pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
             let (reserve_offer, fee_reserve_offer, pot_offer) = if offer_index == 0 {
-                (pool_state.reserve0, pool_fee_state.fee_reserve_0, creator_pot.amount_0)
+                (
+                    pool_state.reserve0,
+                    pool_fee_state.fee_reserve_0,
+                    creator_pot.amount_0,
+                )
             } else {
-                (pool_state.reserve1, pool_fee_state.fee_reserve_1, creator_pot.amount_1)
+                (
+                    pool_state.reserve1,
+                    pool_fee_state.fee_reserve_1,
+                    creator_pot.amount_1,
+                )
             };
             let expected_min = reserve_offer
                 .checked_add(fee_reserve_offer)?
                 .checked_add(pot_offer)?
                 .checked_add(cw20_msg.amount)?;
-            let actual_balance =
-                pool_factory_interfaces::asset::query_token_balance_strict(
-                    &deps.querier,
-                    &info.sender,
-                    &env.contract.address,
-                )?;
+            let actual_balance = pool_factory_interfaces::asset::query_token_balance_strict(
+                &deps.querier,
+                &info.sender,
+                &env.contract.address,
+            )?;
             if actual_balance < expected_min {
                 return Err(ContractError::Cw20SwapBalanceMismatch {
                     cw20: info.sender.to_string(),
@@ -627,9 +630,18 @@ pub fn execute_simple_swap(
         ("effective_price", effective_price),
         ("reserve0_after", pool_state.reserve0.to_string()),
         ("reserve1_after", pool_state.reserve1.to_string()),
-        ("total_fee_collected_0", pool_fee_state.total_fees_collected_0.to_string()),
-        ("total_fee_collected_1", pool_fee_state.total_fees_collected_1.to_string()),
-        ("pool_contract", pool_state.pool_contract_address.to_string()),
+        (
+            "total_fee_collected_0",
+            pool_fee_state.total_fees_collected_0.to_string(),
+        ),
+        (
+            "total_fee_collected_1",
+            pool_fee_state.total_fees_collected_1.to_string(),
+        ),
+        (
+            "pool_contract",
+            pool_state.pool_contract_address.to_string(),
+        ),
         ("block_height", env.block.height.to_string()),
         ("block_time", env.block.time.seconds().to_string()),
         ("total_swap_count", analytics.total_swap_count.to_string()),
@@ -662,13 +674,8 @@ mod tests {
         let offer_amount = Uint128::new(10_000);
         let k_before = offer_pool.u128() * ask_pool.u128();
 
-        let (return_amt, _, commission) = compute_swap(
-            offer_pool,
-            ask_pool,
-            offer_amount,
-            Decimal::permille(3),
-        )
-        .unwrap();
+        let (return_amt, _, commission) =
+            compute_swap(offer_pool, ask_pool, offer_amount, Decimal::permille(3)).unwrap();
 
         // After swap: pool_offer = offer_pool + offer_amount, pool_ask =
         // ask_pool - (return + commission). Commission stays in the pool, so
@@ -677,7 +684,10 @@ mod tests {
         // deltas instead.
         let post_offer = offer_pool + offer_amount;
         let post_ask = ask_pool - (return_amt + commission);
-        assert!(post_offer.u128() * post_ask.u128() >= k_before, "x*y*k invariant broken");
+        assert!(
+            post_offer.u128() * post_ask.u128() >= k_before,
+            "x*y*k invariant broken"
+        );
     }
 
     #[test]
@@ -721,7 +731,8 @@ mod tests {
             None,
             Uint128::new(1_000_000),
             Uint128::new(995),
-            Uint128::new(5));
+            Uint128::new(5),
+        );
         assert!(r.is_ok());
     }
 
@@ -734,7 +745,8 @@ mod tests {
             None,
             Uint128::new(1_000_000),
             Uint128::new(980),
-            Uint128::new(20));
+            Uint128::new(20),
+        );
         assert!(matches!(r, Err(ContractError::MaxSpreadAssertion {})));
     }
 
@@ -746,7 +758,8 @@ mod tests {
             None,
             Uint128::new(1),
             Uint128::new(1),
-            Uint128::zero());
+            Uint128::zero(),
+        );
         assert!(matches!(r, Err(ContractError::InvalidBeliefPrice {})));
     }
 
@@ -756,10 +769,12 @@ mod tests {
         // offer = 100, expected = 200, got 190 → spread = 10 → 5% > default 0.5% → reject
         let r = assert_max_spread(
             Some(Decimal::from_ratio(1u128, 2u128)),
-            Some(Decimal::permille(5)), None, // 0.5% tolerance
+            Some(Decimal::permille(5)),
+            None, // 0.5% tolerance
             Uint128::new(100),
             Uint128::new(190),
-            Uint128::zero());
+            Uint128::zero(),
+        );
         assert!(matches!(r, Err(ContractError::MaxSpreadAssertion {})));
     }
 }

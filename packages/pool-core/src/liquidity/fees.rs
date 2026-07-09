@@ -18,9 +18,7 @@ use crate::liquidity_helpers::{
     build_fee_transfer_msgs, calc_capped_fees_with_clip, sync_position_on_transfer,
     verify_position_ownership,
 };
-use crate::state::{
-    CREATOR_FEE_POT, LIQUIDITY_POSITIONS, POOL_FEE_STATE, POOL_INFO, POOL_STATE,
-};
+use crate::state::{CREATOR_FEE_POT, LIQUIDITY_POSITIONS, POOL_FEE_STATE, POOL_INFO, POOL_STATE};
 use crate::swap::update_price_accumulator;
 
 pub fn execute_collect_fees(
@@ -91,9 +89,7 @@ fn execute_collect_fees_inner(
         .checked_sub(fees_owed_1)?
         .checked_sub(clipped_1)?;
 
-    let mut pot = CREATOR_FEE_POT
-        .may_load(deps.storage)?
-        .unwrap_or_default();
+    let mut pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
     pot.amount_0 = pot.amount_0.checked_add(clipped_0)?;
     pot.amount_1 = pot.amount_1.checked_add(clipped_1)?;
     CREATOR_FEE_POT.save(deps.storage, &pot)?;
@@ -104,20 +100,27 @@ fn execute_collect_fees_inner(
 
     let fee_msgs = build_fee_transfer_msgs(&pool_info, &info.sender, fees_owed_0, fees_owed_1)?;
 
-    Ok(Response::new()
-        .add_messages(fee_msgs)
-        .add_attributes(vec![
-            ("action", "collect_fees".to_string()),
-            ("position_id", position_id),
-            ("collector", info.sender.to_string()),
-            ("fees_0", fees_owed_0.to_string()),
-            ("fees_1", fees_owed_1.to_string()),
-            ("clipped_to_creator_pot_0", clipped_0.to_string()),
-            ("clipped_to_creator_pot_1", clipped_1.to_string()),
-            ("fee_reserve_0_after", pool_fee_state.fee_reserve_0.to_string()),
-            ("fee_reserve_1_after", pool_fee_state.fee_reserve_1.to_string()),
-            ("pool_contract", pool_state.pool_contract_address.to_string()),
-            ("block_height", env.block.height.to_string()),
-            ("block_time", env.block.time.seconds().to_string()),
-        ]))
+    Ok(Response::new().add_messages(fee_msgs).add_attributes(vec![
+        ("action", "collect_fees".to_string()),
+        ("position_id", position_id),
+        ("collector", info.sender.to_string()),
+        ("fees_0", fees_owed_0.to_string()),
+        ("fees_1", fees_owed_1.to_string()),
+        ("clipped_to_creator_pot_0", clipped_0.to_string()),
+        ("clipped_to_creator_pot_1", clipped_1.to_string()),
+        (
+            "fee_reserve_0_after",
+            pool_fee_state.fee_reserve_0.to_string(),
+        ),
+        (
+            "fee_reserve_1_after",
+            pool_fee_state.fee_reserve_1.to_string(),
+        ),
+        (
+            "pool_contract",
+            pool_state.pool_contract_address.to_string(),
+        ),
+        ("block_height", env.block.height.to_string()),
+        ("block_time", env.block.time.seconds().to_string()),
+    ]))
 }

@@ -334,8 +334,7 @@ pub fn execute_assert_received(
     // Strict query. Symmetric with the pre-route read in
     // `start_multi_hop` — both must use the same strict variant so a
     // CW20 query failure fails the assertion closed.
-    let current_balance =
-        ask_info.query_pool_strict(&deps.querier, recipient_addr.clone())?;
+    let current_balance = ask_info.query_pool_strict(&deps.querier, recipient_addr.clone())?;
     let received = current_balance.checked_sub(prev_balance).map_err(|_| {
         RouterError::Std(StdError::generic_err(
             "recipient balance decreased during route; impossible state",

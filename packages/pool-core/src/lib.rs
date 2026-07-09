@@ -30,18 +30,18 @@
 //! - `standard-pool` — plain xyk pool. Thin wrapper that delegates
 //! every op to functions here.
 
-pub mod error;
-pub mod state;
-pub mod asset;
-pub mod swap;
-pub mod msg;
-pub mod generic;
-pub mod liquidity_helpers;
-pub mod liquidity;
 pub mod admin;
-pub mod query;
+pub mod asset;
 /// SubMsg-based deposit balance verification reply handler.
 /// Standard-pool's `reply` entry point dispatches `DEPOSIT_VERIFY_REPLY_ID`
 /// here to confirm the actual CW20 balance delta on the pool matches the
 /// credited deposit amount. See module docs for the threat model.
 pub mod balance_verify;
+pub mod error;
+pub mod generic;
+pub mod liquidity;
+pub mod liquidity_helpers;
+pub mod msg;
+pub mod query;
+pub mod state;
+pub mod swap;

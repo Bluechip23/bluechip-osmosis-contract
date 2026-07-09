@@ -7,7 +7,6 @@ use std::str::FromStr;
 
 use crate::asset::{TokenInfo, TokenType};
 use crate::contract::{execute, migrate};
-use crate::swap_helper::execute_simple_swap;
 use crate::error::ContractError;
 use crate::liquidity::execute_deposit_liquidity;
 use crate::liquidity_helpers::sync_position_on_transfer;
@@ -19,6 +18,7 @@ use crate::state::{
     POOL_SPECS, POOL_STATE, REENTRANCY_LOCK, THRESHOLD_PROCESSING,
 };
 use crate::state::{EMERGENCY_DRAINED, OWNER_POSITIONS};
+use crate::swap_helper::execute_simple_swap;
 use crate::testing::liquidity_tests::{
     create_test_position, setup_pool_post_threshold, setup_pool_storage,
 };
@@ -1183,7 +1183,10 @@ fn test_m2_helper_arms_auto_pause_when_reserves_below_min() {
     // Case 2: helper is idempotent — calling again on already-paused pool
     // returns false (no override) and leaves both flags as-is.
     let armed_again = maybe_auto_pause_on_low_liquidity(&mut deps.storage, &drained).unwrap();
-    assert!(!armed_again, "helper must not re-arm an already-paused pool");
+    assert!(
+        !armed_again,
+        "helper must not re-arm an already-paused pool"
+    );
     assert_eq!(POOL_PAUSED.load(&deps.storage).unwrap(), true);
     assert_eq!(POOL_PAUSED_AUTO.load(&deps.storage).unwrap(), true);
 
@@ -1270,8 +1273,12 @@ fn test_m3_migrate_rejects_downgrade() {
 
     // Force a "stored" semver that exceeds anything realistic the
     // current binary could be.
-    cw2::set_contract_version(&mut deps.storage, "bluechip-contracts-creator-pool", "9.9.9")
-        .unwrap();
+    cw2::set_contract_version(
+        &mut deps.storage,
+        "bluechip-contracts-creator-pool",
+        "9.9.9",
+    )
+    .unwrap();
 
     let res = migrate(
         deps.as_mut(),
@@ -1294,8 +1301,8 @@ fn test_m3_migrate_rejects_downgrade() {
 fn test_m5_continue_distribution_rate_limit_per_address() {
     use crate::msg::ExecuteMsg;
     use crate::state::{
-        COMMIT_LEDGER, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX,
-        DistributionState, DISTRIBUTION_STATE, EXPECTED_FACTORY,
+        DistributionState, COMMIT_LEDGER, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
+        DEFAULT_MAX_GAS_PER_TX, DISTRIBUTION_STATE, EXPECTED_FACTORY,
     };
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
@@ -1334,7 +1341,9 @@ fn test_m5_continue_distribution_rate_limit_per_address() {
         last_updated: Timestamp::from_seconds(1_600_000_000),
         distributed_so_far: Uint128::zero(),
     };
-    DISTRIBUTION_STATE.save(&mut deps.storage, &dist_state).unwrap();
+    DISTRIBUTION_STATE
+        .save(&mut deps.storage, &dist_state)
+        .unwrap();
 
     let keeper = Addr::unchecked("keeper1");
     let env = mock_env();
@@ -1390,7 +1399,9 @@ fn test_m5_continue_distribution_rate_limit_per_address() {
         last_updated: Timestamp::from_seconds(1_600_000_000),
         distributed_so_far: Uint128::zero(),
     };
-    DISTRIBUTION_STATE.save(&mut deps.storage, &dist_state).unwrap();
+    DISTRIBUTION_STATE
+        .save(&mut deps.storage, &dist_state)
+        .unwrap();
 
     let keeper2 = Addr::unchecked("keeper2");
     execute(
@@ -1470,7 +1481,7 @@ fn test_m7_threshold_payout_emits_accept_ownership() {
     use crate::generic_helpers::trigger_threshold_payout;
     use crate::msg::CommitFeeInfo;
     use crate::state::{
-        CommitLimitInfo, NATIVE_RAISED_FROM_COMMIT, ThresholdPayoutAmounts, POOL_FEE_STATE,
+        CommitLimitInfo, ThresholdPayoutAmounts, NATIVE_RAISED_FROM_COMMIT, POOL_FEE_STATE,
         POOL_INFO, POOL_STATE,
     };
     let mut deps = mock_dependencies();
@@ -1542,20 +1553,23 @@ fn test_m7_threshold_payout_emits_accept_ownership() {
         "trigger_threshold_payout must flip nft_ownership_accepted"
     );
     let accept_msg_present = payout_msgs.other_msgs.iter().any(|m| {
-        if let CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) = m {
+        if let CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr, msg, ..
+        }) = m
+        {
             if contract_addr != &pool_info.position_nft_address.to_string() {
                 return false;
             }
             // Match the AcceptOwnership variant by parsing the body.
-            let parsed: Result<
-                pool_factory_interfaces::cw721_msgs::Cw721ExecuteMsg<()>,
-                _,
-            > = cosmwasm_std::from_json(msg);
+            let parsed: Result<pool_factory_interfaces::cw721_msgs::Cw721ExecuteMsg<()>, _> =
+                cosmwasm_std::from_json(msg);
             matches!(
                 parsed,
-                Ok(pool_factory_interfaces::cw721_msgs::Cw721ExecuteMsg::UpdateOwnership(
-                    pool_factory_interfaces::cw721_msgs::Action::AcceptOwnership
-                ))
+                Ok(
+                    pool_factory_interfaces::cw721_msgs::Cw721ExecuteMsg::UpdateOwnership(
+                        pool_factory_interfaces::cw721_msgs::Action::AcceptOwnership
+                    )
+                )
             )
         } else {
             false
@@ -1589,7 +1603,7 @@ mod distribution_liveness_tests {
     use super::*;
     use crate::contract::reply;
     use crate::state::{
-        ExpectedFactory, FAILED_MINTS, PendingMint, PENDING_MINT_REPLIES,
+        ExpectedFactory, PendingMint, FAILED_MINTS, PENDING_MINT_REPLIES,
         PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, REPLY_ID_DISTRIBUTION_MINT_BASE,
         STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS,
     };
@@ -1651,7 +1665,11 @@ mod distribution_liveness_tests {
             result: if ok {
                 SubMsgResult::Ok(ok_response)
             } else {
-                SubMsgResult::Err(err_msg.unwrap_or("CW20 mint rejected by recipient").to_string())
+                SubMsgResult::Err(
+                    err_msg
+                        .unwrap_or("CW20 mint rejected by recipient")
+                        .to_string(),
+                )
             },
         }
     }
@@ -1870,7 +1888,10 @@ mod distribution_liveness_tests {
                 assert_eq!(window, PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS);
                 assert_eq!(admin_window, STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS);
             }
-            other => panic!("expected DistributionNotStalledForSelfRecover, got: {:?}", other),
+            other => panic!(
+                "expected DistributionNotStalledForSelfRecover, got: {:?}",
+                other
+            ),
         }
     }
 
@@ -1927,10 +1948,15 @@ mod distribution_liveness_tests {
 
         let dist_after = DISTRIBUTION_STATE.load(&deps.storage).unwrap();
         assert!(dist_after.is_distributing);
-        assert!(dist_after.last_processed_key.is_none(), "cursor must be reset");
+        assert!(
+            dist_after.last_processed_key.is_none(),
+            "cursor must be reset"
+        );
         assert_eq!(dist_after.consecutive_failures, 0);
-        assert_eq!(dist_after.distributed_so_far, preserved,
-            "distributed_so_far must be preserved across restart so dust settlement stays correct");
+        assert_eq!(
+            dist_after.distributed_so_far, preserved,
+            "distributed_so_far must be preserved across restart so dust settlement stays correct"
+        );
         assert_eq!(dist_after.distributions_remaining, 2);
         assert_eq!(dist_after.last_updated, env.block.time);
 
@@ -2015,7 +2041,10 @@ mod distribution_liveness_tests {
         .expect("claim must succeed");
 
         // FAILED_MINTS entry removed up front.
-        assert!(FAILED_MINTS.may_load(&deps.storage, &user).unwrap().is_none());
+        assert!(FAILED_MINTS
+            .may_load(&deps.storage, &user)
+            .unwrap()
+            .is_none());
 
         // Exactly one SubMsg dispatched, in the reply_always range.
         assert_eq!(res.messages.len(), 1);
@@ -2025,9 +2054,7 @@ mod distribution_liveness_tests {
         // PENDING_MINT_REPLIES recorded the user as the canonical
         // accounting key (NOT the alternate recipient) so a re-failure
         // re-credits the original committer.
-        let pending = PENDING_MINT_REPLIES
-            .load(&deps.storage, sub.id)
-            .unwrap();
+        let pending = PENDING_MINT_REPLIES.load(&deps.storage, sub.id).unwrap();
         assert_eq!(pending.user, user);
         assert_eq!(pending.amount, owed);
 
@@ -2076,7 +2103,10 @@ mod distribution_liveness_tests {
         let reply_id = res.messages[0].id;
 
         // Dispatched but not yet replied — FAILED_MINTS is empty.
-        assert!(FAILED_MINTS.may_load(&deps.storage, &user).unwrap().is_none());
+        assert!(FAILED_MINTS
+            .may_load(&deps.storage, &user)
+            .unwrap()
+            .is_none());
 
         // Simulate the alternate ALSO rejecting the mint.
         let r = synthetic_reply(reply_id, false, Some("alternate also blacklisted"));
@@ -2085,10 +2115,7 @@ mod distribution_liveness_tests {
         // FAILED_MINTS re-credited under the ORIGINAL committer (`user`),
         // NOT under the alternate. The user can now try yet another
         // recipient on a fresh ClaimFailedDistribution call.
-        assert_eq!(
-            FAILED_MINTS.load(&deps.storage, &user).unwrap(),
-            owed,
-        );
+        assert_eq!(FAILED_MINTS.load(&deps.storage, &user).unwrap(), owed,);
         // Alternate has no FAILED_MINTS entry — they were a recipient
         // address only, never the canonical accounting key.
         assert!(FAILED_MINTS
@@ -2122,8 +2149,11 @@ mod distribution_liveness_tests {
         let sub = &res.messages[0];
         if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &sub.msg {
             if let cw20::Cw20ExecuteMsg::Mint { recipient, .. } = from_json(msg).unwrap() {
-                assert_eq!(recipient, user.to_string(),
-                    "default recipient must be info.sender");
+                assert_eq!(
+                    recipient,
+                    user.to_string(),
+                    "default recipient must be info.sender"
+                );
             } else {
                 panic!("not a Mint");
             }
@@ -2154,8 +2184,9 @@ mod distribution_liveness_tests {
             ExecuteMsg::SelfRecoverDistribution {},
         )
         .unwrap_err();
-        assert!(format!("{:?}", err).contains("Drained")
-            || format!("{:?}", err).contains("drained"));
+        assert!(
+            format!("{:?}", err).contains("Drained") || format!("{:?}", err).contains("drained")
+        );
 
         // Claim
         let info = message_info(&Addr::unchecked("anyone"), &[]);
@@ -2166,8 +2197,9 @@ mod distribution_liveness_tests {
             ExecuteMsg::ClaimFailedDistribution { recipient: None },
         )
         .unwrap_err();
-        assert!(format!("{:?}", err).contains("Drained")
-            || format!("{:?}", err).contains("drained"));
+        assert!(
+            format!("{:?}", err).contains("Drained") || format!("{:?}", err).contains("drained")
+        );
     }
 
     /// Suppress unused-import lint in this test module — the timestamp
@@ -2204,13 +2236,11 @@ mod deposit_verify_tests {
     use crate::contract::reply;
     use crate::testing::liquidity_tests::setup_pool_post_threshold;
     use cosmwasm_std::{
-        to_json_binary, Binary, Coin, ContractResult, Reply, ReplyOn, SubMsgResponse,
-        SubMsgResult, SystemResult, WasmQuery,
+        to_json_binary, Binary, Coin, ContractResult, Reply, ReplyOn, SubMsgResponse, SubMsgResult,
+        SystemResult, WasmQuery,
     };
     use cw20::BalanceResponse as Cw20BalanceResponse;
-    use pool_core::state::{
-        DepositVerifyContext, DEPOSIT_VERIFY_CTX, DEPOSIT_VERIFY_REPLY_ID,
-    };
+    use pool_core::state::{DepositVerifyContext, DEPOSIT_VERIFY_CTX, DEPOSIT_VERIFY_REPLY_ID};
 
     /// Install a CW20 balance querier that returns a fixed balance for
     /// any cw20 query and an `OwnerOf` querier for the NFT contract so
@@ -2232,25 +2262,20 @@ mod deposit_verify_tests {
                         ..
                     }) = cosmwasm_std::from_json(msg)
                     {
-                        let resp =
-                            pool_factory_interfaces::cw721_msgs::OwnerOfResponse {
-                                owner: owner.clone(),
-                                approvals: vec![],
-                            };
+                        let resp = pool_factory_interfaces::cw721_msgs::OwnerOfResponse {
+                            owner: owner.clone(),
+                            approvals: vec![],
+                        };
                         return SystemResult::Ok(ContractResult::Ok(
                             to_json_binary(&resp).unwrap(),
                         ));
                     }
                 }
-                if let Ok(cw20::Cw20QueryMsg::Balance { .. }) =
-                    cosmwasm_std::from_json(msg)
-                {
+                if let Ok(cw20::Cw20QueryMsg::Balance { .. }) = cosmwasm_std::from_json(msg) {
                     let resp = Cw20BalanceResponse {
                         balance: cw20_balance,
                     };
-                    return SystemResult::Ok(ContractResult::Ok(
-                        to_json_binary(&resp).unwrap(),
-                    ));
+                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
                 }
                 SystemResult::Err(cosmwasm_std::SystemError::InvalidRequest {
                     error: format!("unexpected wasm query to {}", contract_addr),
@@ -2420,10 +2445,7 @@ mod deposit_verify_tests {
         )
         .expect("AddToPosition dispatch must succeed");
 
-        let last = res
-            .messages
-            .last()
-            .expect("response must carry SubMsgs");
+        let last = res.messages.last().expect("response must carry SubMsgs");
         assert_eq!(
             last.id, DEPOSIT_VERIFY_REPLY_ID,
             "AddToPosition must also route through the verify path; got id {}",
@@ -2611,8 +2633,7 @@ mod deposit_verify_tests {
             gas_used: 0,
             result: SubMsgResult::Ok(ok_response),
         };
-        let err = reply(deps.as_mut(), mock_env(), r)
-            .expect_err("overage must propagate as Err");
+        let err = reply(deps.as_mut(), mock_env(), r).expect_err("overage must propagate as Err");
         assert!(
             err.to_string().contains("net-balance invariant violated"),
             "overage rejection must surface; got: {}",
@@ -2649,22 +2670,15 @@ mod deposit_verify_tests {
 mod empty_position_persistence_tests {
     use super::*;
     use crate::testing::liquidity_tests::{create_test_position, setup_pool_post_threshold};
-    use cosmwasm_std::{
-        to_json_binary, ContractResult, SystemResult, WasmQuery,
-    };
-    use pool_core::liquidity::{
-        execute_collect_fees, execute_remove_all_liquidity,
-    };
+    use cosmwasm_std::{to_json_binary, ContractResult, SystemResult, WasmQuery};
+    use pool_core::liquidity::{execute_collect_fees, execute_remove_all_liquidity};
     use pool_core::state::{LIQUIDITY_POSITIONS, OWNER_POSITIONS, POOL_STATE};
 
     /// Install a CW721 OwnerOf querier that returns the given owner for
     /// any token id. Also answers CW20 Balance queries with a fixed
     /// balance so the verify-path deposit can run its pre/post snapshot
     /// without erroring out on an unstubbed balance read.
-    fn install_owner_querier(
-        deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
-        owner: &str,
-    ) {
+    fn install_owner_querier(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, owner: &str) {
         let owner_str = owner.to_string();
         deps.querier.update_wasm(move |query| match query {
             WasmQuery::Smart { contract_addr, msg } => {
@@ -2673,19 +2687,16 @@ mod empty_position_persistence_tests {
                         ..
                     }) = cosmwasm_std::from_json(msg)
                     {
-                        let resp =
-                            pool_factory_interfaces::cw721_msgs::OwnerOfResponse {
-                                owner: owner_str.clone(),
-                                approvals: vec![],
-                            };
+                        let resp = pool_factory_interfaces::cw721_msgs::OwnerOfResponse {
+                            owner: owner_str.clone(),
+                            approvals: vec![],
+                        };
                         return SystemResult::Ok(ContractResult::Ok(
                             to_json_binary(&resp).unwrap(),
                         ));
                     }
                 }
-                if let Ok(cw20::Cw20QueryMsg::Balance { .. }) =
-                    cosmwasm_std::from_json(msg)
-                {
+                if let Ok(cw20::Cw20QueryMsg::Balance { .. }) = cosmwasm_std::from_json(msg) {
                     // Fixed pool CW20 balance for the verify-path
                     // pre/post snapshot. The actual value doesn't
                     // matter for these tests — only that the query
@@ -2694,9 +2705,7 @@ mod empty_position_persistence_tests {
                     let resp = cw20::BalanceResponse {
                         balance: Uint128::zero(),
                     };
-                    return SystemResult::Ok(ContractResult::Ok(
-                        to_json_binary(&resp).unwrap(),
-                    ));
+                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
                 }
                 SystemResult::Err(cosmwasm_std::SystemError::InvalidRequest {
                     error: format!("unexpected wasm query to {}", contract_addr),
@@ -2979,9 +2988,7 @@ mod empty_position_persistence_tests {
 mod emergency_claim_escrow_tests {
     use super::*;
     use crate::testing::liquidity_tests::{create_test_position, setup_pool_post_threshold};
-    use cosmwasm_std::{
-        to_json_binary, ContractResult, SystemResult, WasmQuery,
-    };
+    use cosmwasm_std::{to_json_binary, ContractResult, SystemResult, WasmQuery};
     use pool_core::state::{
         EmergencyDrainSnapshot, EMERGENCY_CLAIM_DORMANCY_SECONDS, EMERGENCY_DRAINED,
         EMERGENCY_DRAIN_SNAPSHOT, LIQUIDITY_POSITIONS, POOL_FEE_STATE, POOL_INFO, POOL_STATE,
@@ -2990,10 +2997,7 @@ mod emergency_claim_escrow_tests {
     /// Install a CW721 OwnerOf querier returning the given owner for
     /// any token id. Local helper; mirrors the pattern used in
     /// other H-NFT tests.
-    fn install_owner_querier(
-        deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
-        owner: &str,
-    ) {
+    fn install_owner_querier(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, owner: &str) {
         let owner_str = owner.to_string();
         deps.querier.update_wasm(move |query| match query {
             WasmQuery::Smart { contract_addr, msg } => {
@@ -3002,9 +3006,7 @@ mod emergency_claim_escrow_tests {
                         owner: owner_str.clone(),
                         approvals: vec![],
                     };
-                    return SystemResult::Ok(ContractResult::Ok(
-                        to_json_binary(&resp).unwrap(),
-                    ));
+                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
                 }
                 SystemResult::Err(cosmwasm_std::SystemError::InvalidRequest {
                     error: format!("unexpected wasm query to {}", contract_addr),
@@ -3033,8 +3035,7 @@ mod emergency_claim_escrow_tests {
     ) {
         EMERGENCY_DRAINED.save(&mut deps.storage, &true).unwrap();
         let drained_at = env.block.time;
-        let dormancy_expires_at =
-            drained_at.plus_seconds(EMERGENCY_CLAIM_DORMANCY_SECONDS);
+        let dormancy_expires_at = drained_at.plus_seconds(EMERGENCY_CLAIM_DORMANCY_SECONDS);
         EMERGENCY_DRAIN_SNAPSHOT
             .save(
                 &mut deps.storage,
@@ -3102,11 +3103,11 @@ mod emergency_claim_escrow_tests {
         seed_post_drain_state(
             &mut deps,
             &env,
-            Uint128::new(800_000_000),     // reserve0
-            Uint128::new(1_200_000_000),   // reserve1
-            Uint128::new(50_000_000),      // fee_reserve_0
-            Uint128::new(75_000_000),      // fee_reserve_1
-            alice_liq,                      // sole LP
+            Uint128::new(800_000_000),   // reserve0
+            Uint128::new(1_200_000_000), // reserve1
+            Uint128::new(50_000_000),    // fee_reserve_0
+            Uint128::new(75_000_000),    // fee_reserve_1
+            alice_liq,                   // sole LP
         );
 
         let info = message_info(&Addr::unchecked("alice"), &[]);
@@ -3124,16 +3125,8 @@ mod emergency_claim_escrow_tests {
         let expected_total_0 = Uint128::new(800_000_000 + 50_000_000);
         let expected_total_1 = Uint128::new(1_200_000_000 + 75_000_000);
 
-        let total_0_attr = res
-            .attributes
-            .iter()
-            .find(|a| a.key == "total_0")
-            .unwrap();
-        let total_1_attr = res
-            .attributes
-            .iter()
-            .find(|a| a.key == "total_1")
-            .unwrap();
+        let total_0_attr = res.attributes.iter().find(|a| a.key == "total_0").unwrap();
+        let total_1_attr = res.attributes.iter().find(|a| a.key == "total_1").unwrap();
         assert_eq!(total_0_attr.value, expected_total_0.to_string());
         assert_eq!(total_1_attr.value, expected_total_1.to_string());
 
@@ -3328,7 +3321,10 @@ mod emergency_claim_escrow_tests {
         .unwrap_err();
         match err {
             ContractError::EmergencyClaimDormancyNotElapsed { .. } => {}
-            other => panic!("expected EmergencyClaimDormancyNotElapsed, got: {:?}", other),
+            other => panic!(
+                "expected EmergencyClaimDormancyNotElapsed, got: {:?}",
+                other
+            ),
         }
     }
 

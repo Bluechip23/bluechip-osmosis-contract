@@ -19,7 +19,7 @@ use crate::msg::{
     ReverseSimulationResponse, SimulationResponse,
 };
 use crate::state::{
-    PoolDetails, Position, PoolFeeState, COMMITFEEINFO, IS_THRESHOLD_HIT, LIQUIDITY_POSITIONS,
+    PoolDetails, PoolFeeState, Position, COMMITFEEINFO, IS_THRESHOLD_HIT, LIQUIDITY_POSITIONS,
     NEXT_POSITION_ID, OWNER_POSITIONS, POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED,
     POOL_SPECS, POOL_STATE,
 };

@@ -78,4 +78,3 @@ impl TokenInfoPoolExt for TokenInfo {
         }
     }
 }
-

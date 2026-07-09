@@ -19,9 +19,7 @@ use cosmwasm_std::{
 };
 
 use crate::error::ContractError;
-use crate::state::{
-    PoolUpgrade, ADMIN_TIMELOCK_SECONDS, PENDING_POOL_UPGRADE, POOLS_BY_ID,
-};
+use crate::state::{PoolUpgrade, ADMIN_TIMELOCK_SECONDS, PENDING_POOL_UPGRADE, POOLS_BY_ID};
 
 use super::ensure_admin;
 
@@ -178,30 +176,29 @@ fn build_upgrade_batch(
     for pool_id in pool_ids.iter() {
         let pool_addr = POOLS_BY_ID.load(deps.storage, *pool_id)?.creator_pool_addr;
 
-        let is_paused: pool_factory_interfaces::IsPausedResponse = match deps
-            .querier
-            .query_wasm_smart(
+        let is_paused: pool_factory_interfaces::IsPausedResponse =
+            match deps.querier.query_wasm_smart(
                 pool_addr.to_string(),
                 &pool_factory_interfaces::PoolQueryMsg::IsPaused {},
             ) {
-            Ok(r) => r,
-            Err(e) => {
-                if retry_mode {
-                    // Keep the pool on the retry queue so the admin can
-                    // try again after addressing whatever is making
-                    // IsPaused unreachable.
-                    skipped.push(*pool_id);
-                    continue;
-                } else {
-                    return Err(ContractError::Std(StdError::generic_err(format!(
-                        "Pool {} ({}) IsPaused query failed: {}. Refusing to \
+                Ok(r) => r,
+                Err(e) => {
+                    if retry_mode {
+                        // Keep the pool on the retry queue so the admin can
+                        // try again after addressing whatever is making
+                        // IsPaused unreachable.
+                        skipped.push(*pool_id);
+                        continue;
+                    } else {
+                        return Err(ContractError::Std(StdError::generic_err(format!(
+                            "Pool {} ({}) IsPaused query failed: {}. Refusing to \
                          migrate without confirming pause state — Cancel and \
                          either fix the pool or re-propose without it.",
-                        pool_id, pool_addr, e
-                    ))));
+                            pool_id, pool_addr, e
+                        ))));
+                    }
                 }
-            }
-        };
+            };
 
         if is_paused.paused {
             skipped.push(*pool_id);
@@ -294,8 +291,14 @@ pub fn execute_apply_pool_upgrade(
         .add_attribute("pool_count", total.to_string())
         .add_attribute("processed_in_batch", first_batch_len.to_string())
         .add_attribute("skipped_paused", skipped_str)
-        .add_attribute("more_batches", (more_first_pass || has_retry_queue).to_string())
-        .add_attribute("pending_retry_count", upgrade.pending_retry.len().to_string()))
+        .add_attribute(
+            "more_batches",
+            (more_first_pass || has_retry_queue).to_string(),
+        )
+        .add_attribute(
+            "pending_retry_count",
+            upgrade.pending_retry.len().to_string(),
+        ))
 }
 
 pub fn execute_cancel_pool_upgrade(
@@ -428,7 +431,9 @@ pub fn execute_continue_pool_upgrade(
         // than wedging it.
         let migrated_set: std::collections::HashSet<u64> =
             outcome.migrated_pool_ids.iter().copied().collect();
-        upgrade.pending_retry.retain(|id| !migrated_set.contains(id));
+        upgrade
+            .pending_retry
+            .retain(|id| !migrated_set.contains(id));
 
         let rotated: Vec<u64> = batch
             .iter()
@@ -436,8 +441,7 @@ pub fn execute_continue_pool_upgrade(
             .filter(|id| !migrated_set.contains(id))
             .collect();
         if !rotated.is_empty() {
-            let rotated_set: std::collections::HashSet<u64> =
-                rotated.iter().copied().collect();
+            let rotated_set: std::collections::HashSet<u64> = rotated.iter().copied().collect();
             upgrade.pending_retry.retain(|id| !rotated_set.contains(id));
             upgrade.pending_retry.extend(rotated);
         }
@@ -464,9 +468,15 @@ pub fn execute_continue_pool_upgrade(
         .add_attribute("action", "continue_upgrade")
         .add_attribute("mode", mode)
         .add_attribute("processed_in_batch", batch_len.to_string())
-        .add_attribute("migrated_in_batch", outcome.migrated_pool_ids.len().to_string())
+        .add_attribute(
+            "migrated_in_batch",
+            outcome.migrated_pool_ids.len().to_string(),
+        )
         .add_attribute("total_first_pass", upgrade.upgraded_count.to_string())
         .add_attribute("skipped_paused", skipped_str)
-        .add_attribute("pending_retry_count", upgrade.pending_retry.len().to_string())
+        .add_attribute(
+            "pending_retry_count",
+            upgrade.pending_retry.len().to_string(),
+        )
         .add_attribute("more_batches", more_batches.to_string()))
 }

@@ -26,8 +26,10 @@ pub(crate) fn validate_factory_config(
     deps: cosmwasm_std::Deps,
     config: &FactoryInstantiate,
 ) -> Result<(), ContractError> {
-    deps.api.addr_validate(config.factory_admin_address.as_str())?;
-    deps.api.addr_validate(config.bluechip_wallet_address.as_str())?;
+    deps.api
+        .addr_validate(config.factory_admin_address.as_str())?;
+    deps.api
+        .addr_validate(config.bluechip_wallet_address.as_str())?;
 
     // Commit fees split bluechip + creator out of every commit. Their sum
     // must not exceed 100% — anything more would either underflow at
@@ -38,9 +40,7 @@ pub(crate) fn validate_factory_config(
     let fee_sum = config
         .commit_fee_bluechip
         .checked_add(config.commit_fee_creator)
-        .map_err(|_| {
-            ContractError::Std(StdError::generic_err("commit fee sum overflow"))
-        })?;
+        .map_err(|_| ContractError::Std(StdError::generic_err("commit fee sum overflow")))?;
     if fee_sum > cosmwasm_std::Decimal::one() {
         return Err(ContractError::Std(StdError::generic_err(format!(
             "commit_fee_bluechip + commit_fee_creator must be <= 1.0; got {}",
@@ -76,8 +76,7 @@ pub(crate) fn validate_factory_config(
     // observes the timelock. Above the ceiling, even legitimate
     // operational use becomes painful and admins may be tempted to
     // bypass the flow entirely.
-    if config.emergency_withdraw_delay_seconds
-        < crate::state::EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS
+    if config.emergency_withdraw_delay_seconds < crate::state::EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS
         || config.emergency_withdraw_delay_seconds
             > crate::state::EMERGENCY_WITHDRAW_DELAY_MAX_SECONDS
     {

@@ -140,7 +140,10 @@ fn test_notify_threshold_crossed_unauthorized_caller() {
 
     // A random address tries to notify - should fail
     let hacker_info = message_info(&Addr::unchecked("hacker"), &[]);
-    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1, crossed_at: None };
+    let msg = ExecuteMsg::NotifyThresholdCrossed {
+        pool_id: 1,
+        crossed_at: None,
+    };
 
     let err = execute(deps.as_mut(), env, hacker_info, msg).unwrap_err();
     assert!(
@@ -166,7 +169,10 @@ fn test_notify_threshold_crossed_double_call_prevention() {
 
     let env = mock_env();
     let pool_info = message_info(&Addr::unchecked("pool_contract_1"), &[]);
-    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 1, crossed_at: None };
+    let msg = ExecuteMsg::NotifyThresholdCrossed {
+        pool_id: 1,
+        crossed_at: None,
+    };
 
     let err = execute(deps.as_mut(), env, pool_info, msg).unwrap_err();
     assert!(
@@ -226,7 +232,10 @@ fn test_notify_threshold_crossed_unregistered_pool() {
 
     let env = mock_env();
     let pool_info = message_info(&Addr::unchecked("pool_contract_1"), &[]);
-    let msg = ExecuteMsg::NotifyThresholdCrossed { pool_id: 999, crossed_at: None };
+    let msg = ExecuteMsg::NotifyThresholdCrossed {
+        pool_id: 999,
+        crossed_at: None,
+    };
 
     let err = execute(deps.as_mut(), env, pool_info, msg).unwrap_err();
     assert!(
@@ -361,7 +370,10 @@ fn test_config_update_before_timelock_fails() {
     }
 
     // Advance time past the admin timelock
-    env.block.time = env.block.time.plus_seconds(crate::state::ADMIN_TIMELOCK_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::ADMIN_TIMELOCK_SECONDS + 1);
     let res = execute(deps.as_mut(), env, admin_info, update_msg).unwrap();
     assert!(res
         .attributes
@@ -554,8 +566,7 @@ fn test_propose_pool_config_commit_floor_bounds_and_kind_gating() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("standard pool")
-            && err.to_string().contains("commit-floor"),
+        err.to_string().contains("standard pool") && err.to_string().contains("commit-floor"),
         "expected standard-pool rejection, got: {}",
         err
     );
@@ -590,14 +601,16 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
 
     // Create first pool
     let create_msg_1 = ExecuteMsg::Create {
-        pool_msg: CreatePool { pool_token_info: [
+        pool_msg: CreatePool {
+            pool_token_info: [
                 TokenType::Native {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
                     contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
                 },
-            ] },
+            ],
+        },
         token_info: CreatorTokenInfo {
             name: "TokenA".to_string(),
             symbol: "TOKA".to_string(),
@@ -629,14 +642,16 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
 
     // Create second pool from the SAME creator (admin)
     let create_msg_2 = ExecuteMsg::Create {
-        pool_msg: CreatePool { pool_token_info: [
+        pool_msg: CreatePool {
+            pool_token_info: [
                 TokenType::Native {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
                     contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
                 },
-            ] },
+            ],
+        },
         token_info: CreatorTokenInfo {
             name: "TokenB".to_string(),
             symbol: "TOKB".to_string(),
@@ -1089,8 +1104,10 @@ fn test_c2_pool_details_persists_real_creator_token_address() {
     );
     pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
     let nft_addr = make_addr("freshly_instantiated_cw721");
-    let nft_reply =
-        create_instantiate_reply(encode_reply_id(pool_id, MINT_CREATE_POOL), nft_addr.as_str());
+    let nft_reply = create_instantiate_reply(
+        encode_reply_id(pool_id, MINT_CREATE_POOL),
+        nft_addr.as_str(),
+    );
     pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
     let pool_addr = make_addr("freshly_instantiated_pool");
     let pool_reply =
@@ -1124,15 +1141,15 @@ fn test_c2_pool_details_persists_real_creator_token_address() {
         .load(&deps.storage, pool_addr)
         .unwrap();
     assert!(
-        snapshot.assets.iter().any(|a| a == real_token_addr.as_str()),
+        snapshot
+            .assets
+            .iter()
+            .any(|a| a == real_token_addr.as_str()),
         "POOLS_BY_CONTRACT_ADDRESS.assets must include the real CW20 address; got: {:?}",
         snapshot.assets
     );
     assert!(
-        !snapshot
-            .assets
-            .iter()
-            .any(|a| a == CREATOR_TOKEN_SENTINEL),
+        !snapshot.assets.iter().any(|a| a == CREATOR_TOKEN_SENTINEL),
         "POOLS_BY_CONTRACT_ADDRESS.assets must not retain the sentinel; got: {:?}",
         snapshot.assets
     );
@@ -1211,7 +1228,8 @@ fn test_l7_create_rejects_all_numeric_symbol() {
     );
     let err = res.expect_err("all-numeric symbol must be rejected");
     assert!(
-        err.to_string().contains("at least one uppercase ASCII letter"),
+        err.to_string()
+            .contains("at least one uppercase ASCII letter"),
         "expected letter-required error, got: {}",
         err
     );
@@ -1300,9 +1318,7 @@ fn test_i6_commit_pool_create_rate_limit_per_address() {
 // in the test environment.
 mod standard_pool_rate_limit_tests {
     use super::*;
-    use crate::state::{
-        LAST_STANDARD_POOL_CREATE_AT, STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS,
-    };
+    use crate::state::{LAST_STANDARD_POOL_CREATE_AT, STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS};
 
     fn make_native_pair_msg() -> ExecuteMsg {
         ExecuteMsg::CreateStandardPool {
@@ -1318,9 +1334,7 @@ mod standard_pool_rate_limit_tests {
         }
     }
 
-    fn setup_factory_with_std_wasm(
-        deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQuerier>,
-    ) {
+    fn setup_factory_with_std_wasm(deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQuerier>) {
         setup_factory(deps);
         let mut cfg = default_factory_config();
         cfg.standard_pool_wasm_contract_id = 12;
@@ -1510,10 +1524,9 @@ mod pool_admin_forwarder_tests {
         },
     }
 
-    fn setup_factory_with_pool(pool_id: u64) -> (
-        OwnedDeps<MockStorage, MockApi, WasmMockQuerier>,
-        Addr,
-    ) {
+    fn setup_factory_with_pool(
+        pool_id: u64,
+    ) -> (OwnedDeps<MockStorage, MockApi, WasmMockQuerier>, Addr) {
         let mut deps = mock_deps_with_querier(&[]);
         setup_factory(&mut deps);
         let pool_addr = make_addr(&format!("pool_{}", pool_id));
@@ -1758,9 +1771,7 @@ mod pool_admin_forwarder_tests {
 // ---------------------------------------------------------------------------
 mod pair_uniqueness_tests {
     use super::*;
-    use crate::state::{
-        canonical_pair_key, register_pool, FACTORYINSTANTIATEINFO, PAIRS,
-    };
+    use crate::state::{canonical_pair_key, register_pool, FACTORYINSTANTIATEINFO, PAIRS};
     use pool_factory_interfaces::PoolKind;
 
     fn pool_details_for(pair: [TokenType; 2], pool_id: u64, kind: PoolKind) -> PoolDetails {
@@ -1813,7 +1824,10 @@ mod pair_uniqueness_tests {
                 contract_addr: Addr::unchecked(collision_string),
             },
         ];
-        assert_ne!(canonical_pair_key(&native_pair), canonical_pair_key(&cw20_pair));
+        assert_ne!(
+            canonical_pair_key(&native_pair),
+            canonical_pair_key(&cw20_pair)
+        );
     }
 
     /// register_pool: first call records the pair in PAIRS; second call
@@ -1920,11 +1934,7 @@ mod pair_uniqueness_tests {
         // production would have landed this entry through `register_pool`
         // inside `finalize_standard_pool`.)
         PAIRS
-            .save(
-                deps.as_mut().storage,
-                canonical_pair_key(&pair),
-                &1u64,
-            )
+            .save(deps.as_mut().storage, canonical_pair_key(&pair), &1u64)
             .unwrap();
 
         // A different sender attempts the same pair. Must fail with
@@ -1944,7 +1954,13 @@ mod pair_uniqueness_tests {
         .expect_err("duplicate pair from different sender must reject");
 
         assert!(
-            matches!(err, ContractError::DuplicatePair { existing_pool_id: 1, .. }),
+            matches!(
+                err,
+                ContractError::DuplicatePair {
+                    existing_pool_id: 1,
+                    ..
+                }
+            ),
             "expected DuplicatePair{{existing_pool_id: 1, ..}}, got: {:?}",
             err
         );
@@ -1964,7 +1980,13 @@ mod pair_uniqueness_tests {
         )
         .expect_err("reversed-order duplicate must reject");
         assert!(
-            matches!(err, ContractError::DuplicatePair { existing_pool_id: 1, .. }),
+            matches!(
+                err,
+                ContractError::DuplicatePair {
+                    existing_pool_id: 1,
+                    ..
+                }
+            ),
             "expected DuplicatePair on reversed pair, got: {:?}",
             err
         );
@@ -1995,11 +2017,7 @@ mod pair_uniqueness_tests {
             },
         ];
         PAIRS
-            .save(
-                deps.as_mut().storage,
-                canonical_pair_key(&pair),
-                &7u64,
-            )
+            .save(deps.as_mut().storage, canonical_pair_key(&pair), &7u64)
             .unwrap();
 
         let caller = make_addr("dup_then_cooldown_caller");
@@ -2023,7 +2041,13 @@ mod pair_uniqueness_tests {
         )
         .expect_err("must reject");
         assert!(
-            matches!(err, ContractError::DuplicatePair { existing_pool_id: 7, .. }),
+            matches!(
+                err,
+                ContractError::DuplicatePair {
+                    existing_pool_id: 7,
+                    ..
+                }
+            ),
             "duplicate-pair check must fire before rate-limit; got: {:?}",
             err
         );
@@ -2075,14 +2099,9 @@ mod pair_uniqueness_tests {
             .unwrap()
             .is_none());
 
-        cw2::set_contract_version(
-            &mut deps.storage,
-            "crates.io:bluechip-factory",
-            "0.1.0",
-        )
-        .unwrap();
-        let res =
-            crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
+        cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
+            .unwrap();
+        let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
 
         assert_eq!(
             PAIRS
@@ -2145,14 +2164,9 @@ mod pair_uniqueness_tests {
             )
             .unwrap();
 
-        cw2::set_contract_version(
-            &mut deps.storage,
-            "crates.io:bluechip-factory",
-            "0.1.0",
-        )
-        .unwrap();
-        let res =
-            crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
+        cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
+            .unwrap();
+        let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
 
         // First-seen (lowest pool_id) wins.
         assert_eq!(
@@ -2191,7 +2205,13 @@ mod pair_uniqueness_tests {
         )
         .expect_err("post-migrate duplicate must reject");
         assert!(
-            matches!(err, ContractError::DuplicatePair { existing_pool_id: 5, .. }),
+            matches!(
+                err,
+                ContractError::DuplicatePair {
+                    existing_pool_id: 5,
+                    ..
+                }
+            ),
             "post-migrate: expected DuplicatePair pointing at the grandfathered pool 5; got: {:?}",
             err
         );
@@ -2220,22 +2240,14 @@ mod pair_uniqueness_tests {
             )
             .unwrap();
 
-        cw2::set_contract_version(
-            &mut deps.storage,
-            "crates.io:bluechip-factory",
-            "0.1.0",
-        )
-        .unwrap();
+        cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
+            .unwrap();
         crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("first migrate ok");
         // Second migrate: stored version was just written to CONTRACT_VERSION
         // (current). Reset to an older value so the migrate handler accepts
         // the re-run rather than no-op-ing through the equal-version branch.
-        cw2::set_contract_version(
-            &mut deps.storage,
-            "crates.io:bluechip-factory",
-            "0.1.0",
-        )
-        .unwrap();
+        cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
+            .unwrap();
         let res2 =
             crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("re-migrate ok");
 
