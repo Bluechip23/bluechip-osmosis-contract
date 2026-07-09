@@ -46,7 +46,7 @@ export type RetryNotifyOutcome =
    * Tx errored with one of the expected skip markers (e.g., the pool
    * reports "No pending factory notification to retry" because state
    * changed between query and tx, or the factory reports
-   * "Bluechip mint already triggered" because the pending flag was
+   * "Threshold crossing already recorded" because the pending flag was
    * stale). Treated as a clean no-op.
    */
   | { kind: "skipped"; pool: string; reason: "tx_skip"; detail: string }
@@ -97,7 +97,7 @@ export async function checkAndRetryPool(
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     if (isExpectedSkipError(detail)) {
-      log.info("retry_factory_notify skipped (state changed or already minted)", {
+      log.info("retry_factory_notify skipped (state changed or already recorded)", {
         pool: poolAddress,
         detail,
       });

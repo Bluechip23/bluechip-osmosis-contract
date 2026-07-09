@@ -216,6 +216,61 @@ fn create_pair() {
         .any(|attr| attr.key == "action" && attr.value == "create"));
     assert!(res.attributes.iter().any(|attr| attr.key == "creator"));
     assert!(res.attributes.iter().any(|attr| attr.key == "pool_id"));
+    // Flat native creation fee comes straight from config — no oracle.
+    assert!(
+        res.attributes
+            .iter()
+            .any(|attr| attr.key == "fee_source" && attr.value == "config"),
+        "fee_source must be \"config\" when standard_pool_creation_fee > 0"
+    );
+}
+
+#[test]
+fn create_pair_fee_disabled_rejects_attached_funds() {
+    // With standard_pool_creation_fee == 0 the fee gate is disabled:
+    // a fund-less Create succeeds (fee_source = "disabled") and any
+    // attached funds are rejected outright.
+    let mut deps = mock_dependencies(&[]);
+
+    let mut msg = create_default_instantiate_msg();
+    msg.standard_pool_creation_fee = Uint128::zero();
+    let env = mock_env();
+    instantiate(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&admin_addr(), &[]),
+        msg,
+    )
+    .unwrap();
+
+    // Attached funds while the fee is disabled -> hard error.
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&admin_addr(), &creation_fee_funds()),
+        create_pool_msg("Token1"),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{}", err).contains("fee is disabled; do not attach any funds"),
+        "got: {}",
+        err
+    );
+
+    // No funds -> create succeeds and reports the disabled fee source.
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&admin_addr(), &[]),
+        create_pool_msg("Token1"),
+    )
+    .unwrap();
+    assert!(
+        res.attributes
+            .iter()
+            .any(|attr| attr.key == "fee_source" && attr.value == "disabled"),
+        "fee_source must be \"disabled\" when standard_pool_creation_fee == 0"
+    );
 }
 
 #[test]
