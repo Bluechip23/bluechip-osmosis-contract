@@ -1004,8 +1004,6 @@ fn test_h1_commit_rejects_multi_denom_funds() {
     use crate::msg::CommitFeeInfo;
     use crate::state::CommitLimitInfo;
     use crate::state::{COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT};
-    use cosmwasm_std::{to_json_binary, Binary, ContractResult, SystemError, SystemResult, WasmQuery};
-    use pool_factory_interfaces::ConversionResponse;
 
     let mut deps = mock_dependencies();
     setup_pool_storage(&mut deps);
@@ -1025,32 +1023,19 @@ fn test_h1_commit_rejects_multi_denom_funds() {
         .save(
             &mut deps.storage,
             &CommitLimitInfo {
-                commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
+                commit_amount_for_threshold: Uint128::new(25_000_000_000),
                 max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
                 creator_excess_liquidity_lock_days: 14,
-                min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-                min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+                min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
+                min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
             },
         )
         .unwrap();
     IS_THRESHOLD_HIT.save(&mut deps.storage, &false).unwrap();
 
-    // Mock the oracle so usd_value computation passes before the
-    // funds-validation gate fires.
-    deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { msg: _, .. } => {
-            let response = ConversionResponse {
-                amount: Uint128::new(100_000_000), // commit's USD value
-                rate_used: Uint128::new(1_000_000),
-                timestamp: 1571797419u64, // matches mock_env block time
-            };
-            SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
-        }
-        _ => SystemResult::Err(SystemError::InvalidRequest {
-            error: "Unknown query".to_string(),
-            request: Binary::default(),
-        }),
-    });
+    // No oracle mock needed: a commit's value toward the threshold IS
+    // its gross native amount — the commit flow makes no cross-contract
+    // price query before the funds-validation gate fires.
 
     let env = mock_env();
     let user = Addr::unchecked("committer");
@@ -1516,11 +1501,11 @@ fn test_m7_threshold_payout_emits_accept_ownership() {
     let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
+        commit_amount_for_threshold: Uint128::new(25_000_000_000),
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 14,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
+        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
     };
     let payout = ThresholdPayoutAmounts {
         creator_reward_amount: Uint128::new(325_000_000_000),
