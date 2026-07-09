@@ -86,11 +86,11 @@ fn setup_pool_with_querier() -> OwnedDeps<MockStorage, MockApi, mock_querier::Wa
     POOL_SPECS.save(&mut deps.storage, &pool_specs).unwrap();
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
+        commit_amount_for_threshold: Uint128::new(25_000_000_000),
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
+        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
     };
     COMMIT_LIMIT_INFO
         .save(&mut deps.storage, &commit_config)

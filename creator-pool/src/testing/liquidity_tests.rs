@@ -25,9 +25,9 @@ use crate::{
     liquidity_helpers::calculate_fee_size_multiplier,
     msg::CommitFeeInfo,
     state::{
-        CommitLimitInfo, OracleInfo, PoolFeeState, PoolInfo, PoolSpecs, PoolState,
+        CommitLimitInfo, PoolFeeState, PoolInfo, PoolSpecs, PoolState,
         ThresholdPayoutAmounts, COMMITFEEINFO, COMMIT_LIMIT_INFO, LIQUIDITY_POSITIONS,
-        NATIVE_RAISED_FROM_COMMIT, ORACLE_INFO, POOL_INFO, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
+        NATIVE_RAISED_FROM_COMMIT, POOL_INFO, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
         THRESHOLD_PROCESSING,
     },
 };
@@ -817,11 +817,11 @@ pub fn setup_pool_storage(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier
     POOL_SPECS.save(&mut deps.storage, &pool_specs).unwrap();
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000), // $25k with 6 decimals
+        commit_amount_for_threshold: Uint128::new(25_000_000_000), // 25k native with 6 decimals
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
+        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
     };
     COMMIT_LIMIT_INFO
         .save(&mut deps.storage, &commit_config)
@@ -845,13 +845,6 @@ pub fn setup_pool_storage(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier
     COMMITFEEINFO
         .save(&mut deps.storage, &commit_fee_info)
         .unwrap();
-
-    // Mirrors production instantiate semantics: `oracle_addr` is set to
-    // the factory address by default (factory hosts the internal oracle).
-    let oracle_info = OracleInfo {
-        oracle_addr: Addr::unchecked("factory_contract"),
-    };
-    ORACLE_INFO.save(&mut deps.storage, &oracle_info).unwrap();
 
     THRESHOLD_PROCESSING
         .save(&mut deps.storage, &false)

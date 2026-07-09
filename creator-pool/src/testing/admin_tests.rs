@@ -79,7 +79,7 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
             commit_fee_bluechip: Decimal::percent(1),
             commit_fee_creator: Decimal::percent(1),
         },
-        commit_threshold_limit_usd: Uint128::new(1000),
+        commit_threshold_limit: Uint128::new(1000),
         position_nft_address: Addr::unchecked("nft_addr"),
         token_address: token_addr,
         max_bluechip_lock_per_pool: Uint128::new(10000),
@@ -340,16 +340,6 @@ fn test_update_config_all() {
     let specs = POOL_SPECS.load(&deps.storage).unwrap();
     assert_eq!(specs.lp_fee, Decimal::percent(5));
     assert_eq!(specs.min_commit_interval, 60);
-
-    // `oracle_address` field on PoolConfigUpdate was removed;
-    // the per-pool oracle endpoint is pinned at instantiate to the
-    // factory address and no longer rotatable via this path. The
-    // separate ORACLE_INFO state item still exists and is set at
-    // instantiate, so a sanity check that the pre-existing value is
-    // unchanged after this update keeps the regression coverage.
-    let oracle_info = crate::state::ORACLE_INFO.load(&deps.storage).unwrap();
-    let pool_info = crate::state::POOL_INFO.load(&deps.storage).unwrap();
-    assert_eq!(oracle_info.oracle_addr, pool_info.factory_addr);
 }
 
 #[test]
