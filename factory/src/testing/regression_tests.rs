@@ -46,7 +46,7 @@ fn default_factory_config() -> FactoryInstantiate {
     FactoryInstantiate {
         cw721_nft_contract_id: 58,
         factory_admin_address: admin_addr(),
-        commit_threshold_limit: Uint128::new(25_000_000_000),
+        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         standard_pool_wasm_contract_id: 0,
@@ -56,6 +56,9 @@ fn default_factory_config() -> FactoryInstantiate {
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 14,
         bluechip_denom: "ubluechip".to_string(),
+        pricing_pool_id: 1,
+        usd_quote_denom: "uusdc".to_string(),
+        twap_window_seconds: 600,
         standard_pool_creation_fee: Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
@@ -478,8 +481,8 @@ fn test_update_pool_config_nonexistent_pool() {
 }
 
 /// — propose-time bounds check + standard-pool rejection
-/// for the `min_commit_pre_threshold` /
-/// `min_commit_post_threshold` knobs.
+/// for the `min_commit_usd_pre_threshold` /
+/// `min_commit_usd_post_threshold` knobs.
 #[test]
 fn test_propose_pool_config_commit_floor_bounds_and_kind_gating() {
     let mut deps = mock_deps_with_querier(&[]);
@@ -508,7 +511,7 @@ fn test_propose_pool_config_commit_floor_bounds_and_kind_gating() {
 
     // Zero floor is rejected.
     let zero = PoolConfigUpdate {
-        min_commit_pre_threshold: Some(Uint128::zero()),
+        min_commit_usd_pre_threshold: Some(Uint128::zero()),
         ..Default::default()
     };
     let err = execute(
@@ -529,8 +532,8 @@ fn test_propose_pool_config_commit_floor_bounds_and_kind_gating() {
 
     // Above-cap floor is rejected.
     let too_high = PoolConfigUpdate {
-        min_commit_post_threshold: Some(
-            crate::pool_struct::POOL_CONFIG_MAX_MIN_COMMIT + Uint128::new(1),
+        min_commit_usd_post_threshold: Some(
+            crate::pool_struct::POOL_CONFIG_MAX_MIN_COMMIT_USD + Uint128::new(1),
         ),
         ..Default::default()
     };
@@ -552,7 +555,7 @@ fn test_propose_pool_config_commit_floor_bounds_and_kind_gating() {
 
     // Standard pool target with commit-floor field set is rejected.
     let standard_floor = PoolConfigUpdate {
-        min_commit_pre_threshold: Some(Uint128::new(2_000_000)),
+        min_commit_usd_pre_threshold: Some(Uint128::new(2_000_000)),
         ..Default::default()
     };
     let err = execute(
@@ -573,8 +576,8 @@ fn test_propose_pool_config_commit_floor_bounds_and_kind_gating() {
 
     // Same valid floor against the commit pool is accepted.
     let ok = PoolConfigUpdate {
-        min_commit_pre_threshold: Some(Uint128::new(10_000_000)),
-        min_commit_post_threshold: Some(Uint128::new(2_000_000)),
+        min_commit_usd_pre_threshold: Some(Uint128::new(10_000_000)),
+        min_commit_usd_post_threshold: Some(Uint128::new(2_000_000)),
         ..Default::default()
     };
     execute(
@@ -810,7 +813,7 @@ fn test_propose_config_update_rejects_fee_sum_above_one() {
 }
 
 // ---------------------------------------------------------------------------
-// `commit_threshold_limit == 0` is also rejected. A zero threshold
+// `commit_threshold_limit_usd == 0` is also rejected. A zero threshold
 // makes commit pools created against this config permanently uncrossable,
 // locking them in pre-threshold state forever.
 // ---------------------------------------------------------------------------
@@ -820,7 +823,7 @@ fn test_propose_config_update_rejects_zero_threshold() {
     setup_factory(&mut deps);
 
     let mut bad = default_factory_config();
-    bad.commit_threshold_limit = Uint128::zero();
+    bad.commit_threshold_limit_usd = Uint128::zero();
 
     let info = message_info(&admin_addr(), &[]);
     let res = execute(
@@ -831,7 +834,7 @@ fn test_propose_config_update_rejects_zero_threshold() {
     );
     let err = res.expect_err("zero threshold must be rejected at propose time");
     assert!(
-        err.to_string().contains("commit_threshold_limit"),
+        err.to_string().contains("commit_threshold_limit_usd"),
         "got: {}",
         err
     );

@@ -99,6 +99,29 @@ impl WasmMockQuerier {
     fn handle_query(&self, request: &QueryRequest<Empty>) -> QuerierResult {
         match request {
             QueryRequest::Wasm(WasmQuery::Smart { contract_addr, msg }) => {
+                // Default USD valuation for commit tests: answer the
+                // factory's ConvertNativeToUsd at a 1:1 rate ($1 per
+                // native token) regardless of which address is queried,
+                // mirroring production where the factory computes the
+                // rate from the chain's x/twap.
+                #[cosmwasm_schema::cw_serde]
+                enum WrapperProbe {
+                    PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
+                }
+                if let Ok(WrapperProbe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                )) = from_json(msg)
+                {
+                    let resp = pool_factory_interfaces::ConversionResponse {
+                        amount,
+                        rate_used: Uint128::new(1_000_000),
+                        timestamp: 0,
+                    };
+                    return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
+                        to_json_binary(&resp).unwrap(),
+                    ));
+                }
+
                 // 1) factory fee-info
                 if contract_addr == "factory" {
                     if let Ok(QueryMsg::FeeInfo {}) = from_json(msg) {

@@ -1,14 +1,17 @@
 # Bluechip Protocol — Security Audit
 
-> **⚠️ Strip-down notice (chain-portable relaunch).** The internal price
-> oracle (TWAP + Pyth), keeper bounties, the expand-economy reservoir, and
-> the bluechip mint-reward machinery have been **removed** from the
-> contracts. Pools now pair against the host chain's main native asset
-> (`bluechip_denom`, e.g. `uatom`), and the commit threshold is denominated
-> directly in that asset (`commit_threshold_limit`, base units) — no USD
-> conversion anywhere. Sections of this document describing the oracle,
-> bounties, expand-economy, or USD-denominated thresholds are **historical**
-> and no longer reflect the deployed contracts.
+> **⚠️ Strip-down notice (Osmosis relaunch).** The internal price oracle
+> (bespoke TWAP engine + Pyth), keeper bounties, the expand-economy
+> reservoir, and the bluechip mint-reward machinery have been **removed**
+> from the contracts. Pools now pair against the host chain's main native
+> asset (`bluechip_denom`, e.g. `uosmo`). The commit threshold remains
+> **USD-denominated** (`commit_threshold_limit_usd`), but commits are now
+> valued via Osmosis's chain-native `x/twap` module over a configured
+> native/USDC pool (`factory::usd_price`) — a single stateless chain query
+> with no keepers, no Pyth pusher, and no bespoke oracle to attack.
+> Sections of this document describing the old oracle engine, bounties, or
+> expand-economy are **historical** and no longer reflect the deployed
+> contracts.
 
 **Scope:** all production CosmWasm contracts — `factory` (including the
 ~2,860-line internal price oracle), `creator-pool`, `standard-pool`,

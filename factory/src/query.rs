@@ -218,6 +218,9 @@ pub fn query_creator_token_info(deps: Deps, pool_id: u64) -> StdResult<CreatorTo
 
 pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) -> StdResult<Binary> {
     match msg {
+        FactoryQueryMsg::ConvertNativeToUsd { amount } => to_json_binary(
+            &crate::usd_price::convert_native_to_usd(deps, &_env, amount)?,
+        ),
         FactoryQueryMsg::EmergencyWithdrawDelaySeconds {} => {
             // Pools call this from `pool-core::execute_emergency_withdraw_initiate`
             // so the delay always tracks the live factory config rather

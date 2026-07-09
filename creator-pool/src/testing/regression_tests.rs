@@ -1007,6 +1007,7 @@ fn test_h1_commit_rejects_multi_denom_funds() {
 
     let mut deps = mock_dependencies();
     setup_pool_storage(&mut deps);
+    crate::testing::swap_tests::with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
     COMMITFEEINFO
         .save(
@@ -1023,11 +1024,11 @@ fn test_h1_commit_rejects_multi_denom_funds() {
         .save(
             &mut deps.storage,
             &CommitLimitInfo {
-                commit_amount_for_threshold: Uint128::new(25_000_000_000),
+                commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
                 max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
                 creator_excess_liquidity_lock_days: 14,
-                min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
-                min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
+                min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
+                min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
             },
         )
         .unwrap();
@@ -1512,11 +1513,11 @@ fn test_m7_threshold_payout_emits_accept_ownership() {
     let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold: Uint128::new(25_000_000_000),
+        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 14,
-        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
-        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
+        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
+        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
     };
     let payout = ThresholdPayoutAmounts {
         creator_reward_amount: Uint128::new(325_000_000_000),

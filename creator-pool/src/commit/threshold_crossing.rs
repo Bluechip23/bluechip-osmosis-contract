@@ -1,5 +1,5 @@
 //! Threshold-crossing commit handler. Fires when a single commit carries
-//! the pool over its `commit_amount_for_threshold` target.
+//! the pool over its `commit_amount_for_threshold_usd` target.
 //!
 //! Responsibilities (in order):
 //! 1. Split the incoming commit into a threshold portion (up to the
@@ -35,7 +35,9 @@ use crate::state::{
     POOL_FEE_STATE, POOL_STATE, POST_THRESHOLD_COOLDOWN_BLOCKS,
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
-use crate::swap_helper::{assert_max_spread, compute_swap, update_price_accumulator};
+use crate::swap_helper::{
+    assert_max_spread, compute_swap, update_price_accumulator, usd_to_native_at_rate,
+};
 
 use super::commit_base_attributes;
 
@@ -49,6 +51,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     amount_after_fees: Uint128,
     commit_value: Uint128,
     value_to_threshold: Uint128,
+    usd_rate: Uint128,
     pool_state: &mut PoolState,
     pool_fee_state: &mut PoolFeeState,
     pool_specs: &PoolSpecs,
@@ -78,10 +81,11 @@ pub(crate) fn process_threshold_crossing_with_excess(
         return Err(ContractError::StuckThresholdProcessing);
     }
 
-    // Threshold accounting is native-denominated: the portion of this
-    // commit that fills the remaining threshold gap is `value_to_threshold`
-    // native base units, and everything above it is excess.
-    let bluechip_to_threshold = value_to_threshold;
+    // The threshold gap is USD-denominated; convert it back to native
+    // at EXACTLY the rate captured at commit entry (usd_to_native_at_rate
+    // is the inverse of the valuation math), so the split is
+    // arithmetically consistent with the valuation.
+    let bluechip_to_threshold = usd_to_native_at_rate(value_to_threshold, usd_rate)?;
     let bluechip_excess = asset.amount.checked_sub(bluechip_to_threshold)?;
 
     let threshold_portion_after_fees = if amount.is_zero() {
@@ -95,7 +99,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
         Ok(v.unwrap_or_default().checked_add(value_to_threshold)?)
     })?;
-    USD_RAISED_FROM_COMMIT.save(deps.storage, &commit_config.commit_amount_for_threshold)?;
+    USD_RAISED_FROM_COMMIT.save(deps.storage, &commit_config.commit_amount_for_threshold_usd)?;
     // NATIVE_RAISED_FROM_COMMIT stores the *net* bluechip entering the
     // threshold-pool side of the contract's bank balance — i.e. the
     // threshold-portion-after-fees, not the gross `bluechip_to_threshold`.
@@ -333,7 +337,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
 }
 
 /// Threshold-hit-exact handler. Fires when a commit hits the
-/// `commit_amount_for_threshold` target precisely (no excess to
+/// `commit_amount_for_threshold_usd` target precisely (no excess to
 /// route through the AMM swap). Sister to
 /// [`process_threshold_crossing_with_excess`] — same payout / NFT-accept /
 /// cooldown / factory-notify pipeline, just no swap branch.
@@ -376,7 +380,7 @@ pub(crate) fn process_threshold_hit_exact(
     COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
         Ok(v.unwrap_or_default().checked_add(commit_value)?)
     })?;
-    let final_raised = new_total.min(commit_config.commit_amount_for_threshold);
+    let final_raised = new_total.min(commit_config.commit_amount_for_threshold_usd);
     USD_RAISED_FROM_COMMIT.save(deps.storage, &final_raised)?;
     // Store the net-of-fees bluechip that actually enters the contract's
     // bank balance (; see pre_threshold.rs comment block).

@@ -71,6 +71,16 @@ pub struct RegisteredPoolResponse {
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum FactoryQueryMsg {
+    /// Values `amount` (base units of the chain's native asset, e.g.
+    /// uosmo) in USD micro-units (6 decimals). Backed by Osmosis's
+    /// x/twap module over the factory-configured native/USD-stable pool
+    /// — chain-native pricing, no keeper or external oracle. Pools call
+    /// this once per commit to value the deposit against the
+    /// USD-denominated threshold. Fails (and therefore the commit fails
+    /// closed) if the TWAP query errors.
+    #[returns(ConversionResponse)]
+    ConvertNativeToUsd { amount: Uint128 },
+
     /// Returns the chain-side emergency-withdraw delay (seconds between
     /// `Phase 1: initiate` and `Phase 2: drain` on each pool's
     /// `EmergencyWithdraw` flow). Pools query this at initiate time so
@@ -102,6 +112,19 @@ pub struct EmergencyWithdrawDelayResponse {
 #[cw_serde]
 pub struct BluechipWalletResponse {
     pub address: Addr,
+}
+
+/// Result of a native→USD valuation. `rate_used` is the price in
+/// micro-USD per micro-native (6-decimal fixed point: `1_000_000` means
+/// $1.00 per native token), so callers can convert back
+/// (`native = usd * 1_000_000 / rate_used`) at EXACTLY the rate the
+/// valuation used — no mid-tx drift. `timestamp` is the block time the
+/// TWAP was computed at (always the current block for x/twap-to-now).
+#[cw_serde]
+pub struct ConversionResponse {
+    pub amount: Uint128,
+    pub rate_used: Uint128,
+    pub timestamp: u64,
 }
 
 #[cw_serde]

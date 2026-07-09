@@ -8,6 +8,7 @@ pub mod pool_creation_reply;
 pub mod pool_struct;
 pub mod query;
 pub mod state;
+pub mod usd_price;
 
 // ---------------------------------------------------------------------------
 // Re-exports: top-level facade for downstream crates so `factory::ExecuteMsg`

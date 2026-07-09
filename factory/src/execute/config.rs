@@ -53,15 +53,43 @@ pub(crate) fn validate_factory_config(
     // permanently sit pre-threshold, never minting, never opening swaps.
     // Reject explicitly rather than letting that misconfig ride through
     // a 48h timelock.
-    if config.commit_threshold_limit.is_zero() {
+    if config.commit_threshold_limit_usd.is_zero() {
         return Err(ContractError::Std(StdError::generic_err(
-            "commit_threshold_limit must be non-zero",
+            "commit_threshold_limit_usd must be non-zero",
         )));
     }
     if config.bluechip_denom.trim().is_empty() {
         return Err(ContractError::Std(StdError::generic_err(
             "bluechip_denom must be non-empty",
         )));
+    }
+    // USD pricing config. Every commit is valued through the x/twap of
+    // (pricing_pool_id, bluechip_denom / usd_quote_denom), so a broken
+    // value here bricks commits chain-wide; validate at propose time.
+    if config.pricing_pool_id == 0 {
+        return Err(ContractError::Std(StdError::generic_err(
+            "pricing_pool_id must be non-zero (the Osmosis pool whose TWAP prices              bluechip_denom in usd_quote_denom)",
+        )));
+    }
+    if config.usd_quote_denom.trim().is_empty() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "usd_quote_denom must be non-empty (e.g. the USDC denom on this chain)",
+        )));
+    }
+    if config.usd_quote_denom == config.bluechip_denom {
+        return Err(ContractError::Std(StdError::generic_err(
+            "usd_quote_denom must differ from bluechip_denom",
+        )));
+    }
+    if config.twap_window_seconds < crate::usd_price::TWAP_WINDOW_MIN_SECONDS
+        || config.twap_window_seconds > crate::usd_price::TWAP_WINDOW_MAX_SECONDS
+    {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "twap_window_seconds {} outside allowed range [{}, {}]",
+            config.twap_window_seconds,
+            crate::usd_price::TWAP_WINDOW_MIN_SECONDS,
+            crate::usd_price::TWAP_WINDOW_MAX_SECONDS,
+        ))));
     }
 
     // Threshold-payout splits are stored on FactoryInstantiate so they
@@ -197,12 +225,12 @@ pub fn execute_propose_pool_config_update(
     // time and silently no-op on the pool side; rejecting at propose
     // makes the misuse loud and saves a 48h timelock cycle.
     if pool_details.pool_kind == pool_factory_interfaces::PoolKind::Standard
-        && (update_msg.min_commit_pre_threshold.is_some()
-            || update_msg.min_commit_post_threshold.is_some())
+        && (update_msg.min_commit_usd_pre_threshold.is_some()
+            || update_msg.min_commit_usd_post_threshold.is_some())
     {
         return Err(ContractError::Std(StdError::generic_err(format!(
             "Pool {} is a standard pool — commit-floor knobs \
-             (min_commit_pre_threshold, min_commit_post_threshold) \
+             (min_commit_usd_pre_threshold, min_commit_usd_post_threshold) \
              are creator-pool-only. Drop those fields or target a commit pool.",
             pool_id
         ))));

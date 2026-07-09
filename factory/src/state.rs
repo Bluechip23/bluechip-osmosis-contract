@@ -143,10 +143,11 @@ pub struct PendingPoolConfig {
 pub struct FactoryInstantiate {
     pub factory_admin_address: Addr,
     /// Commit threshold each creator pool must raise before it seeds its
-    /// AMM and opens for swaps. Denominated in base units of
-    /// `bluechip_denom` — the chain's main native asset (e.g. a value of
-    /// `25_000_000_000` with `bluechip_denom = "uatom"` means 25,000 ATOM).
-    pub commit_threshold_limit: Uint128,
+    /// AMM and opens for swaps. USD-denominated, 6 decimals
+    /// (`25_000_000_000` = $25,000). Commits are made in `bluechip_denom`
+    /// and valued against this target via the chain's x/twap price of the
+    /// configured `pricing_pool_id` (see `crate::usd_price`).
+    pub commit_threshold_limit_usd: Uint128,
     pub cw20_token_contract_id: u64,
     pub cw721_nft_contract_id: u64,
     pub create_pool_wasm_contract_id: u64,
@@ -172,6 +173,21 @@ pub struct FactoryInstantiate {
     /// having every downstream commit path treat that denom's
     /// balance as the real pairing asset.
     pub bluechip_denom: String,
+    /// Osmosis pool id whose arithmetic TWAP prices `bluechip_denom`
+    /// against `usd_quote_denom`. Point this at the chain's deepest
+    /// native/USD-stable pool (e.g. the main OSMO/USDC pool) — the
+    /// manipulation cost of every USD valuation in the protocol is the
+    /// cost of moving THIS pool for `twap_window_seconds`.
+    pub pricing_pool_id: u64,
+    /// The USD-stable quote denom on the pricing pool (e.g. Noble USDC's
+    /// IBC denom on Osmosis). Must be a 6-decimal dollar asset — the
+    /// TWAP quote-per-base price is consumed directly as USD-per-native.
+    pub usd_quote_denom: String,
+    /// Arithmetic-TWAP lookback window in seconds. Bounds:
+    /// [`crate::usd_price::TWAP_WINDOW_MIN_SECONDS`],
+    /// [`crate::usd_price::TWAP_WINDOW_MAX_SECONDS`]. Default 600 (10min).
+    #[serde(default = "default_twap_window_seconds")]
+    pub twap_window_seconds: u64,
     /// Flat fee charged on every `CreateStandardPool` and `Create`
     /// (commit-pool) call, denominated in base units of `bluechip_denom`.
     /// Forwarded to `bluechip_wallet_address`; surplus refunded to the
@@ -225,6 +241,10 @@ pub const EMERGENCY_WITHDRAW_DELAY_MAX_SECONDS: u64 = 86_400 * 7;
 
 pub fn default_emergency_withdraw_delay_seconds() -> u64 {
     86_400
+}
+
+pub fn default_twap_window_seconds() -> u64 {
+    600
 }
 
 #[cw_serde]

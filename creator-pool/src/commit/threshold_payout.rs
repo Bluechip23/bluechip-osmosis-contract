@@ -1,7 +1,7 @@
 //! Threshold-crossing payout orchestration.
 //!
 //! Runs once per pool when a commit crosses the
-//! `commit_amount_for_threshold` target. Mints the four creator-token
+//! `commit_amount_for_threshold_usd` target. Mints the four creator-token
 //! splits (`creator_reward_amount`, `bluechip_reward_amount`,
 //! `pool_seed_amount`, `commit_return_amount`), seeds the LP reserves
 //! from `NATIVE_RAISED_FROM_COMMIT`, parks any creator excess (when
@@ -259,7 +259,7 @@ pub fn trigger_threshold_payout(
         let dist_state = DistributionState {
             is_distributing: true,
             total_to_distribute: payout.commit_return_amount,
-            total_committed_usd: commit_config.commit_amount_for_threshold,
+            total_committed_usd: commit_config.commit_amount_for_threshold_usd,
             last_processed_key: None,
             // Real count, not u32::MAX. Termination is now driven by ledger
             // emptiness in process_distribution_batch (the source of truth),

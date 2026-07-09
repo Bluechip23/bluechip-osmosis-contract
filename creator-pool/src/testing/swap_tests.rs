@@ -31,21 +31,43 @@ use cosmwasm_std::{
 };
 use cw20::Cw20ReceiveMsg;
 
-/// Legacy fixture retained for call-site compatibility. The commit flow no
-/// longer queries any oracle — a commit's value toward the threshold IS its
-/// native amount — so this now just installs a deny-all cross-contract
-/// querier. That matches the old fixture's behavior for every non-oracle
-/// query (fail-soft callers like resolve_live_bluechip_wallet fall back to
-/// their snapshots). The rate parameter is ignored.
+/// Installs a mock factory ConvertNativeToUsd responder at the given
+/// rate (micro-USD per micro-native; 1_000_000 = $1 per token). Mirrors
+/// production where the factory computes the rate from the chain's
+/// x/twap over the configured native/USD-stable pool. All other
+/// cross-contract queries error (fail-soft callers like
+/// resolve_live_bluechip_wallet fall back to their snapshots).
 pub fn with_factory_oracle(
     deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
-    _legacy_rate: Uint128,
+    native_to_usd_rate: Uint128,
 ) {
     deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { msg, .. } => SystemResult::Err(SystemError::InvalidRequest {
-            error: "no cross-contract queries expected".to_string(),
-            request: msg.clone(),
-        }),
+        WasmQuery::Smart { msg, .. } => {
+            #[cosmwasm_schema::cw_serde]
+            enum WrapperProbe {
+                PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
+            }
+            if let Ok(WrapperProbe::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+            )) = cosmwasm_std::from_json(msg)
+            {
+                let usd = amount
+                    .checked_mul(native_to_usd_rate)
+                    .unwrap()
+                    .checked_div(Uint128::new(1_000_000))
+                    .unwrap();
+                let resp = pool_factory_interfaces::ConversionResponse {
+                    amount: usd,
+                    rate_used: native_to_usd_rate,
+                    timestamp: 0,
+                };
+                return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+            }
+            SystemResult::Err(SystemError::InvalidRequest {
+                error: "no other cross-contract queries expected".to_string(),
+                request: msg.clone(),
+            })
+        }
         _ => SystemResult::Err(SystemError::InvalidRequest {
             error: "unsupported wasm query".to_string(),
             request: Binary::default(),
@@ -70,6 +92,7 @@ fn test_commit_pre_threshold_basic() {
         amount: Uint128::new(1_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
 
     let env = mock_env();
     let commit_amount = Uint128::new(1_000_000_000); // 1k bluechip
@@ -120,6 +143,7 @@ fn test_race_condition_commits_crossing_threshold() {
     }]);
 
     setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
     THRESHOLD_PROCESSING
         .save(&mut deps.storage, &false)
         .unwrap();
@@ -226,6 +250,7 @@ fn test_commit_crosses_threshold() {
     }]);
 
     setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
 
     THRESHOLD_PROCESSING
         .save(&mut deps.storage, &false)
@@ -295,6 +320,7 @@ fn test_commit_post_threshold_swap() {
         amount: Uint128::new(1_000_000_000), // Give contract 1000 tokens
     }]);
     setup_pool_post_threshold(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
 
     let env = mock_env();
     let commit_amount = Uint128::new(100_000_000); // 100 bluechip
@@ -852,6 +878,7 @@ fn test_commit_rate_limiting() {
         amount: Uint128::new(1_000_000_000), // Give contract 1000 tokens
     }]);
     setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
 
     let mut env = mock_env();
     let user = Addr::unchecked("user");
@@ -1242,7 +1269,7 @@ fn test_factory_impersonation_prevented() {
         },
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
-        commit_threshold_limit: Uint128::new(350_000_000_000),
+        commit_threshold_limit_usd: Uint128::new(350_000_000_000),
         position_nft_address: Addr::unchecked("NFT_contract"),
         token_address: Addr::unchecked("token_contract"),
     };
@@ -1262,6 +1289,7 @@ fn test_usd_tracking_consistency_across_commits() {
         amount: Uint128::new(100_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
 
     let env = mock_env();
 
@@ -1693,6 +1721,7 @@ fn test_race_condition_not_manually_set() {
     }]);
 
     setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
     THRESHOLD_PROCESSING
         .save(&mut deps.storage, &false)
         .unwrap();
@@ -1797,6 +1826,7 @@ fn test_concurrent_commits_both_recorded() {
     }]);
 
     setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
     THRESHOLD_PROCESSING
         .save(&mut deps.storage, &false)
         .unwrap();
@@ -2011,11 +2041,11 @@ pub fn setup_pool_with_reserves(
     POOL_SPECS.save(&mut deps.storage, &pool_specs).unwrap();
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold: Uint128::new(25_000_000_000), // $25k with 6 decimals
+        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000), // $25k with 6 decimals
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
-        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
-        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
+        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
+        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
     };
     COMMIT_LIMIT_INFO
         .save(&mut deps.storage, &commit_config)
@@ -2568,6 +2598,7 @@ fn post_threshold_commit_rejects_when_pre_state_reserve_below_min() {
         amount: Uint128::new(1_000_000_000),
     }]);
     setup_pool_post_threshold(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
 
     // Manually drop reserve1 below MIN (simulating a drained pool that
     // somehow stayed un-paused; the test setup doesn't auto-pause).

@@ -77,7 +77,7 @@ fn test_propose_and_execute_update_config() {
     let msg = FactoryInstantiate {
         cw721_nft_contract_id: 58,
         factory_admin_address: the_admin.clone(),
-        commit_threshold_limit: Uint128::new(100),
+        commit_threshold_limit_usd: Uint128::new(100),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         standard_pool_wasm_contract_id: 0,
@@ -87,6 +87,9 @@ fn test_propose_and_execute_update_config() {
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
+        pricing_pool_id: 1,
+        usd_quote_denom: "uusdc".to_string(),
+        twap_window_seconds: 600,
         standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
@@ -810,7 +813,7 @@ fn setup_factory_custom(deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQueri
 fn default_factory_instantiate_msg() -> FactoryInstantiate {
     FactoryInstantiate {
         factory_admin_address: admin_addr(),
-        commit_threshold_limit: Uint128::new(25_000_000_000),
+        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         cw721_nft_contract_id: 20,
         create_pool_wasm_contract_id: 30,
@@ -821,6 +824,9 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
+        pricing_pool_id: 1,
+        usd_quote_denom: "uusdc".to_string(),
+        twap_window_seconds: 600,
         standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,

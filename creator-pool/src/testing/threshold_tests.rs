@@ -26,11 +26,11 @@ pub fn setup_pool_with_excess_config(deps: &mut OwnedDeps<MockStorage, MockApi, 
     setup_pool_storage(deps);
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold: Uint128::new(25_000_000_000),
+        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
         max_bluechip_lock_per_pool: Uint128::new(100_000),
         creator_excess_liquidity_lock_days: 14,
-        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
-        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
+        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
+        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
     };
 
     COMMIT_LIMIT_INFO
@@ -77,11 +77,27 @@ fn test_threshold_with_excess_creates_position() {
         .unwrap();
 
     deps.querier.update_wasm(|query| match query {
-        WasmQuery::Smart { .. } => {
-            // The commit flow no longer performs any oracle conversion;
-            // deny all cross-contract queries (fail-soft callers fall back).
+        WasmQuery::Smart { msg, .. } => {
+            // Answer the factory's ConvertNativeToUsd at $1 per token;
+            // every other cross-contract query errors (fail-soft callers
+            // fall back to their snapshots).
+            #[cosmwasm_schema::cw_serde]
+            enum WrapperProbe {
+                PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
+            }
+            if let Ok(WrapperProbe::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+            )) = from_json(msg)
+            {
+                let resp = pool_factory_interfaces::ConversionResponse {
+                    amount,
+                    rate_used: Uint128::new(1_000_000),
+                    timestamp: 0,
+                };
+                return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+            }
             SystemResult::Err(SystemError::InvalidRequest {
-                error: "no cross-contract queries expected".to_string(),
+                error: "no other cross-contract queries expected".to_string(),
                 request: Binary::default(),
             })
         }
@@ -297,11 +313,27 @@ fn test_no_excess_when_under_cap() {
         .unwrap();
 
     deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { msg: _, .. } => {
-            // The commit flow no longer performs any oracle conversion;
-            // deny all cross-contract queries (fail-soft callers fall back).
+        WasmQuery::Smart { msg, .. } => {
+            // Answer the factory's ConvertNativeToUsd at $1 per token;
+            // every other cross-contract query errors (fail-soft callers
+            // fall back to their snapshots).
+            #[cosmwasm_schema::cw_serde]
+            enum WrapperProbe {
+                PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
+            }
+            if let Ok(WrapperProbe::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+            )) = from_json(msg)
+            {
+                let resp = pool_factory_interfaces::ConversionResponse {
+                    amount,
+                    rate_used: Uint128::new(1_000_000),
+                    timestamp: 0,
+                };
+                return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+            }
             SystemResult::Err(SystemError::InvalidRequest {
-                error: "no cross-contract queries expected".to_string(),
+                error: "no other cross-contract queries expected".to_string(),
                 request: Binary::default(),
             })
         }
@@ -898,11 +930,27 @@ fn test_accumulated_bluechips_respected() {
 
     // Mock oracle price at /bin/bash.50 (500,000 micros)
     deps.querier.update_wasm(|query| match query {
-        WasmQuery::Smart { .. } => {
-            // The commit flow no longer performs any oracle conversion;
-            // deny all cross-contract queries (fail-soft callers fall back).
+        WasmQuery::Smart { msg, .. } => {
+            // Answer the factory's ConvertNativeToUsd at $1 per token;
+            // every other cross-contract query errors (fail-soft callers
+            // fall back to their snapshots).
+            #[cosmwasm_schema::cw_serde]
+            enum WrapperProbe {
+                PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
+            }
+            if let Ok(WrapperProbe::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+            )) = from_json(msg)
+            {
+                let resp = pool_factory_interfaces::ConversionResponse {
+                    amount,
+                    rate_used: Uint128::new(1_000_000),
+                    timestamp: 0,
+                };
+                return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+            }
             SystemResult::Err(SystemError::InvalidRequest {
-                error: "no cross-contract queries expected".to_string(),
+                error: "no other cross-contract queries expected".to_string(),
                 request: Binary::default(),
             })
         }
@@ -1173,11 +1221,27 @@ fn test_unpaused_pool_accepts_commit_after_previously_paused() {
 
     // Needs oracle query; wire the conversion mock.
     deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { msg: _, .. } => {
-            // The commit flow no longer performs any oracle conversion;
-            // deny all cross-contract queries (fail-soft callers fall back).
+        WasmQuery::Smart { msg, .. } => {
+            // Answer the factory's ConvertNativeToUsd at $1 per token;
+            // every other cross-contract query errors (fail-soft callers
+            // fall back to their snapshots).
+            #[cosmwasm_schema::cw_serde]
+            enum WrapperProbe {
+                PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
+            }
+            if let Ok(WrapperProbe::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+            )) = from_json(msg)
+            {
+                let resp = pool_factory_interfaces::ConversionResponse {
+                    amount,
+                    rate_used: Uint128::new(1_000_000),
+                    timestamp: 0,
+                };
+                return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+            }
             SystemResult::Err(SystemError::InvalidRequest {
-                error: "no cross-contract queries expected".to_string(),
+                error: "no other cross-contract queries expected".to_string(),
                 request: Binary::default(),
             })
         }
@@ -1215,7 +1279,7 @@ fn test_commit_rejects_below_pre_threshold_floor() {
     with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
     // One micro under the default pre-threshold floor ($5.000000).
-    let pre_floor = crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD;
+    let pre_floor = crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD;
     let just_below = pre_floor.checked_sub(Uint128::one()).unwrap();
 
     let info = message_info(
@@ -1260,7 +1324,7 @@ fn test_commit_rejects_below_post_threshold_floor() {
     IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
     with_factory_oracle(&mut deps, Uint128::new(1_000_000));
 
-    let post_floor = crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD;
+    let post_floor = crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD;
     let just_below = post_floor.checked_sub(Uint128::one()).unwrap();
 
     let info = message_info(
@@ -1663,7 +1727,7 @@ mod native_raised_net_semantics_tests {
             },
             Uint128::new(1_000_000),
             Uint128::new(5_000_000),
-            commit_config.commit_amount_for_threshold,
+            commit_config.commit_amount_for_threshold_usd,
             &mut pool_state,
             &mut pool_fee_state,
             &pool_info,

@@ -44,14 +44,16 @@ use crate::state::{
     THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
 
+use crate::swap_helper::get_usd_conversion;
+
 use post_threshold::process_post_threshold_commit;
 use pre_threshold::process_pre_threshold_commit;
 use threshold_crossing::{process_threshold_crossing_with_excess, process_threshold_hit_exact};
 
 // Minimum commit-value floors moved to per-pool state. Defaults are
-// `crate::state::DEFAULT_MIN_COMMIT_{PRE,POST}_THRESHOLD` and the
-// active values are stored on `CommitLimitInfo.min_commit_pre_threshold`
-// / `min_commit_post_threshold`. The floor still limits pre-threshold
+// `crate::state::DEFAULT_MIN_COMMIT_USD_{PRE,POST}_THRESHOLD` and the
+// active values are stored on `CommitLimitInfo.min_commit_usd_pre_threshold`
+// / `min_commit_usd_post_threshold`. The floor still limits pre-threshold
 // ledger bloat (an attacker can cross the threshold with their own
 // money, but not via thousands of micro-entries that balloon the
 // distribution queue); post-threshold commits stay looser since they're
@@ -175,21 +177,26 @@ fn execute_commit_logic(
         return Err(ContractError::ZeroAmount {});
     }
 
-    // The commit's value toward the threshold IS its native amount —
-    // the threshold, the minimum-commit floors, and the per-committer
-    // ledger are all denominated in base units of the chain's native
-    // asset, so no price conversion is needed anywhere in the commit
-    // flow. (`commit_value` is the GROSS pre-fee amount; the net-of-fees
-    // amount computed below is what actually seeds the pool.)
-    let commit_value = asset.amount;
+    // Value the GROSS (pre-fee) commit in USD once at entry and thread
+    // the same rate through every conversion in this handler. The rate
+    // comes from the factory's ConvertNativeToUsd query, backed by the
+    // chain-native x/twap of the configured native/USD-stable pool —
+    // one query per commit, no keeper, and no mid-tx drift because the
+    // threshold split below reuses `usd_rate` rather than re-querying.
+    let conversion = get_usd_conversion(deps.as_ref(), asset.amount)?;
+    let commit_value = conversion.amount;
+    let usd_rate = conversion.rate_used;
+    if usd_rate.is_zero() || commit_value.is_zero() {
+        return Err(ContractError::InvalidOraclePrice {});
+    }
     // Load IS_THRESHOLD_HIT once and thread it through both the minimum-
     // commit check here and the main branching below (used later as
     // `threshold_already_hit`). Previously the load was duplicated.
     let threshold_already_hit = IS_THRESHOLD_HIT.load(deps.storage)?;
     let min_commit = if threshold_already_hit {
-        commit_config.min_commit_post_threshold
+        commit_config.min_commit_usd_post_threshold
     } else {
-        commit_config.min_commit_pre_threshold
+        commit_config.min_commit_usd_pre_threshold
     };
     if commit_value < min_commit {
         let phase: &'static str = if threshold_already_hit {
@@ -267,7 +274,7 @@ fn execute_commit_logic(
                 let current_raised = USD_RAISED_FROM_COMMIT.load(deps.storage)?;
                 let new_total = current_raised.checked_add(commit_value)?;
 
-                if new_total >= commit_config.commit_amount_for_threshold {
+                if new_total >= commit_config.commit_amount_for_threshold_usd {
                     LAST_THRESHOLD_ATTEMPT.save(deps.storage, &env.block.time)?;
 
                     // THRESHOLD_PROCESSING is set to `true` immediately
@@ -300,7 +307,7 @@ fn execute_commit_logic(
                     THRESHOLD_PROCESSING.save(deps.storage, &true)?;
 
                     let value_to_threshold = commit_config
-                        .commit_amount_for_threshold
+                        .commit_amount_for_threshold_usd
                         .checked_sub(current_raised)
                         .unwrap_or(Uint128::zero());
 
@@ -315,6 +322,7 @@ fn execute_commit_logic(
                             amount_after_fees,
                             commit_value,
                             value_to_threshold,
+                            usd_rate,
                             &mut pool_state,
                             &mut pool_fee_state,
                             &pool_specs,

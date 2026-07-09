@@ -186,7 +186,7 @@ pub fn threshold_status_from(deps: Deps, usd_raised: Uint128) -> StdResult<Commi
         let commit_config = COMMIT_LIMIT_INFO.load(deps.storage)?;
         Ok(CommitStatus::InProgress {
             raised: usd_raised,
-            target: commit_config.commit_amount_for_threshold,
+            target: commit_config.commit_amount_for_threshold_usd,
         })
     }
 }

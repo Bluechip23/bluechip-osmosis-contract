@@ -157,11 +157,11 @@ pub fn instantiate(
     };
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold: msg.commit_threshold_limit,
+        commit_amount_for_threshold_usd: msg.commit_threshold_limit_usd,
         max_bluechip_lock_per_pool: msg.max_bluechip_lock_per_pool,
         creator_excess_liquidity_lock_days: msg.creator_excess_liquidity_lock_days,
-        min_commit_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_PRE_THRESHOLD,
-        min_commit_post_threshold: crate::state::DEFAULT_MIN_COMMIT_POST_THRESHOLD,
+        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
+        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
     };
 
     let pool_state = PoolState {
@@ -593,8 +593,8 @@ pub fn execute(
 ///
 /// Pool-core's shared handler updates `PoolSpecs` (lp_fee +
 /// min_commit_interval) but has no compile-time access to creator-pool
-/// state and so leaves `update.min_commit_pre_threshold` and
-/// `update.min_commit_post_threshold` untouched. This wrapper
+/// state and so leaves `update.min_commit_usd_pre_threshold` and
+/// `update.min_commit_usd_post_threshold` untouched. This wrapper
 /// applies those two creator-pool-only floors to `COMMIT_LIMIT_INFO`
 /// first, then delegates the shared knobs to the inner handler.
 ///
@@ -604,14 +604,14 @@ pub fn execute(
 /// migration that ever inserts a `PendingPoolConfig` directly cannot
 /// land an out-of-range value):
 /// - non-zero
-/// - <= `MAX_MIN_COMMIT` (1000 native tokens, 6 decimals)
+/// - <= `MAX_MIN_COMMIT_USD` ($1000, 6 decimals)
 fn execute_update_creator_config_from_factory(
     mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
     update: crate::msg::PoolConfigUpdate,
 ) -> Result<Response, ContractError> {
-    use crate::state::MAX_MIN_COMMIT;
+    use crate::state::MAX_MIN_COMMIT_USD;
 
     // Auth gate is duplicated from pool-core's handler so we don't load
     // and write COMMIT_LIMIT_INFO under an unauthorised caller. The
@@ -621,30 +621,30 @@ fn execute_update_creator_config_from_factory(
         return Err(ContractError::Unauthorized {});
     }
 
-    let pre = update.min_commit_pre_threshold;
-    let post = update.min_commit_post_threshold;
+    let pre = update.min_commit_usd_pre_threshold;
+    let post = update.min_commit_usd_post_threshold;
 
     if pre.is_some() || post.is_some() {
         let mut commit_config = COMMIT_LIMIT_INFO.load(deps.storage)?;
         if let Some(v) = pre {
-            if v.is_zero() || v > MAX_MIN_COMMIT {
+            if v.is_zero() || v > MAX_MIN_COMMIT_USD {
                 return Err(ContractError::InvalidCommitFloor {
-                    field: "min_commit_pre_threshold",
+                    field: "min_commit_usd_pre_threshold",
                     got: v,
-                    max: MAX_MIN_COMMIT,
+                    max: MAX_MIN_COMMIT_USD,
                 });
             }
-            commit_config.min_commit_pre_threshold = v;
+            commit_config.min_commit_usd_pre_threshold = v;
         }
         if let Some(v) = post {
-            if v.is_zero() || v > MAX_MIN_COMMIT {
+            if v.is_zero() || v > MAX_MIN_COMMIT_USD {
                 return Err(ContractError::InvalidCommitFloor {
-                    field: "min_commit_post_threshold",
+                    field: "min_commit_usd_post_threshold",
                     got: v,
-                    max: MAX_MIN_COMMIT,
+                    max: MAX_MIN_COMMIT_USD,
                 });
             }
-            commit_config.min_commit_post_threshold = v;
+            commit_config.min_commit_usd_post_threshold = v;
         }
         COMMIT_LIMIT_INFO.save(deps.storage, &commit_config)?;
     }

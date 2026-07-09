@@ -19,8 +19,8 @@ pub struct CreatePoolReplyMsg {
     pub threshold_payout: Option<Binary>,
     //fees to bluechip and creator
     pub commit_fee_info: CommitFeeInfo,
-    /// Commit threshold in base units of the chain's native asset.
-    pub commit_threshold_limit: Uint128,
+    /// Commit threshold, USD-denominated (6 decimals).
+    pub commit_threshold_limit_usd: Uint128,
     pub token_address: Addr,
     //address called by the pool to mint new liquidity position NFTs.
     pub position_nft_address: Addr,
