@@ -346,12 +346,12 @@ fn test_first_deposit_locks_minimum_liquidity() {
 fn test_distribution_bounty_does_not_touch_pool_funds() {
     // Pre-refactor name: test_distribution_bounty_from_reserves.
     //
-    // The bounty for distribution batches is now paid by the FACTORY, not
-    // skimmed from the pool's own reserve. This test pins the invariant
-    // that ContinueDistribution leaves reserve0 and fee_reserve_0
-    // completely untouched on the pool side, and that the pool emits a
-    // WasmMsg to the factory's PayDistributionBounty endpoint instead of
-    // a BankMsg out of its own balance.
+    // The distribution bounty was removed entirely in the strip-down:
+    // ContinueDistribution neither skims the pool's own reserves nor
+    // sends a PayDistributionBounty message to the factory. This test
+    // pins the invariant that ContinueDistribution leaves reserve0 and
+    // fee_reserve_0 completely untouched and emits NO message to the
+    // factory at all.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
@@ -399,40 +399,30 @@ fn test_distribution_bounty_does_not_touch_pool_funds() {
     let msg = ExecuteMsg::ContinueDistribution {};
     let res = execute(deps.as_mut(), env, caller_info, msg).unwrap();
 
-    // Fee reserves untouched — pool no longer pays the bounty.
+    // Fee reserves untouched — the pool never pays a bounty.
     let post_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
     assert_eq!(
         post_fee_state.fee_reserve_0, fee_state.fee_reserve_0,
-        "fee_reserve_0 must not change — bounty is now paid by the factory"
+        "fee_reserve_0 must not change — there is no distribution bounty"
     );
 
     // Pool trading reserves untouched.
     let post_reserve0 = POOL_STATE.load(&deps.storage).unwrap().reserve0;
     assert_eq!(
         post_reserve0, initial_reserve0,
-        "reserve0 must not decrease — bounty is now paid by the factory"
+        "reserve0 must not decrease — there is no distribution bounty"
     );
 
-    // Confirm the pool emitted a WasmMsg::Execute to the factory's
-    // PayDistributionBounty endpoint with the keeper as recipient.
+    // Confirm NO message targets the factory — the bounty flow is gone.
     let factory_msg_present = res.messages.iter().any(|sm| match &sm.msg {
-        cosmwasm_std::CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
-            if contract_addr != "factory_contract" {
-                return false;
-            }
-            // Decode the inner message to check the variant.
-            let parsed: Result<pool_factory_interfaces::FactoryExecuteMsg, _> = from_json(msg);
-            matches!(
-                parsed,
-                Ok(pool_factory_interfaces::FactoryExecuteMsg::PayDistributionBounty { recipient })
-                    if recipient == "bounty_hunter"
-            )
+        cosmwasm_std::CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, .. }) => {
+            contract_addr == "factory_contract"
         }
         _ => false,
     });
     assert!(
-        factory_msg_present,
-        "expected WasmMsg::Execute to factory.PayDistributionBounty, got: {:?}",
+        !factory_msg_present,
+        "ContinueDistribution must not message the factory (bounty removed), got: {:?}",
         res.messages
     );
 }
@@ -548,7 +538,7 @@ fn test_continue_distribution_completes_in_one_tx_when_final() {
         )
         .unwrap();
 
-    // Single committer — one mint + one bounty msg, then state removed.
+    // Single committer — one mint msg, then state removed.
     let committer = Addr::unchecked("only_committer");
     COMMIT_LEDGER
         .save(&mut deps.storage, &committer, &Uint128::new(5_000_000_000))
@@ -586,8 +576,8 @@ fn test_continue_distribution_completes_in_one_tx_when_final() {
 
     assert_eq!(
         res.messages.len(),
-        2,
-        "expected 1 mint + 1 bounty msg, got: {:?}",
+        1,
+        "expected exactly 1 mint msg (no bounty msg anymore), got: {:?}",
         res.messages
     );
     let bounty_paid = res
