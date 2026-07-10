@@ -122,7 +122,7 @@ deploy-factory-local: build
 
 # ─── Full Stack Local Deploy ─────────────────────────────────────────────────
 deploy-all-local:
-	@echo "For robust deployment with base contracts: ./deploy_robust.sh"
+	@echo "For a full chain deployment: ./deploy_osmosis.sh <env-file>"
 
 # ─── Sei Testnet Deploy ─────────────────────────────────────────────────────
 deploy-pool: optimize-pool

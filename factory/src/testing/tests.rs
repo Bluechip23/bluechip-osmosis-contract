@@ -1520,3 +1520,39 @@ fn pools_query_paginates_registry_in_pool_id_order() {
     let clamped = crate::query::query_pools(deps.as_ref(), None, Some(10_000)).unwrap();
     assert_eq!(clamped.pools.len(), 5);
 }
+
+// Pins the instantiate-message shape emitted by ./deploy_osmosis.sh to
+// the FactoryInstantiate struct. If a field is renamed or a new
+// required (non-defaulted) field is added, this fails and the deploy
+// script must be updated in the same change.
+#[test]
+fn deploy_script_instantiate_json_deserializes() {
+    let json = r#"{
+        "factory_admin_address": "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+        "bluechip_wallet_address": "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+        "bluechip_denom": "uosmo",
+        "usd_quote_denom": "ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894505B876BA6E4",
+        "pricing_pool_id": 1,
+        "twap_window_seconds": 600,
+        "commit_threshold_limit_usd": "25000000000",
+        "commit_fee_bluechip": "0.01",
+        "commit_fee_creator": "0.05",
+        "max_bluechip_lock_per_pool": "25000000000",
+        "creator_excess_liquidity_lock_days": 7,
+        "standard_pool_creation_fee": "1000000",
+        "emergency_withdraw_delay_seconds": 86400,
+        "cw20_token_contract_id": 1,
+        "cw721_nft_contract_id": 2,
+        "create_pool_wasm_contract_id": 3,
+        "standard_pool_wasm_contract_id": 4
+    }"#;
+    let msg: FactoryInstantiate =
+        cosmwasm_std::from_json(json.as_bytes()).expect("deploy script JSON must deserialize");
+    assert_eq!(msg.bluechip_denom, "uosmo");
+    assert_eq!(msg.pricing_pool_id, 1);
+    assert_eq!(msg.commit_threshold_limit_usd, Uint128::new(25_000_000_000));
+    // Omitted-with-default field must land on the canonical payout split.
+    msg.threshold_payout_amounts
+        .validate()
+        .expect("defaulted threshold_payout_amounts must be canonical");
+}
