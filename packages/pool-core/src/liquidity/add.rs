@@ -81,16 +81,9 @@ fn add_to_position_internal(
         min_amount1,
     )?;
 
-    // Standard-pool dust-floor on the produced LP units. Mirrors the
-    // check inside `execute_deposit_liquidity_inner`. No-op on creator
-    // pools. Applied here rather than only on initial deposit because
-    // the multiplier is pinned at 1.0 on standard pools, so this floor
-    // is the only dust-griefing deterrent and must apply at every
-    // liquidity-in entry point.
-
     // Same pre-snapshot pattern as `execute_deposit_liquidity_inner`.
-    // Skipped when verify_balances=false (creator-pool path) — saves the
-    // two CW20 balance queries per add-to-position call.
+    // Skipped when verify_balances=false — saves the two CW20 balance
+    // queries per add-to-position call.
     let pre_snapshot = if verify_balances {
         Some(snapshot_pool_cw20_balances(
             deps.as_ref(),
@@ -270,9 +263,10 @@ pub fn execute_add_to_position(
     )
 }
 
-/// Variant used by standard-pool. Same SubMsg-based balance
+/// Balance-verifying variant — used by the creator pool as
+/// defense-in-depth. Same SubMsg-based balance
 /// verification as `execute_deposit_liquidity_with_verify`; reverts the
-/// transaction when an arbitrary CW20 charged transfer fees or rebased.
+/// transaction when a CW20 charged transfer fees or rebased.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_add_to_position_with_verify(
     deps: DepsMut,

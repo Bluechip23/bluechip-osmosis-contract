@@ -204,9 +204,8 @@ pub fn calc_capped_fees_with_clip(
 /// Build transfer messages for the two fee amounts, dispatching per-asset
 /// on the pair's actual `TokenType` rather than the old
 /// "asset 0 = native, asset 1 = CW20" assumption. Works for every pair
-/// shape — commit pools (native/CW20), standard native/CW20,
-/// standard native/native (e.g. the ATOM/bluechip anchor),
-/// standard CW20/CW20.
+/// shape — native/CW20 (the creator pool), native/native, and
+/// CW20/CW20.
 pub fn build_fee_transfer_msgs(
     pool_info: &PoolInfo,
     recipient: &Addr,
@@ -694,8 +693,7 @@ mod tests {
     }
 
     /// At multiplier = 1.0 (no clipping), both `removed_clip` and
-    /// `preserved_clip` must be zero. Confirms standard-pool semantics
-    /// (APPLY_DUST_MULTIPLIER=false → multiplier always 1.0) are
+    /// `preserved_clip` must be zero. Confirms the no-clip case is
     /// unaffected by the preserved-clip routing change.
     #[test]
     fn calculate_fees_owed_split_pair_zero_clip_at_full_multiplier() {

@@ -1,11 +1,11 @@
-//! Shared wire-format types used by both creator-pool and standard-pool.
+//! Shared wire-format types for consuming pool contract crates.
 //!
 //! Split boundary:
 //! - Shared (this module): CommitFeeInfo, PoolConfigUpdate, Cw20HookMsg,
 //! CommitStatus, and every response struct returned by a query
 //! handler that lives in `pool_core::query`.
-//! - Per-contract (in creator-pool / standard-pool): ExecuteMsg,
-//! QueryMsg, MigrateMsg, PoolInstantiateMsg / CommitPoolInstantiateMsg,
+//! - Per-contract (in creator-pool): ExecuteMsg,
+//! QueryMsg, MigrateMsg, PoolInstantiateMsg,
 //! and commit-only response types (FactoryNotifyStatusResponse,
 //! PoolCommitResponse, CommitterInfo, LastCommittedResponse).
 //!
@@ -32,8 +32,7 @@ pub struct PoolConfigUpdate {
     pub lp_fee: Option<Decimal>,
     pub min_commit_interval: Option<u64>,
     /// Per-pool override for the pre-threshold minimum commit value
-    /// (in USD, 6 decimals). Creator-pool only; ignored by standard
-    /// pools (which have no commit phase). When `Some(_)` the pool
+    /// (in USD, 6 decimals). When `Some(_)` the pool
     /// updates `CommitLimitInfo.min_commit_usd_pre_threshold` to the
     /// new value; `None` leaves it unchanged. Bounds enforced by the
     /// factory at propose time and re-enforced by the pool's wrapper

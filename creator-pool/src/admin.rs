@@ -13,7 +13,7 @@
 //! - `execute_recover_stuck_states` + private recovery helpers —
 //! all three failure modes (stuck threshold, stalled distribution,
 //! jammed reentrancy guard) only ever occur inside the commit
-//! flow, so standard-pool doesn't need them.
+//! flow, so they stay here rather than in the shared library.
 
 pub use pool_core::admin::{
     ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_emergency_share,

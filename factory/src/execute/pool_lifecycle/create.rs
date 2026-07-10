@@ -1,10 +1,8 @@
-//! Pool creation entry points for both pool kinds, plus the input
-//! validators that guard them.
+//! Pool creation entry point, plus the input
+//! validators that guard it.
 //!
-//! Commit pools and standard pools have separate create paths because
-//! they differ in nearly every input dimension (standard pools wrap
-//! pre-existing assets, commit pools mint a fresh CW20 at creation) —
-//! but share the same reply-ID / register_pool plumbing downstream.
+//! Commit pools mint a fresh CW20 at creation and register through the
+//! shared reply-ID / register_pool plumbing downstream.
 
 use cosmwasm_std::{
     to_json_binary, CosmosMsg, DepsMut, Env, MessageInfo, Response, StdError, SubMsg, Uint128,
@@ -196,8 +194,8 @@ pub(crate) fn execute_create_creator_pool(
     )?;
 
     // Charge a flat creation fee (denominated in the chain's native
-    // asset) for commit-pool creation as anti-spam friction. Reuses the
-    // same fee knob as standard pools so deployments can enable/disable
+    // asset) for pool creation as anti-spam friction. Deployments can
+    // enable/disable it
     // from a single config value. Zero disables the fee entirely.
     let required_bluechip = factory_cw20.pool_creation_fee;
     let fee_source = if required_bluechip.is_zero() {

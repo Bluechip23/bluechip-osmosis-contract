@@ -1,4 +1,4 @@
-//! Pool lifecycle: creation (commit + standard pools) and per-pool admin
+//! Pool lifecycle: creation and per-pool admin
 //! forwards (pause, unpause, emergency withdraw, recovery, and the
 //! threshold-crossed callback).
 //!

@@ -183,8 +183,7 @@ pub fn execute_notify_threshold_crossed(
     pool_id: u64,
     crossed_at: Option<cosmwasm_std::Timestamp>,
 ) -> Result<Response, ContractError> {
-    // Single load covers both the caller-address check and the standard-pool
-    // defense-in-depth gate below.
+    // Single registry load backs the caller-address check below.
     let pool_details = POOLS_BY_ID.load(deps.storage, pool_id).map_err(|_| {
         ContractError::Std(StdError::generic_err(format!(
             "Pool {} not found in registry",

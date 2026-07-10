@@ -1,10 +1,9 @@
-//! Shared AMM + liquidity-position core for Bluechip creator pools and
-//! standard pools.
+//! Shared AMM + liquidity-position core for Bluechip pools.
 //!
-//! This crate is a pure library — it exports no `#[entry_point]`s. The
-//! two pool contract crates (`creator-pool` and `standard-pool`) provide
-//! their own instantiate/execute/query/migrate/reply entry points and
-//! dispatch into the handler functions re-exported here.
+//! This crate is a pure library — it exports no `#[entry_point]`s.
+//! Consuming pool contract crates provide their own
+//! instantiate/execute/query/migrate/reply entry points and dispatch
+//! into the handler functions re-exported here.
 //!
 //! Scope:
 //! - AMM math: constant-product swap, spread/slippage, price
@@ -14,7 +13,7 @@
 //! multiplier clipping.
 //! - Asset handling: pair-shape-agnostic transfer/collect helpers for
 //! Native/CW20/CW20-CW20/Native-Native pools.
-//! - Admin ops shared by both pool kinds: pause, unpause, emergency
+//! - Shared admin ops: pause, unpause, emergency
 //! withdraw (initiate + execute + cancel), ensure_not_drained.
 //! - Shared state items and structs backing the above.
 //!
@@ -25,17 +24,16 @@
 //! - Entry points, factory message dispatch, contract-level tests.
 //!
 //! Intended consumers:
-//! - `creator-pool` — the original two-phase pool. Extends this crate
-//! with commit-phase state and handlers.
-//! - `standard-pool` — plain xyk pool. Thin wrapper that delegates
-//! every op to functions here.
+//! - `creator-pool` — the two-phase pool. Extends this crate with
+//! commit-phase state and handlers.
 
 pub mod admin;
 pub mod asset;
 /// SubMsg-based deposit balance verification reply handler.
-/// Standard-pool's `reply` entry point dispatches `DEPOSIT_VERIFY_REPLY_ID`
-/// here to confirm the actual CW20 balance delta on the pool matches the
-/// credited deposit amount. See module docs for the threat model.
+/// The consuming contract's `reply` entry point dispatches
+/// `DEPOSIT_VERIFY_REPLY_ID` here to confirm the actual CW20 balance
+/// delta on the pool matches the credited deposit amount. See module
+/// docs for the threat model.
 pub mod balance_verify;
 pub mod error;
 pub mod generic;

@@ -1,16 +1,15 @@
 use cosmwasm_std::{Decimal, OverflowError, StdError, Timestamp, Uint128};
 use thiserror::Error;
 
-/// Unified error type for every pool wasm (creator-pool and standard-pool).
+/// Unified error type for every consumer of this library.
 ///
 /// Variants cover both shared concerns (swap/liquidity/admin) AND commit-
 /// phase-specific concerns (ShortOfThreshold, InvalidThresholdParams,
 /// TooFrequentCommits, MismatchAmount, etc.). Keeping the commit-phase
-/// variants here — even though they are unreachable from the standard-pool
-/// wasm — avoids a split-enum design where creator-pool would need its own
-/// wrapper crate-error that re-exported `pool_core`'s and added commit
-/// variants. A handful of unreachable variants cost nothing at runtime
-/// and keep both contracts using the same type.
+/// variants here avoids a split-enum design where creator-pool would
+/// need its own wrapper crate-error that re-exported `pool_core`'s and
+/// added commit variants. Any variants a given consumer never produces
+/// cost nothing at runtime, and every consumer shares the same type.
 #[derive(Error, Debug, PartialEq)]
 pub enum ContractError {
     #[error("{0}")]

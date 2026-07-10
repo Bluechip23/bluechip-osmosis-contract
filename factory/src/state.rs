@@ -11,7 +11,6 @@
 // ------------------------------ ------------------------------- -------------------------------------------------
 // POOL_CREATION_CONTEXT          "pool_creation_ctx_v3"          v3 schema; v1/v2 predate the unified Temp+State context.
 // POOLS_BY_CONTRACT_ADDRESS      "pools_by_contract_address"     Matches.
-// STANDARD_POOL_CREATION_CONTEXT "std_pool_ctx"                  Shorter key chosen to keep prefix bytes small.
 // LAST_STANDARD_POOL_CREATE_AT   "last_std_pool_create_at"       Shorter key (per above).
 //
 // Unlisted Items/Maps follow the convention "key == lowercase(IDENT)";
@@ -163,8 +162,8 @@ pub struct FactoryInstantiate {
     /// [`crate::usd_price::TWAP_WINDOW_MAX_SECONDS`]. Default 600 (10min).
     #[serde(default = "default_twap_window_seconds")]
     pub twap_window_seconds: u64,
-    /// Flat fee charged on every `CreateStandardPool` and `Create`
-    /// (commit-pool) call, denominated in base units of `bluechip_denom`.
+    /// Flat fee charged on every `Create`
+    /// call, denominated in base units of `bluechip_denom`.
     /// Forwarded to `bluechip_wallet_address`; surplus refunded to the
     /// caller.
     ///

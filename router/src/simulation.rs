@@ -27,13 +27,10 @@ use crate::state::CONFIG;
 ///
 /// For each hop the simulation
 /// 1. resolves the pool against the factory registry — mirroring
-/// execution's `validate_route_pools_registered`, and the only way to
-/// learn the pool's kind without trusting the caller,
-/// 2. for COMMIT pools only, queries `IsFullyCommited` and rejects if
-/// the pool is still in its pre-threshold phase, so frontends never
-/// render a silent zero result for a route that cannot yet execute.
-/// (Standard pools do not implement this query — sending it
-/// unconditionally made every standard-pool hop error out.)
+/// execution's `validate_route_pools_registered`,
+/// 2. queries `IsFullyCommited` and rejects if the pool is still in
+/// its pre-threshold phase, so frontends never render a silent zero
+/// result for a route that cannot yet execute.
 /// 3. queries the pool's `Simulation` with the current chained input
 /// and uses the returned amount as the next hop's input.
 ///

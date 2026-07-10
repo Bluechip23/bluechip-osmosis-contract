@@ -155,9 +155,9 @@ pub(crate) fn prepare_deposit(
     //
     // The valid set is the set of `Native { denom }` entries in the
     // pool's `asset_infos`. CW20 sides don't accept native funds, so
-    // they don't contribute. For Native/CW20 pools (commit pools, most
-    // standard pools) only one denom is valid; for Native/Native pools
-    // (e.g., the ATOM/bluechip anchor) two denoms are valid.
+    // they don't contribute. For Native/CW20 pools (the creator pool)
+    // only one denom is valid; for Native/Native pools two denoms are
+    // valid.
     let valid_denoms: Vec<&str> = pool_info
         .pool_info
         .asset_infos
@@ -214,10 +214,10 @@ pub(crate) fn prepare_deposit(
     })
 }
 
-/// Public deposit entry point — used by creator-pool, where the CW20 is
-/// freshly minted by the factory from `cw20-base` and is therefore
-/// trusted not to charge transfer fees or rebase. Passes
-/// `verify_balances = false` to skip the SubMsg verification.
+/// Public deposit entry point without balance verification. Passes
+/// `verify_balances = false` to skip the SubMsg verification — suitable
+/// only when every CW20 side is fully trusted (no transfer fee, no
+/// rebase), e.g. a factory-minted `cw20-base` token.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_deposit_liquidity(
     deps: DepsMut,
@@ -244,8 +244,9 @@ pub fn execute_deposit_liquidity(
     )
 }
 
-/// Variant used by standard-pool, where the CW20 sides can be
-/// arbitrary third-party contracts. Snapshots the pool's pre-balance
+/// Balance-verifying variant — used by the creator pool as
+/// defense-in-depth against any future third-party CW20 integration.
+/// Snapshots the pool's pre-balance
 /// for every CW20 side, dispatches the final outgoing message as a
 /// `SubMsg::reply_on_success`, and lets the contract's `reply` entry
 /// point call `crate::balance_verify::handle_deposit_verify_reply` to
@@ -295,9 +296,8 @@ fn execute_deposit_liquidity_dispatch(
     enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
     // Shared reentrancy guard across commit + swap + every liquidity
-    // path. Hostile CW20 contracts (only a concern on standard pools
-    // that wrap third-party tokens, never on commit pools where the
-    // factory mints its own CW20) could otherwise re-enter the pool
+    // path. A hostile CW20 (not the factory-minted cw20-base, but any
+    // future third-party token) could otherwise re-enter the pool
     // during an outgoing TransferFrom call and observe / mutate stale
     // state. Routed through the `with_reentrancy_guard` helper for the
     // same lock-clear-on-both-paths invariant the other entry points
@@ -345,20 +345,15 @@ fn execute_deposit_liquidity_inner(
         min_amount1,
     )?;
 
-    // Standard-pool dust-floor: reject deposits whose produced LP units
-    // are below `MIN_STANDARD_POOL_POSITION_LIQUIDITY`. No-op on creator
-    // pools (gated by APPLY_DUST_MULTIPLIER inside the helper). See the
-    // helper's doc-comment for rationale.
-
     // Snapshot the pool's current CW20 balance on every CW20 side
     // BEFORE the TransferFrom messages dispatch. The reply handler will
     // diff post-balance against this snapshot and reject any shortfall
     // (fee-on-transfer / negative-rebase). Native sides return None
     // (bank transfers are exact, no verification needed).
     //
-    // For verify=false (creator-pool), we skip the queries entirely —
-    // the cw20-base CW20 it mints can never charge a transfer fee or
-    // rebase, so the verification would always be a no-op.
+    // For verify=false we skip the queries entirely — only safe when
+    // the CW20 can never charge a transfer fee or rebase, making the
+    // verification a guaranteed no-op.
     let pre_snapshot = if verify_balances {
         Some(snapshot_pool_cw20_balances(
             deps.as_ref(),

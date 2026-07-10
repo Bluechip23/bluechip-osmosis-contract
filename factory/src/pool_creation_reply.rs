@@ -234,15 +234,14 @@ pub fn finalize_pool(
         pool_id,
         pool_token_info,
         creator_pool_addr: pool_address.clone(),
-        // This reply handler is specifically for the commit-pool creation
-        // chain (triggered by ExecuteMsg::Create). Standard pools have
-        // their own reply chain that sets pool_kind = Standard.
+        // This reply handler completes the pool creation chain
+        // triggered by ExecuteMsg::Create.
     };
 
     let ownership_msgs =
         give_pool_ownership_cw20_and_nft(&token_address, &nft_address, &pool_address)?;
 
-    // Symmetric two-phase NFT accept (mirrors `finalize_standard_pool`).
+    // Symmetric two-phase NFT accept.
     // `give_pool_ownership_cw20_and_nft` only emits the CW721
     // `TransferOwnership` (cw_ownable is two-phase: sets pending_owner,
     // current owner unchanged). Without this trigger, the factory
@@ -279,22 +278,12 @@ pub fn finalize_pool(
         .add_attribute("pool_id", pool_id.to_string()))
 }
 
-// ---------------------------------------------------------------------------
-// Standard pool reply chain
-// ---------------------------------------------------------------------------
-//
-// Standard pools have a 2-step reply chain (vs the commit-pool's 3 steps):
-// 1. CW721 NFT instantiate (kicked off by `execute_create_standard_pool`)
-// -> reply lands in `mint_standard_nft`
-// 2. Pool wasm instantiate (kicked off by `mint_standard_nft`)
 /// Minimal typed mirror of the pool-side ExecuteMsg variants the factory
 /// ever needs to call back into. Intentionally NOT a re-export of
-/// `standard_pool::msg::ExecuteMsg` / `creator_pool::msg::ExecuteMsg` —
-/// the factory must not take a circular dep on either pool crate. Both
-/// pool kinds expose the same `AcceptNftOwnership {}` variant with the
-/// same snake_case wire shape, so a single helper here serves both
-/// finalize paths. Wire compatibility is locked in by the round-trip
-/// parse tests in each pool crate's testing module.
+/// `creator_pool::msg::ExecuteMsg` —
+/// the factory must not take a circular dep on the pool crate. Wire
+/// compatibility is locked in by the round-trip
+/// parse tests in the pool crate's testing module.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum PoolFactoryCallback {
@@ -302,7 +291,7 @@ enum PoolFactoryCallback {
 }
 
 /// Builds the `Wasm::Execute { AcceptNftOwnership {} }` call back into
-/// a freshly-created pool (either kind). Sender on the resulting
+/// a freshly-created pool. Sender on the resulting
 /// transaction is the factory contract, which is what the pool-side
 /// `execute_accept_nft_ownership` handlers authorise on.
 fn build_pool_accept_nft_ownership_call(pool_addr: &cosmwasm_std::Addr) -> StdResult<CosmosMsg> {

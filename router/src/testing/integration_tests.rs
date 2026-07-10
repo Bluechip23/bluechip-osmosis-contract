@@ -1239,10 +1239,8 @@ fn apply_with_no_pending_rejected() {
     );
 }
 
-/// Regression for the standard-pool simulation bug: the simulator used
-/// to send `IsFullyCommited` to every hop, but standard pools don't
-/// implement that commit-only query, so any route containing one
-/// errored out. The registry-driven gate must skip the commit check
+/// Asserts the per-hop `max_spread` the router forwards to pools is
+/// pinned to the 5% hard cap.
 #[test]
 fn router_forwards_hard_cap_max_spread_per_hop() {
     let mut world = setup_world();
