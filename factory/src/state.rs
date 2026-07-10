@@ -114,24 +114,6 @@ pub const COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS: u64 = 3600;
 #[cfg(feature = "integration_short_timing")]
 pub const COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS: u64 = 30;
 
-// Per-address rate limit on standard-pool creation. Mirror of the
-// commit-pool rate limit; defends against the same registry-bloat
-// shape. The flat native creation fee is the primary economic barrier;
-// the cooldown backstops deployments that disable the fee.
-pub const LAST_STANDARD_POOL_CREATE_AT: Map<Addr, Timestamp> = Map::new("last_std_pool_create_at");
-
-/// Time-ordered secondary index for `LAST_STANDARD_POOL_CREATE_AT`.
-/// Mirror of `COMMIT_POOL_CREATE_TS_INDEX`; same invariant — every
-/// write to the primary updates this index in the same tx; prune walks
-/// in ascending timestamp order with an early-exit on the first
-/// non-stale entry.
-pub const STANDARD_POOL_CREATE_TS_INDEX: Map<(u64, Addr), ()> = Map::new("std_pool_create_ts_idx");
-
-#[cfg(not(feature = "integration_short_timing"))]
-pub const STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS: u64 = 3600;
-#[cfg(feature = "integration_short_timing")]
-pub const STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS: u64 = 30;
-
 #[cw_serde]
 pub struct PendingPoolConfig {
     pub pool_id: u64,
@@ -151,13 +133,6 @@ pub struct FactoryInstantiate {
     pub cw20_token_contract_id: u64,
     pub cw721_nft_contract_id: u64,
     pub create_pool_wasm_contract_id: u64,
-    /// Code ID for the standard-pool wasm. Defaults to `0` on old
-    /// serialized records so pre-split factories continue to
-    /// deserialize; operators must propose a config update that sets
-    /// this before `CreateStandardPool` can succeed. Standard pools
-    /// instantiate against THIS code_id, not `create_pool_wasm_contract_id`.
-    #[serde(default)]
-    pub standard_pool_wasm_contract_id: u64,
     pub bluechip_wallet_address: Addr,
     pub commit_fee_bluechip: Decimal,
     pub commit_fee_creator: Decimal,
@@ -196,7 +171,7 @@ pub struct FactoryInstantiate {
     /// Tunable via the existing 48h `ProposeConfigUpdate` flow.
     /// Setting this to zero disables the fee entirely (legitimate
     /// configuration choice for permissioned deployments).
-    pub standard_pool_creation_fee: Uint128,
+    pub pool_creation_fee: Uint128,
     /// Per-pool threshold-payout splits applied when a commit pool
     /// crosses its threshold. The sum is also used as the CW20
     /// mint cap pinned at create time, so changing these values
@@ -269,30 +244,6 @@ pub struct PoolCreationContext {
     pub temp: TempPoolCreation,
     pub state: PoolCreationState,
 }
-
-/// Per-`CreateStandardPool` in-flight context. Mirrors the role of
-/// `PoolCreationContext` for the much shorter standard-pool reply chain.
-/// Standard pools don't mint a fresh CW20, so the chain is just
-/// CW721-instantiate → pool-instantiate (no SET_TOKENS step), and the
-/// state is correspondingly leaner. Removed by `finalize_standard_pool`
-/// once registration completes; on failure the entire tx reverts and
-/// nothing persists (same atomicity guarantees as commit pools — see
-/// pool_create_cleanup.rs comment block).
-#[cw_serde]
-pub struct StandardPoolCreationContext {
-    pub pool_id: u64,
-    pub pool_token_info: [crate::asset::TokenType; 2],
-    pub creator: Addr,
-    /// Caller-supplied label propagated to the pool wasm's instantiate
-    /// label field (visible to block explorers and operator tooling).
-    pub label: String,
-    /// Set after the CW721 NFT instantiate sub-message returns; consumed
-    /// by `finalize_standard_pool` to wire ownership to the new pool.
-    pub nft_addr: Option<Addr>,
-}
-
-pub const STANDARD_POOL_CREATION_CONTEXT: Map<u64, StandardPoolCreationContext> =
-    Map::new("std_pool_ctx");
 
 #[cw_serde]
 pub enum CreationStatus {

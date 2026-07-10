@@ -17,8 +17,8 @@ use crate::generic::{
     check_liquidity_rate_limit, enforce_transaction_deadline, with_reentrancy_guard,
 };
 use crate::liquidity_helpers::{
-    build_fee_transfer_msgs, calc_capped_fees_with_clip, effective_fee_size_multiplier,
-    enforce_standard_pool_min_position, sync_position_on_transfer, verify_position_ownership,
+    build_fee_transfer_msgs, calc_capped_fees_with_clip, calculate_fee_size_multiplier,
+    sync_position_on_transfer, verify_position_ownership,
 };
 use crate::state::{
     PoolSpecs, CREATOR_FEE_POT, LIQUIDITY_POSITIONS, POOL_ANALYTICS, POOL_FEE_STATE, POOL_SPECS,
@@ -87,7 +87,6 @@ fn add_to_position_internal(
     // the multiplier is pinned at 1.0 on standard pools, so this floor
     // is the only dust-griefing deterrent and must apply at every
     // liquidity-in entry point.
-    enforce_standard_pool_min_position(deps.storage, prep.liquidity)?;
 
     // Same pre-snapshot pattern as `execute_deposit_liquidity_inner`.
     // Skipped when verify_balances=false (creator-pool path) — saves the
@@ -136,7 +135,7 @@ fn add_to_position_internal(
     liquidity_position.fee_growth_inside_1_last = pool_fee_state.fee_growth_global_1;
     liquidity_position.last_fee_collection = env.block.time.seconds();
     liquidity_position.fee_size_multiplier =
-        effective_fee_size_multiplier(deps.storage, liquidity_position.liquidity)?;
+        calculate_fee_size_multiplier(liquidity_position.liquidity);
     liquidity_position.unclaimed_fees_0 = Uint128::zero();
     liquidity_position.unclaimed_fees_1 = Uint128::zero();
 

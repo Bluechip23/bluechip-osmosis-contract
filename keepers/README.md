@@ -126,9 +126,9 @@ harmless: at worst the keeper wastes its own gas.
 ### Rate-limit prune
 
 The factory tracks per-address create cooldowns in
-`LAST_COMMIT_POOL_CREATE_AT` and `LAST_STANDARD_POOL_CREATE_AT`. These
-maps grow monotonically — every new creator address adds an entry that
-is never removed by the cooldown logic itself. `PruneRateLimits` is a
+`LAST_COMMIT_POOL_CREATE_AT`. This map grows monotonically — every new
+creator address adds an entry that is never removed by the cooldown
+logic itself. `PruneRateLimits` is a
 permissionless handler that removes entries older than 10× the cooldown
 (currently 10 hours). The keeper dispatches it once every
 `PRUNE_EVERY_N_SWEEPS` sweeps rather than running a separate bot because

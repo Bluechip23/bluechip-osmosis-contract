@@ -16,7 +16,7 @@ use pool_factory_interfaces::routing::{
     FactoryRouteQueryMsg, PoolSwapQueryMsg, RouterPoolCommitStatus, RouterSwapSimulationResponse,
     SwapOperation,
 };
-use pool_factory_interfaces::{PoolKind, RegisteredPoolResponse};
+use pool_factory_interfaces::RegisteredPoolResponse;
 
 use crate::error::RouterError;
 use crate::execution::validate_route;
@@ -67,25 +67,26 @@ pub fn simulate_multi_hop(
                     pool_addr: op.pool_addr.clone(),
                 })?,
             }))?;
-        let pool = registered.ok_or_else(|| RouterError::PoolNotRegistered {
+        let _pool = registered.ok_or_else(|| RouterError::PoolNotRegistered {
             hop_index: idx,
             pool_addr: op.pool_addr.clone(),
         })?;
 
-        if pool.pool_kind == PoolKind::Commit {
-            let commit_status: RouterPoolCommitStatus =
-                deps.querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
-                    contract_addr: op.pool_addr.clone(),
-                    msg: to_json_binary(&PoolSwapQueryMsg::IsFullyCommited {})?,
-                }))?;
-            if let RouterPoolCommitStatus::InProgress { raised, target } = commit_status {
-                return Err(RouterError::PoolInCommitPhase {
-                    hop_index: idx,
-                    pool_addr: op.pool_addr.clone(),
-                    raised,
-                    target,
-                });
-            }
+        // Every registered pool is a commit pool; a pre-threshold pool
+        // cannot be swapped through, so reject the route at quote time
+        // with the raised/target detail the frontend needs.
+        let commit_status: RouterPoolCommitStatus =
+            deps.querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
+                contract_addr: op.pool_addr.clone(),
+                msg: to_json_binary(&PoolSwapQueryMsg::IsFullyCommited {})?,
+            }))?;
+        if let RouterPoolCommitStatus::InProgress { raised, target } = commit_status {
+            return Err(RouterError::PoolInCommitPhase {
+                hop_index: idx,
+                pool_addr: op.pool_addr.clone(),
+                raised,
+                target,
+            });
         }
 
         let sim: RouterSwapSimulationResponse =

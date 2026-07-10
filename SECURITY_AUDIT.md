@@ -1,9 +1,8 @@
 # Bluechip Contracts — Security Review
 
 **Scope:** all production CosmWasm contracts — `factory` (including the
-x/twap USD-pricing module `usd_price`), `creator-pool`, `standard-pool`,
-`router` — and the shared `pool-core` / `pool-factory-interfaces`
-libraries. The off-chain `keepers/` and build/release tooling were
+x/twap USD-pricing module `usd_price`), `creator-pool`, `router` — and
+the shared `pool-core` / `pool-factory-interfaces` libraries. The off-chain `keepers/` and build/release tooling were
 reviewed at the configuration level.
 
 **Method:** multiple independent review passes — verification of every
@@ -12,15 +11,16 @@ of the fund-moving paths, a line-by-line deep dive on the x/twap
 pricing route, and a residual-risk / test-coverage pass — with every
 finding re-verified directly against source.
 
-**Evidence baseline:** full workspace suite **464 tests, 0 failures**;
+**Evidence baseline:** full workspace suite **377 tests, 0 failures**;
 `cargo clippy --workspace --tests -- -D warnings` clean; release wasm
 builds verified; CI enforces feature-clean production artifacts
 (`ci/check_prod_build.py` + Makefile hard-fail).
 
 **Threat model:** the factory admin is trusted; the adversary is any
-unprivileged caller (committer, trader, LP, keeper-caller) and, for
-standard pools, a hostile CW20 token contract. Pool creation is
-permissionless.
+unprivileged caller (committer, trader, LP, keeper-caller). The only
+CW20 inside any pool is the vanilla cw20-base token the factory itself
+mints, so no third-party token code executes in the system. Pool
+creation is permissionless.
 
 ---
 
@@ -40,14 +40,13 @@ operational duties.
 |----|-----|------|---------|
 | S-1 | Low | pricing | No on-chain liquidity/depth floor on the pricing pool. `x/twap` never reports "stale": a draining pool keeps returning prices while the cost of manipulating them silently falls. **Mitigation is operational** — alarm on `pricing_pool_id` liquidity and re-point it via the 48h config flow if OSMO/USDC depth ever migrates (see `RUNBOOK.md`). The `RATE_MAX` ceiling bounds the upside of any spike. |
 | S-2 | Info | pricing | Arithmetic (not geometric) TWAP, window floor 300s (default 600s). Arithmetic means upward spikes contribute linearly — the attacker-profitable direction. Consider `GeometricTwapToNow` if hardening further. |
-| S-3 | Low | standard-pool | A fully hostile, **balance-lying** CW20 defeats the balance-verify checks and can drain the paired asset **within its own pool**. Strictly pool-isolated (the swap only touches the one pool whose `asset_infos` contain that token); this is the standard permissionless-AMM LP risk. Disclosed in the README ("Standard-pool CW20 risk"); a token allowlist was considered and deliberately not adopted. LPs must trust the CW20 they pair against. |
-| S-4 | Med (economic) | creator-pool | The creator's 325k-token allocation is unvested at crossing, and creators may commit to their own pools (self-fundable threshold). Accepted design; consider vesting before mainnet — this is the first question a reviewer will ask. |
-| S-5 | High (ops) | governance | Until the factory admin, contract (migration) admin, and `PROTOCOL_WALLET` are a multisig, a single leaked key controls the protocol, and every in-contract 48h timelock is advisory. **Pre-mainnet requirement** — see `docs/MULTISIG.md`. |
-| S-6 | Low | migrate | Migrate handlers enforce semver downgrade protection but not the cw2 contract-*name*; and the router has **no migrate entry point** (changing it means redeploying and re-pointing integrators). |
-| S-7 | Low | queries | `CumulativePrices` reads live balances (which include fee reserves and pots), so the externally-consumable TWAP tail is donation-manipulable. `Simulation` / `ReverseSimulation` quote tracked reserves and are unaffected; no internal consumer reads the accumulator. Integrators should not price off `CumulativePrices` without depth checks. |
-| S-8 | Low | verification | Coverage gaps: the pricing fixed-point math (`twap_dec_to_rate` / `native_to_usd` / `usd_to_native_at_rate`) is unfuzzed (`fuzz_threshold_check` models it only approximately); there is no stateful property harness over the commit → threshold → swap/liquidity lifecycle; and creator-pool tests pin the USD rate at 1:1, so no scenario varies the rate mid-lifecycle. See `FUZZING.md`. |
-| S-9 | Info | deploy | `PROTOCOL_WALLET` defaults to the deployer and the contract admin moves to the multisig only post-instantiate — a deploy-key-as-admin window. `deploy_osmosis.sh` refuses mainnet deploys without an explicit `PROTOCOL_WALLET`; keep the window short. |
-| S-10 | Info | events | `ContinueDistribution` emits a `bounty_paid` attribute even though no bounty mechanism exists (always `false`); cosmetic, but indexers should not key on it. |
+| S-3 | Med (economic) | creator-pool | The creator's 325k-token allocation is unvested at crossing, and creators may commit to their own pools (self-fundable threshold). Accepted design; consider vesting before mainnet — this is the first question a reviewer will ask. |
+| S-4 | High (ops) | governance | Until the factory admin, contract (migration) admin, and `PROTOCOL_WALLET` are a multisig, a single leaked key controls the protocol, and every in-contract 48h timelock is advisory. **Pre-mainnet requirement** — see `docs/MULTISIG.md`. |
+| S-5 | Low | migrate | Migrate handlers enforce semver downgrade protection but not the cw2 contract-*name*; and the router has **no migrate entry point** (changing it means redeploying and re-pointing integrators). |
+| S-6 | Low | queries | `CumulativePrices` reads live balances (which include fee reserves and pots), so the externally-consumable TWAP tail is donation-manipulable. `Simulation` / `ReverseSimulation` quote tracked reserves and are unaffected; no internal consumer reads the accumulator. Integrators should not price off `CumulativePrices` without depth checks. |
+| S-7 | Low | verification | Coverage gaps: the pricing fixed-point math (`twap_dec_to_rate` / `native_to_usd` / `usd_to_native_at_rate`) is unfuzzed (`fuzz_threshold_check` models it only approximately); there is no stateful property harness over the commit → threshold → swap/liquidity lifecycle; and creator-pool tests pin the USD rate at 1:1, so no scenario varies the rate mid-lifecycle. See `FUZZING.md`. |
+| S-8 | Info | deploy | `PROTOCOL_WALLET` defaults to the deployer and the contract admin moves to the multisig only post-instantiate — a deploy-key-as-admin window. `deploy_osmosis.sh` refuses mainnet deploys without an explicit `PROTOCOL_WALLET`; keep the window short. |
+| S-9 | Info | events | `ContinueDistribution` emits a `bounty_paid` attribute even though no bounty mechanism exists (always `false`); cosmetic, but indexers should not key on it. |
 
 ## Verified defenses (with the properties that were checked)
 
@@ -126,8 +125,8 @@ operational duties.
 
 **Factory governance surface**
 - Every privileged `ExecuteMsg` is admin-gated; the permissionless
-  surface is exactly {`Create`, `CreateStandardPool` (flat fee +
-  1h/address rate limits), `NotifyThresholdCrossed` (registered-pool
+  surface is exactly {`Create` (flat fee +
+  1h/address rate limit), `NotifyThresholdCrossed` (registered-pool
   sender + idempotent), `PruneRateLimits` (batch-clamped)}. All
   config / pool-config / upgrade flows are 48h propose→apply with no
   early-apply, no replay, and no silent overwrite of a pending
@@ -149,11 +148,11 @@ execution of every 48h timelock.
 
 ## Priorities
 
-1. **S-5** — multisig for admin/migration/treasury before mainnet
+1. **S-4** — multisig for admin/migration/treasury before mainnet
    (`docs/MULTISIG.md`).
-2. **S-4** — an explicit vesting decision on the creator allocation.
-3. **S-1 + S-8** — stand up the pricing-pool liquidity alarm; restore
+2. **S-3** — an explicit vesting decision on the creator allocation.
+3. **S-1 + S-7** — stand up the pricing-pool liquidity alarm; restore
    fuzz/property coverage over the pricing math and the
    commit→threshold→swap/liquidity lifecycle.
-4. **S-6/S-7** — cheap hardening: cw2 name check on migrate, a router
+4. **S-5/S-6** — cheap hardening: cw2 name check on migrate, a router
    migrate entry point, tracked-reserve sourcing for `CumulativePrices`.

@@ -1368,26 +1368,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "standard-pool"
-version = "1.0.0"
-dependencies = [
- "cosmwasm-schema",
- "cosmwasm-std",
- "cw-multi-test",
- "cw-storage-plus",
- "cw-utils",
- "cw2",
- "cw20",
- "cw20-base",
- "easy-addr",
- "factory",
- "pool-core",
- "pool-factory-interfaces",
- "semver",
- "thiserror 2.0.12",
-]
-
-[[package]]
 name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

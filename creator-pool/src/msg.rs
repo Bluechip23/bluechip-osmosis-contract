@@ -8,8 +8,7 @@
 //! Per-contract types — the ExecuteMsg / QueryMsg / MigrateMsg /
 //! PoolInstantiateMsg enums and the commit-only response types
 //! (FactoryNotifyStatusResponse, PoolCommitResponse, CommitterInfo,
-//! LastCommittedResponse) — stay here. Standard-pool (Step 4b) defines
-//! its own slimmer versions in its own `msg.rs`.
+//! LastCommittedResponse) — stay here.
 pub use pool_core::msg::*;
 
 use crate::asset::{TokenInfo, TokenType};
@@ -369,12 +368,9 @@ pub struct FactoryNotifyStatusResponse {
 }
 
 /// Instantiate message dispatched by the factory to a freshly created pool
-/// wasm. Tagged enum so the pool's `instantiate` entry point can receive
-/// either the commit-pool or standard-pool wire format and branch on
-/// which variant was sent.
+/// wasm.
 ///
-/// Flat struct — standard pools live in their own wasm now (see
-/// `standard-pool` crate) so creator-pool's instantiate only ever
+/// Flat struct — this is the only pool wasm, so `instantiate` only ever
 /// receives this shape. The factory sends it directly via
 /// `WasmMsg::Instantiate { code_id: create_pool_wasm_contract_id, ... }`.
 #[cw_serde]

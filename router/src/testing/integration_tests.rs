@@ -17,7 +17,6 @@ use cw_multi_test::{
 };
 use pool_factory_interfaces::asset::TokenType;
 use pool_factory_interfaces::routing::SwapOperation;
-use pool_factory_interfaces::PoolKind;
 
 use crate::contract;
 use crate::msg::{
@@ -52,13 +51,11 @@ struct World {
     creator_a: Addr,
     creator_b: Addr,
     creator_c: Addr,
-    creator_std: Addr,
     pool_a: Addr,
     pool_b: Addr,
     pool_c: Addr,
     pool_uncommitted: Addr,
     pool_empty: Addr,
-    pool_std: Addr,
 }
 
 fn router_contract() -> Box<dyn Contract<Empty>> {
@@ -154,8 +151,6 @@ fn setup_world() -> World {
     );
     let creator_empty =
         instantiate_creator_token(&mut app, cw20_code, &admin, &user, "Creator Empty", "CRE");
-    let creator_std =
-        instantiate_creator_token(&mut app, cw20_code, &admin, &user, "Creator Std", "CRS");
 
     let pool_a = instantiate_pool(&mut app, pool_code, &admin, &creator_a, true, true);
     let pool_b = instantiate_pool(&mut app, pool_code, &admin, &creator_b, true, true);
@@ -169,9 +164,6 @@ fn setup_world() -> World {
         true,
     );
     let pool_empty = instantiate_pool(&mut app, pool_code, &admin, &creator_empty, true, false);
-    // A standard pool: real ones reject the commit-only IsFullyCommited
-    // query, which the mock reproduces when `standard: true`.
-    let pool_std = instantiate_standard_pool(&mut app, pool_code, &admin, &creator_std);
 
     // Stand up the mock factory with every pool registered against its
     // canonical pair, then point the router at it. The router queries this
@@ -186,32 +178,22 @@ fn setup_world() -> World {
                     mock_factory::RegistryEntry {
                         pool_addr: pool_a.to_string(),
                         pool_token_info: pool_pair(&creator_a),
-                        pool_kind: PoolKind::Commit,
                     },
                     mock_factory::RegistryEntry {
                         pool_addr: pool_b.to_string(),
                         pool_token_info: pool_pair(&creator_b),
-                        pool_kind: PoolKind::Commit,
                     },
                     mock_factory::RegistryEntry {
                         pool_addr: pool_c.to_string(),
                         pool_token_info: pool_pair(&creator_c),
-                        pool_kind: PoolKind::Commit,
                     },
                     mock_factory::RegistryEntry {
                         pool_addr: pool_uncommitted.to_string(),
                         pool_token_info: pool_pair(&creator_uncommitted),
-                        pool_kind: PoolKind::Commit,
                     },
                     mock_factory::RegistryEntry {
                         pool_addr: pool_empty.to_string(),
                         pool_token_info: pool_pair(&creator_empty),
-                        pool_kind: PoolKind::Commit,
-                    },
-                    mock_factory::RegistryEntry {
-                        pool_addr: pool_std.to_string(),
-                        pool_token_info: pool_pair(&creator_std),
-                        pool_kind: PoolKind::Standard,
                     },
                 ],
             },
@@ -244,13 +226,11 @@ fn setup_world() -> World {
         creator_a,
         creator_b,
         creator_c,
-        creator_std,
         pool_a,
         pool_b,
         pool_c,
         pool_uncommitted,
         pool_empty,
-        pool_std,
     }
 }
 
@@ -314,7 +294,6 @@ fn instantiate_pool(
                     },
                 ],
                 fully_committed,
-                standard: false,
             },
             &[],
             "mock_pool",
@@ -339,56 +318,6 @@ fn instantiate_pool(
         )
         .unwrap();
     }
-    pool
-}
-
-/// Same shape as [`instantiate_pool`] but in standard-pool mode: the
-/// mock rejects the commit-only `IsFullyCommited` query exactly like a
-/// real standard pool, and reserves are always seeded (standard pools
-/// are tradeable from instantiation).
-fn instantiate_standard_pool(
-    app: &mut TestApp,
-    code_id: u64,
-    admin: &Addr,
-    creator: &Addr,
-) -> Addr {
-    let pool = app
-        .instantiate_contract(
-            code_id,
-            admin.clone(),
-            &mock_pool::InstantiateMsg {
-                asset_infos: [
-                    TokenType::Native {
-                        denom: BLUECHIP_DENOM.to_string(),
-                    },
-                    TokenType::CreatorToken {
-                        contract_addr: creator.clone(),
-                    },
-                ],
-                fully_committed: true,
-                standard: true,
-            },
-            &[],
-            "mock_standard_pool",
-            None,
-        )
-        .unwrap();
-    app.send_tokens(
-        admin.clone(),
-        pool.clone(),
-        &[Coin::new(POOL_RESERVE, BLUECHIP_DENOM)],
-    )
-    .unwrap();
-    app.execute_contract(
-        admin.clone(),
-        creator.clone(),
-        &Cw20ExecuteMsg::Transfer {
-            recipient: pool.to_string(),
-            amount: Uint128::new(POOL_RESERVE),
-        },
-        &[],
-    )
-    .unwrap();
     pool
 }
 
@@ -1314,56 +1243,6 @@ fn apply_with_no_pending_rejected() {
 /// to send `IsFullyCommited` to every hop, but standard pools don't
 /// implement that commit-only query, so any route containing one
 /// errored out. The registry-driven gate must skip the commit check
-/// for `PoolKind::Standard` and the route must simulate AND execute.
-#[test]
-fn simulation_supports_standard_pool_hops() {
-    let mut world = setup_world();
-
-    let bluechip = TokenType::Native {
-        denom: BLUECHIP_DENOM.to_string(),
-    };
-    let creator_std = TokenType::CreatorToken {
-        contract_addr: world.creator_std.clone(),
-    };
-    let route = vec![op(&world.pool_std, bluechip.clone(), creator_std.clone())];
-    let offer_amount = Uint128::new(100_000);
-
-    let sim: SimulateMultiHopResponse = world
-        .app
-        .wrap()
-        .query_wasm_smart(
-            &world.router,
-            &RouterQueryMsg::SimulateMultiHop {
-                operations: route.clone(),
-                offer_amount,
-            },
-        )
-        .expect("standard-pool hop must simulate");
-    assert!(!sim.final_amount.is_zero());
-
-    let before = cw20_balance(&world.app, &world.creator_std, &world.user);
-    world
-        .app
-        .execute_contract(
-            world.user.clone(),
-            world.router.clone(),
-            &RouterExecuteMsg::ExecuteMultiHop {
-                operations: route,
-                minimum_receive: Uint128::new(1),
-                deadline: None,
-                recipient: None,
-            },
-            &[Coin::new(offer_amount.u128(), BLUECHIP_DENOM)],
-        )
-        .unwrap();
-    let received = cw20_balance(&world.app, &world.creator_std, &world.user) - before;
-    assert_eq!(received, sim.final_amount);
-}
-
-/// Regression for the silent 0.5% per-hop gate: the router must forward
-/// the pools' 5% hard cap as `max_spread` (NOT `None`, which pools
-/// substitute with their 0.5% default) so `minimum_receive` is the
-/// binding slippage control.
 #[test]
 fn router_forwards_hard_cap_max_spread_per_hop() {
     let mut world = setup_world();

@@ -49,7 +49,6 @@ fn default_factory_config() -> FactoryInstantiate {
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: make_addr("ubluechip"),
         commit_fee_bluechip: Decimal::percent(1),
         commit_fee_creator: Decimal::percent(5),
@@ -59,7 +58,7 @@ fn default_factory_config() -> FactoryInstantiate {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: Uint128::new(1_000_000),
+        pool_creation_fee: Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     }
@@ -73,7 +72,7 @@ fn setup_factory(deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQuerier>) {
 }
 
 /// Funds covering the flat native commit-pool creation fee configured in
-/// `default_factory_config` (`standard_pool_creation_fee = 1_000_000`).
+/// `default_factory_config` (`pool_creation_fee = 1_000_000`).
 fn creation_fee_funds() -> [Coin; 1] {
     [Coin {
         denom: "ubluechip".to_string(),
@@ -106,7 +105,6 @@ fn register_test_pool_addr(
                     },
                 ],
                 creator_pool_addr: pool_addr.clone(),
-                pool_kind: pool_factory_interfaces::PoolKind::Commit,
             },
         )
         .unwrap();
@@ -244,49 +242,6 @@ fn test_notify_threshold_crossed_unregistered_pool() {
     assert!(
         err.to_string().contains("not found in registry"),
         "Expected registry error, got: {}",
-        err
-    );
-}
-
-/// Defense-in-depth: a Standard pool must not be able to record a
-/// threshold crossing (it has no commit threshold).
-#[test]
-fn test_notify_threshold_crossed_rejects_standard_pool() {
-    let mut deps = mock_deps_with_querier(&[]);
-    setup_factory(&mut deps);
-
-    let std_pool_addr = make_addr("std_pool_1");
-    let std_details = PoolDetails {
-        pool_id: 2,
-        pool_token_info: [
-            TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            TokenType::Native {
-                denom: "uatom".to_string(),
-            },
-        ],
-        creator_pool_addr: std_pool_addr.clone(),
-        pool_kind: pool_factory_interfaces::PoolKind::Standard,
-    };
-    POOLS_BY_ID
-        .save(&mut deps.storage, 2u64, &std_details)
-        .unwrap();
-
-    let err = execute(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&std_pool_addr, &[]),
-        ExecuteMsg::NotifyThresholdCrossed {
-            pool_id: 2,
-            crossed_at: None,
-        },
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Standard pools do not have a commit threshold"),
-        "Expected standard-pool rejection, got: {}",
         err
     );
 }
@@ -480,34 +435,18 @@ fn test_update_pool_config_nonexistent_pool() {
     );
 }
 
-/// — propose-time bounds check + standard-pool rejection
-/// for the `min_commit_usd_pre_threshold` /
+/// — propose-time bounds check for the
+/// `min_commit_usd_pre_threshold` /
 /// `min_commit_usd_post_threshold` knobs.
 #[test]
-fn test_propose_pool_config_commit_floor_bounds_and_kind_gating() {
+fn test_propose_pool_config_commit_floor_bounds() {
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
     let env = mock_env();
     let admin_info = message_info(&admin_addr(), &[]);
 
-    // Register one Commit pool (id=1) and one Standard pool (id=2).
+    // Register a Commit pool (id=1).
     register_test_pool_addr(&mut deps.storage, 1, &Addr::unchecked("commit_pool_1"));
-    let std_details = PoolDetails {
-        pool_id: 2,
-        pool_token_info: [
-            crate::asset::TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            crate::asset::TokenType::Native {
-                denom: "uatom".to_string(),
-            },
-        ],
-        creator_pool_addr: Addr::unchecked("std_pool_2"),
-        pool_kind: pool_factory_interfaces::PoolKind::Standard,
-    };
-    POOLS_BY_ID
-        .save(&mut deps.storage, 2u64, &std_details)
-        .unwrap();
 
     // Zero floor is rejected.
     let zero = PoolConfigUpdate {
@@ -550,27 +489,6 @@ fn test_propose_pool_config_commit_floor_bounds_and_kind_gating() {
     assert!(
         err.to_string().contains("exceeds maximum"),
         "expected ceiling rejection, got: {}",
-        err
-    );
-
-    // Standard pool target with commit-floor field set is rejected.
-    let standard_floor = PoolConfigUpdate {
-        min_commit_usd_pre_threshold: Some(Uint128::new(2_000_000)),
-        ..Default::default()
-    };
-    let err = execute(
-        deps.as_mut(),
-        env.clone(),
-        admin_info.clone(),
-        ExecuteMsg::ProposePoolConfigUpdate {
-            pool_id: 2,
-            pool_config: standard_floor,
-        },
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("standard pool") && err.to_string().contains("commit-floor"),
-        "expected standard-pool rejection, got: {}",
         err
     );
 
@@ -956,7 +874,7 @@ fn test_create_commit_pool_disabled_fee_rejects_attached_funds() {
 
     // Disable the flat fee.
     let mut cfg = default_factory_config();
-    cfg.standard_pool_creation_fee = Uint128::zero();
+    cfg.pool_creation_fee = Uint128::zero();
     crate::state::FACTORYINSTANTIATEINFO
         .save(&mut deps.storage, &cfg)
         .unwrap();
@@ -1159,45 +1077,6 @@ fn test_c2_pool_details_persists_real_creator_token_address() {
 }
 
 // ---------------------------------------------------------------------------
-// `CreateStandardPool` rejects labels longer than the bound.
-// ---------------------------------------------------------------------------
-#[test]
-fn test_l4_create_standard_pool_rejects_oversized_label() {
-    let mut deps = mock_deps_with_querier(&[]);
-    setup_factory(&mut deps);
-    // Configure standard-pool wasm so the handler reaches label validation.
-    let mut cfg = default_factory_config();
-    cfg.standard_pool_wasm_contract_id = 12;
-    crate::state::FACTORYINSTANTIATEINFO
-        .save(&mut deps.storage, &cfg)
-        .unwrap();
-
-    let oversized = "x".repeat(129);
-    let res = execute(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&admin_addr(), &[]),
-        ExecuteMsg::CreateStandardPool {
-            pool_token_info: [
-                TokenType::Native {
-                    denom: "ubluechip".to_string(),
-                },
-                TokenType::Native {
-                    denom: "uatom".to_string(),
-                },
-            ],
-            label: oversized,
-        },
-    );
-    let err = res.expect_err("oversized label must be rejected");
-    assert!(
-        err.to_string().contains("label too long"),
-        "expected length-rejection error, got: {}",
-        err
-    );
-}
-
-// ---------------------------------------------------------------------------
 // `validate_creator_token_info` rejects all-numeric symbols.
 // ---------------------------------------------------------------------------
 #[test]
@@ -1299,207 +1178,6 @@ fn test_i6_commit_pool_create_rate_limit_per_address() {
         .time
         .plus_seconds(crate::state::COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS + 1);
     execute(deps.as_mut(), later_env, info, make_msg("DDD")).unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// Per-sender rate-limit on `CreateStandardPool`
-// ---------------------------------------------------------------------------
-//
-// The rate-limit check fires AFTER `validate_standard_pool_token_info`, so
-// the test uses a Native+Native pair (skips the CW20 TokenInfo query that
-// would otherwise short-circuit through validation in the mock querier).
-// Setup also writes `standard_pool_wasm_contract_id = 12` so the reply
-// chain has a code id to instantiate against — the SubMsg may still error
-// further downstream in mock-land, but the rate-limit storage write
-// happens BEFORE the SubMsg dispatch in the same tx, so a CosmWasm
-// revert would also revert the timestamp save.
-//
-// To get clean assertions we directly load `LAST_STANDARD_POOL_CREATE_AT`
-// from storage rather than relying on the response on the first call —
-// the rate-limit save happens before any reply-chain SubMsg, so the
-// timestamp is present in storage even if the outer SubMsg dispatch fails
-// in the test environment.
-mod standard_pool_rate_limit_tests {
-    use super::*;
-    use crate::state::{LAST_STANDARD_POOL_CREATE_AT, STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS};
-
-    fn make_native_pair_msg() -> ExecuteMsg {
-        ExecuteMsg::CreateStandardPool {
-            pool_token_info: [
-                TokenType::Native {
-                    denom: "ubluechip".to_string(),
-                },
-                TokenType::Native {
-                    denom: "uatom".to_string(),
-                },
-            ],
-            label: "rate-limit-test".to_string(),
-        }
-    }
-
-    fn setup_factory_with_std_wasm(deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQuerier>) {
-        setup_factory(deps);
-        let mut cfg = default_factory_config();
-        cfg.standard_pool_wasm_contract_id = 12;
-        cfg.standard_pool_creation_fee = Uint128::zero(); // disable fee for cleaner test
-        crate::state::FACTORYINSTANTIATEINFO
-            .save(deps.as_mut().storage, &cfg)
-            .unwrap();
-    }
-
-    /// A second `CreateStandardPool` from the same sender within the
-    /// cooldown window must be rejected with a "Rate-limited" error.
-    #[test]
-    fn second_create_within_cooldown_is_rejected() {
-        let mut deps = mock_deps_with_querier(&[]);
-        setup_factory_with_std_wasm(&mut deps);
-        let caller = make_addr("std_pool_creator");
-        let env = mock_env();
-
-        // First call. The reply chain may not fully execute under the
-        // mock querier, but the rate-limit write happens at handler entry
-        // (before SubMsg dispatch). If the handler returns Ok, the write
-        // landed; if it returns Err, the write was reverted.
-        // Either way, the SECOND call's behaviour locks in: if first
-        // succeeded, second must be rate-limited; if first failed,
-        // second succeeds (no prior stamp). We assert by reading the
-        // storage timestamp directly.
-        let _ = execute(
-            deps.as_mut(),
-            env.clone(),
-            message_info(&caller, &[]),
-            make_native_pair_msg(),
-        );
-
-        let stamp = LAST_STANDARD_POOL_CREATE_AT
-            .may_load(&deps.storage, caller.clone())
-            .unwrap();
-        if stamp.is_none() {
-            // First call rolled back via SubMsg failure in mock-land.
-            // Manually seed the stamp to simulate a successful first
-            // call so we can exercise the rate-limit gate explicitly.
-            LAST_STANDARD_POOL_CREATE_AT
-                .save(&mut deps.storage, caller.clone(), &env.block.time)
-                .unwrap();
-        }
-
-        // Second call from same caller, same block: must be rate-limited.
-        let err = execute(
-            deps.as_mut(),
-            env.clone(),
-            message_info(&caller, &[]),
-            make_native_pair_msg(),
-        )
-        .expect_err("second create within cooldown must be rate-limited");
-        assert!(
-            err.to_string().contains("Rate-limited"),
-            "expected rate-limit error, got: {}",
-            err
-        );
-        assert!(
-            err.to_string().contains("standard pool"),
-            "error message must identify the standard-pool path; got: {}",
-            err
-        );
-    }
-
-    /// A different sender within the cooldown window is unaffected — the
-    /// rate-limit is per-address, not global.
-    #[test]
-    fn different_sender_within_cooldown_is_allowed() {
-        let mut deps = mock_deps_with_querier(&[]);
-        setup_factory_with_std_wasm(&mut deps);
-        let env = mock_env();
-
-        let alice = make_addr("alice");
-        // Seed alice's stamp directly so we don't depend on whether the
-        // first execute() succeeded under mock conditions.
-        LAST_STANDARD_POOL_CREATE_AT
-            .save(&mut deps.storage, alice.clone(), &env.block.time)
-            .unwrap();
-
-        let bob = make_addr("bob");
-        // Bob has no stamp → bob's first call must NOT be rate-limited.
-        // The handler may fail downstream in the SubMsg, but the
-        // rate-limit gate must NOT be the cause. Inspect the error
-        // string to confirm.
-        let res = execute(
-            deps.as_mut(),
-            env,
-            message_info(&bob, &[]),
-            make_native_pair_msg(),
-        );
-        if let Err(e) = res {
-            assert!(
-                !e.to_string().contains("Rate-limited"),
-                "different sender must not hit the rate-limit gate; got: {}",
-                e
-            );
-        }
-
-        // And bob's stamp landed (reached the rate-limit write).
-        let bob_stamp = LAST_STANDARD_POOL_CREATE_AT
-            .may_load(&deps.storage, bob)
-            .unwrap();
-        // The stamp may be None if the SubMsg reverted the whole tx in
-        // mock-land. Both outcomes are acceptable — the assertion that
-        // matters is the negative one above.
-        let _ = bob_stamp;
-    }
-
-    /// After the cooldown elapses, the original sender can create again.
-    #[test]
-    fn original_sender_succeeds_after_cooldown() {
-        let mut deps = mock_deps_with_querier(&[]);
-        setup_factory_with_std_wasm(&mut deps);
-        let caller = make_addr("std_pool_creator");
-        let env = mock_env();
-
-        // Seed a stamp at "now".
-        LAST_STANDARD_POOL_CREATE_AT
-            .save(&mut deps.storage, caller.clone(), &env.block.time)
-            .unwrap();
-
-        // Just before the cooldown expires: still rate-limited.
-        let mut early_env = env.clone();
-        early_env.block.time = early_env
-            .block
-            .time
-            .plus_seconds(STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS - 1);
-        let err = execute(
-            deps.as_mut(),
-            early_env,
-            message_info(&caller, &[]),
-            make_native_pair_msg(),
-        )
-        .expect_err("call inside cooldown must reject");
-        assert!(
-            err.to_string().contains("Rate-limited"),
-            "expected rate-limit, got: {}",
-            err
-        );
-
-        // Just after the cooldown expires: the rate-limit gate must NOT
-        // be the cause of any error.
-        let mut late_env = env.clone();
-        late_env.block.time = late_env
-            .block
-            .time
-            .plus_seconds(STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS + 1);
-        let res = execute(
-            deps.as_mut(),
-            late_env,
-            message_info(&caller, &[]),
-            make_native_pair_msg(),
-        );
-        if let Err(e) = res {
-            assert!(
-                !e.to_string().contains("Rate-limited"),
-                "after cooldown must not hit rate-limit; got: {}",
-                e
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,77 +1390,21 @@ mod pool_admin_forwarder_tests {
         .unwrap_err();
         assert!(matches!(err, ContractError::Unauthorized {}));
     }
-
-    /// `RecoverPoolStuckStates` against a Standard pool is rejected at
-    /// the factory dispatch with a typed error rather than being forwarded
-    /// to the standard pool's `ExecuteMsg` (which has no `RecoverStuckStates`
-    /// variant — the inner `WasmMsg::Execute` would otherwise fail with
-    /// a confusing deserialization error). The handler is commit-only:
-    /// standard pools have no commit-phase, no distribution queue, and
-    /// no threshold-processing state to recover.
-    #[test]
-    fn recover_stuck_states_rejects_standard_pool_with_typed_error() {
-        let mut deps = mock_deps_with_querier(&[]);
-        setup_factory(&mut deps);
-
-        // Register a STANDARD pool at pool_id = 50.
-        let pool_addr = make_addr("standard_pool_under_test");
-        let pool_details = crate::pool_struct::PoolDetails {
-            pool_id: 50,
-            pool_token_info: [
-                TokenType::Native {
-                    denom: "ubluechip".to_string(),
-                },
-                TokenType::Native {
-                    denom: "uatom".to_string(),
-                },
-            ],
-            creator_pool_addr: pool_addr,
-            pool_kind: pool_factory_interfaces::PoolKind::Standard,
-        };
-        POOLS_BY_ID
-            .save(&mut deps.storage, 50, &pool_details)
-            .unwrap();
-
-        let err = execute(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&admin_addr(), &[]),
-            ExecuteMsg::RecoverPoolStuckStates {
-                pool_id: 50,
-                recovery_type: crate::pool_struct::RecoveryType::StuckThreshold,
-            },
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("standard pool"),
-            "standard-pool rejection must surface in the error string, got: {}",
-            err
-        );
-        assert!(
-            err.to_string().contains("creator-pool-only"),
-            "error must explain creator-pool-only constraint, got: {}",
-            err
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Pair-uniqueness guard: canonical pair key, register_pool duplicate
-// rejection, CreateStandardPool entry-time pre-check, and the migrate
-// back-fill of PAIRS from POOLS_BY_ID.
+// rejection, and the migrate back-fill of PAIRS from POOLS_BY_ID.
 // ---------------------------------------------------------------------------
 mod pair_uniqueness_tests {
     use super::*;
-    use crate::state::{canonical_pair_key, register_pool, FACTORYINSTANTIATEINFO, PAIRS};
-    use pool_factory_interfaces::PoolKind;
+    use crate::state::{canonical_pair_key, register_pool, PAIRS};
 
-    fn pool_details_for(pair: [TokenType; 2], pool_id: u64, kind: PoolKind) -> PoolDetails {
+    fn pool_details_for(pair: [TokenType; 2], pool_id: u64) -> PoolDetails {
         PoolDetails {
             pool_id,
             pool_token_info: pair,
             creator_pool_addr: make_addr(&format!("pool_{}", pool_id)),
-            pool_kind: kind,
         }
     }
 
@@ -1850,7 +1472,7 @@ mod pair_uniqueness_tests {
             },
         ];
 
-        let pool1 = pool_details_for(pair.clone(), 1, PoolKind::Standard);
+        let pool1 = pool_details_for(pair.clone(), 1);
         register_pool(
             deps.as_mut().storage,
             1,
@@ -1869,7 +1491,7 @@ mod pair_uniqueness_tests {
         // different pool_id and a different contract address to make
         // sure the rejection is keyed on the pair, not on either of
         // those.
-        let pool2 = pool_details_for(pair.clone(), 2, PoolKind::Standard);
+        let pool2 = pool_details_for(pair.clone(), 2);
         let err = register_pool(
             deps.as_mut().storage,
             2,
@@ -1885,7 +1507,7 @@ mod pair_uniqueness_tests {
 
         // Reverse-order pair must also be rejected (canonicalization).
         let reversed = [pair[1].clone(), pair[0].clone()];
-        let pool3 = pool_details_for(reversed, 3, PoolKind::Standard);
+        let pool3 = pool_details_for(reversed, 3);
         let err = register_pool(
             deps.as_mut().storage,
             3,
@@ -1896,162 +1518,6 @@ mod pair_uniqueness_tests {
         assert!(
             err.to_string().contains("duplicate pair"),
             "expected duplicate-pair error on reversed order, got: {}",
-            err
-        );
-    }
-
-    /// CreateStandardPool entry-time pre-check: if PAIRS already has an
-    /// entry for the canonical key, the handler must return
-    /// `ContractError::DuplicatePair` BEFORE charging the creation fee or
-    /// stamping the per-address rate-limit timestamp.
-    ///
-    /// This is the sybil-attack mitigation. Pre-fix, an attacker could
-    /// rotate through unlimited fresh addresses to spam duplicate
-    /// (ATOM, bluechip) pools at fee × N cost. Post-fix, the second
-    /// attempt onward (regardless of sender) fails immediately.
-    #[test]
-    fn create_standard_pool_rejects_duplicate_pair_from_different_sender() {
-        let mut deps = mock_deps_with_querier(&[]);
-        setup_factory(&mut deps);
-        // Disable the flat fee so the test isolates pair-uniqueness from
-        // fee-funds plumbing.
-        let mut cfg = default_factory_config();
-        cfg.standard_pool_wasm_contract_id = 12;
-        cfg.standard_pool_creation_fee = Uint128::zero();
-        FACTORYINSTANTIATEINFO
-            .save(deps.as_mut().storage, &cfg)
-            .unwrap();
-
-        let pair = [
-            TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            TokenType::Native {
-                denom: "uatom".to_string(),
-            },
-        ];
-
-        // Simulate that a previous tx already registered this pair as
-        // pool_id 1. (We seed PAIRS directly because the mock querier
-        // does not run the standard-pool reply chain to completion;
-        // production would have landed this entry through `register_pool`
-        // inside `finalize_standard_pool`.)
-        PAIRS
-            .save(deps.as_mut().storage, canonical_pair_key(&pair), &1u64)
-            .unwrap();
-
-        // A different sender attempts the same pair. Must fail with
-        // DuplicatePair, NOT with rate-limit (the sender has no prior
-        // stamp), NOT with insufficient-fee (fee is disabled).
-        let attacker = make_addr("sybil_attacker");
-        let env = mock_env();
-        let err = execute(
-            deps.as_mut(),
-            env.clone(),
-            message_info(&attacker, &[]),
-            ExecuteMsg::CreateStandardPool {
-                pool_token_info: pair.clone(),
-                label: "duplicate-attempt".to_string(),
-            },
-        )
-        .expect_err("duplicate pair from different sender must reject");
-
-        assert!(
-            matches!(
-                err,
-                ContractError::DuplicatePair {
-                    existing_pool_id: 1,
-                    ..
-                }
-            ),
-            "expected DuplicatePair{{existing_pool_id: 1, ..}}, got: {:?}",
-            err
-        );
-
-        // And the reversed-order pair from yet another sender is also
-        // rejected — order independence at the entry point.
-        let attacker2 = make_addr("sybil_attacker_2");
-        let reversed = [pair[1].clone(), pair[0].clone()];
-        let err = execute(
-            deps.as_mut(),
-            env,
-            message_info(&attacker2, &[]),
-            ExecuteMsg::CreateStandardPool {
-                pool_token_info: reversed,
-                label: "duplicate-attempt-reversed".to_string(),
-            },
-        )
-        .expect_err("reversed-order duplicate must reject");
-        assert!(
-            matches!(
-                err,
-                ContractError::DuplicatePair {
-                    existing_pool_id: 1,
-                    ..
-                }
-            ),
-            "expected DuplicatePair on reversed pair, got: {:?}",
-            err
-        );
-    }
-
-    /// Same pair, same sender within cooldown: the duplicate guard must
-    /// fire BEFORE the rate-limit gate. (Both checks would reject, but
-    /// the duplicate-pair error is the actionable one for a frontend —
-    /// "this pair already exists" tells the user there's nothing to do,
-    /// while "rate-limited" suggests retrying later.)
-    #[test]
-    fn create_standard_pool_duplicate_check_runs_before_rate_limit() {
-        let mut deps = mock_deps_with_querier(&[]);
-        setup_factory(&mut deps);
-        let mut cfg = default_factory_config();
-        cfg.standard_pool_wasm_contract_id = 12;
-        cfg.standard_pool_creation_fee = Uint128::zero();
-        FACTORYINSTANTIATEINFO
-            .save(deps.as_mut().storage, &cfg)
-            .unwrap();
-
-        let pair = [
-            TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            TokenType::Native {
-                denom: "uatom".to_string(),
-            },
-        ];
-        PAIRS
-            .save(deps.as_mut().storage, canonical_pair_key(&pair), &7u64)
-            .unwrap();
-
-        let caller = make_addr("dup_then_cooldown_caller");
-        // Seed a recent rate-limit stamp so BOTH gates would fire.
-        crate::state::LAST_STANDARD_POOL_CREATE_AT
-            .save(
-                deps.as_mut().storage,
-                caller.clone(),
-                &mock_env().block.time,
-            )
-            .unwrap();
-
-        let err = execute(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&caller, &[]),
-            ExecuteMsg::CreateStandardPool {
-                pool_token_info: pair,
-                label: "ordering".to_string(),
-            },
-        )
-        .expect_err("must reject");
-        assert!(
-            matches!(
-                err,
-                ContractError::DuplicatePair {
-                    existing_pool_id: 7,
-                    ..
-                }
-            ),
-            "duplicate-pair check must fire before rate-limit; got: {:?}",
             err
         );
     }
@@ -2085,14 +1551,14 @@ mod pair_uniqueness_tests {
             .save(
                 deps.as_mut().storage,
                 10,
-                &pool_details_for(pair1.clone(), 10, PoolKind::Standard),
+                &pool_details_for(pair1.clone(), 10),
             )
             .unwrap();
         POOLS_BY_ID
             .save(
                 deps.as_mut().storage,
                 11,
-                &pool_details_for(pair2.clone(), 11, PoolKind::Commit),
+                &pool_details_for(pair2.clone(), 11),
             )
             .unwrap();
 
@@ -2153,18 +1619,10 @@ mod pair_uniqueness_tests {
         // Two legacy duplicate pools at the same pair (this is exactly
         // the pre-fix sybil-attack outcome we're back-filling around).
         POOLS_BY_ID
-            .save(
-                deps.as_mut().storage,
-                5,
-                &pool_details_for(pair.clone(), 5, PoolKind::Standard),
-            )
+            .save(deps.as_mut().storage, 5, &pool_details_for(pair.clone(), 5))
             .unwrap();
         POOLS_BY_ID
-            .save(
-                deps.as_mut().storage,
-                9,
-                &pool_details_for(pair.clone(), 9, PoolKind::Standard),
-            )
+            .save(deps.as_mut().storage, 9, &pool_details_for(pair.clone(), 9))
             .unwrap();
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
@@ -2185,37 +1643,21 @@ mod pair_uniqueness_tests {
             .map(|a| a.value.as_str());
         assert_eq!(legacy, Some("1"));
 
-        // Crucially: post-migrate, NEW duplicate creations of this pair
-        // must reject. This is what the back-fill actually buys us —
+        // Crucially: post-migrate, NEW duplicate registrations of this
+        // pair must reject. This is what the back-fill actually buys us —
         // legacy chain state is grandfathered, but the invariant kicks
-        // in for every subsequent creation.
-        let mut cfg = default_factory_config();
-        cfg.standard_pool_wasm_contract_id = 12;
-        cfg.standard_pool_creation_fee = Uint128::zero();
-        FACTORYINSTANTIATEINFO
-            .save(deps.as_mut().storage, &cfg)
-            .unwrap();
-
-        let new_attacker = make_addr("post_migrate_attacker");
-        let err = execute(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&new_attacker, &[]),
-            ExecuteMsg::CreateStandardPool {
-                pool_token_info: pair,
-                label: "should-fail".to_string(),
-            },
+        // in for every subsequent registration.
+        let new_pool = pool_details_for(pair, 99);
+        let err = register_pool(
+            deps.as_mut().storage,
+            99,
+            &new_pool.creator_pool_addr.clone(),
+            &new_pool,
         )
         .expect_err("post-migrate duplicate must reject");
         assert!(
-            matches!(
-                err,
-                ContractError::DuplicatePair {
-                    existing_pool_id: 5,
-                    ..
-                }
-            ),
-            "post-migrate: expected DuplicatePair pointing at the grandfathered pool 5; got: {:?}",
+            err.to_string().contains("duplicate pair"),
+            "post-migrate: expected duplicate-pair rejection pointing at the grandfathered pair; got: {}",
             err
         );
     }
@@ -2239,7 +1681,7 @@ mod pair_uniqueness_tests {
             .save(
                 deps.as_mut().storage,
                 42,
-                &pool_details_for(pair.clone(), 42, PoolKind::Standard),
+                &pool_details_for(pair.clone(), 42),
             )
             .unwrap();
 

@@ -115,15 +115,14 @@ export class MockContracts implements Executor {
    */
   public readonly pruneCalls: Array<{ batchSize: number }> = [];
   /**
-   * Test hook: programmable counters returned by the next prune call.
-   * Defaults to (0, 0) — i.e., a steady-state "nothing to prune" sweep.
+   * Test hook: programmable counter returned by the next prune call.
+   * Defaults to 0 — i.e., a steady-state "nothing to prune" sweep.
    */
-  private nextPruneCounters: { commit: number; standard: number } = {
+  private nextPruneCounters: { commit: number } = {
     commit: 0,
-    standard: 0,
   };
-  setNextPruneCounters(commit: number, standard: number): void {
-    this.nextPruneCounters = { commit, standard };
+  setNextPruneCounters(commit: number): void {
+    this.nextPruneCounters = { commit };
   }
 
   /** Test hook: the next execute() against `address` throws. One-shot. */
@@ -198,7 +197,7 @@ export class MockContracts implements Executor {
     const counters = this.nextPruneCounters;
     // Reset for next call to the steady-state default; tests opt back
     // in via setNextPruneCounters.
-    this.nextPruneCounters = { commit: 0, standard: 0 };
+    this.nextPruneCounters = { commit: 0 };
 
     return {
       code: 0,
@@ -207,7 +206,6 @@ export class MockContracts implements Executor {
         wasmEvent([
           ["action", "prune_rate_limits"],
           ["commit_pruned", counters.commit.toString()],
-          ["standard_pruned", counters.standard.toString()],
           ["stale_after_secs", "36000"],
           ["batch_size", batchSize.toString()],
         ]),

@@ -177,11 +177,10 @@ pub const FAILED_MINTS: Map<&Addr, Uint128> = Map::new("failed_mints");
 /// wider weakens the liveness guarantee for no further benefit.
 pub const PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS: u64 = 7 * 86_400;
 
-// There is no runtime pool-kind discriminator on the pool side:
-// standard pools run their own wasm (`standard-pool` crate), so the
-// kind is determined by which binary is executing. The factory tracks
-// `pool_kind` on `PoolDetails` for its own routing
-// (commit-vs-standard checks); the pool side doesn't need it.
+// There is no runtime pool-kind discriminator on the pool side: this
+// wasm is the only pool contract, so the kind is implied by the binary
+// itself. The `pool_kind` attribute emitted at instantiate exists for
+// off-chain indexers, not for on-chain routing.
 
 // -- Commit-phase-only constants -----------------------------------------
 

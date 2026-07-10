@@ -1252,7 +1252,7 @@ The factory exposes two distinct creation paths. Pick one based on what you want
 >
 > **Strict single-denom requirement:** The handler accepts **exactly one** coin entry of the canonical bluechip denom. Attaching any other denom alongside (an IBC-wrapped denom, a tokenfactory token, a stray `uatom`) causes the tx to **error at the boundary** rather than silently refund the extras. On error, the bank module auto-returns all attached funds — but the create call fails. Make sure your `funds` array contains only `ubluechip` (or your chain's canonical bluechip denom).
 >
-> **Fee-disabled case:** If the factory is configured with `standard_pool_creation_fee_usd = 0`, pass an empty `funds` array. Attaching any funds when the fee is disabled also errors.
+> **Fee-disabled case:** If the factory is configured with `pool_creation_fee_usd = 0`, pass an empty `funds` array. Attaching any funds when the fee is disabled also errors.
 
 > **Validation bounds (commit pools):** Token name must be 3–50 printable ASCII characters; symbol must be 3–12 chars (A–Z, 0–9) with at least one letter; decimals are pinned to 6 (the threshold-payout amounts and CW20 mint cap are calibrated for this exact value).
 

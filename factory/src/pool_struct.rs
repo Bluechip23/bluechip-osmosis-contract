@@ -3,7 +3,6 @@ use cosmwasm_schema::cw_serde;
 use crate::asset::TokenType;
 
 use cosmwasm_std::{Addr, Decimal, StdError, StdResult, Uint128};
-use pool_factory_interfaces::PoolKind;
 
 /// Caller-supplied portion of the commit-pool create message.
 ///
@@ -25,18 +24,14 @@ pub struct PoolConfigUpdate {
     pub lp_fee: Option<Decimal>,
     pub min_commit_interval: Option<u64>,
     /// Per-pool override for the pre-threshold minimum commit value
-    /// (USD, 6 decimals). Creator-pool only.
-    /// Standard-pool proposals carrying this field are rejected at
-    /// propose time (`execute_propose_pool_config_update` looks up
-    /// `pool_kind` and rejects when `Standard` AND any commit-floor
-    /// field is `Some`).
+    /// (USD, 6 decimals).
     /// Bounds: `0 < v <= POOL_CONFIG_MAX_MIN_COMMIT_USD`. Mirrors the
     /// pool-side `PoolConfigUpdate.min_commit_usd_pre_threshold`.
     /// `#[serde(default)]` keeps pre-this-field clients wire-compatible.
     #[serde(default)]
     pub min_commit_usd_pre_threshold: Option<Uint128>,
     /// Per-pool override for the post-threshold minimum commit value
-    /// (USD, 6 decimals). Creator-pool only.
+    /// (USD, 6 decimals).
     /// Same shape and bounds as `min_commit_usd_pre_threshold` above.
     #[serde(default)]
     pub min_commit_usd_post_threshold: Option<Uint128>,
@@ -210,13 +205,6 @@ pub struct PoolDetails {
     pub pool_id: u64,
     pub pool_token_info: [TokenType; 2],
     pub creator_pool_addr: Addr,
-    /// Distinguishes commit (two-phase) pools from standard (xyk) pools.
-    /// `#[serde(default)]` makes old serialized records — written before
-    /// this field existed — round-trip as `PoolKind::Commit`, which is
-    /// the correct legacy classification since every pool created prior
-    /// to standard-pool support was a commit pool.
-    #[serde(default)]
-    pub pool_kind: PoolKind,
 }
 
 impl ThresholdPayoutAmounts {

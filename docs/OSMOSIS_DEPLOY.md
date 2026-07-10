@@ -1,6 +1,6 @@
 # Shipping to Osmosis
 
-The stack (factory + creator-pool + standard-pool + router)
+The stack (factory + creator-pool + router)
 deploys to Osmosis with pools pairing against **OSMO** (`uosmo`). The
 commit threshold is **USD-denominated**: commits are made in OSMO and
 valued via Osmosis's chain-native `x/twap` module over the configured
@@ -49,7 +49,7 @@ sha256sum artifacts/*.wasm   # hashes go in the gov proposal
 Then run through the whole lifecycle against the testnet factory:
 create a commit pool, commit past a (lowered) threshold, verify the
 crossing seeds the AMM + starts distribution, swap, add/remove
-liquidity, create a standard pool, route a 2-hop swap. Drop
+liquidity, route a 2-hop swap. Drop
 `COMMIT_THRESHOLD_LIMIT_USD` to a few hundred dollars in
 `osmo_testnet.env` so a crossing is cheap to trigger. The testnet
 `PRICING_POOL_ID` must point at a real OSMO/USD-stable pool with
@@ -70,8 +70,8 @@ address-permission route:
 > threshold (valued via the chain's x/twap over the main OSMO/USDC
 > pool) it self-seeds a constant-product AMM and distributes creator
 > tokens to committers pro-rata. Post-threshold, the pool is a standard xyk
-> market. The protocol consists of four contracts (factory, commit
-> pool, standard pool, multi-hop router) plus the audited cw20-base /
+> market. The protocol consists of three contracts (factory, commit
+> pool, multi-hop router) plus the audited cw20-base /
 > cw721-base contracts for creator tokens and LP position NFTs.
 >
 > This proposal grants the deployer address `osmo1...` upload
@@ -129,7 +129,7 @@ instantiate parameters.
 | `COMMIT_THRESHOLD_LIMIT_USD` | USD (6-dec) a pool must raise to open | a few hundred dollars | $25,000 = `25000000000` |
 | `PRICING_POOL_ID` / `USD_QUOTE_DENOM` | x/twap pricing pool for OSMO→USD | your own test pool | the deepest OSMO/USDC pool on osmosis-1 (verify id + denom) |
 | `TWAP_WINDOW_SECONDS` | TWAP lookback (manipulation-cost window) | 600 | 600 |
-| `STANDARD_POOL_CREATION_FEE` | flat uosmo anti-spam fee | 1 OSMO | 1–10 OSMO |
+| `POOL_CREATION_FEE` | flat uosmo anti-spam fee | 1 OSMO | 1–10 OSMO |
 | `COMMIT_FEE_BLUECHIP` / `COMMIT_FEE_CREATOR` | per-commit fee split | 1% / 5% | your call |
 | `MAX_BLUECHIP_LOCK_PER_POOL` | OSMO cap locked into reserves; rest → creator excess | = threshold | your call |
 | `PROTOCOL_WALLET` | receives protocol fees | deploy key | **multisig** |
