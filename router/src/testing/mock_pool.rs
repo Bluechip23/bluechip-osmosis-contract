@@ -8,7 +8,7 @@
 //!
 //! This contract is not part of the production router build -- it lives
 //! under `#[cfg(test)]` solely so the integration tests can stand up
-//! pools without dragging the entire factory + oracle + threshold flow
+//! pools without dragging the entire factory + threshold flow
 //! into every test.
 
 #![allow(clippy::too_many_arguments)]

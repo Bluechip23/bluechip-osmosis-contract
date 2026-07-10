@@ -191,7 +191,7 @@ pub fn instantiate(
     // gate on this until `process_threshold_crossing_with_excess` flips
     // it to `true` during the threshold-crossing commit.
     IS_THRESHOLD_HIT.save(deps.storage, &false)?;
-    // Creator pools use the legacy `fee_size_multiplier` dust-griefing
+    // Creator pools use the `fee_size_multiplier` dust-griefing
     // deterrent — small positions accrue with a clipped multiplier whose
     // clipped slice flows to CREATOR_FEE_POT, claimable by the creator.
     // Standard pools instantiate with this flag set to `false`; see the
@@ -401,9 +401,9 @@ pub fn execute(
             }
             let sender = info.sender.clone();
             // route every CW20-bearing deposit through the
-            // balance-verify variant. The pre-fix path skipped the
-            // pre/post snapshot under the assumption that the pool's
-            // CW20 is always a vanilla cw20-base freshly minted by the
+            // balance-verify variant. Skipping the pre/post snapshot
+            // would assume the pool's CW20 is always a vanilla
+            // cw20-base freshly minted by the
             // factory — true today, but a single careless future
             // `update_pool_token_address` admin path or factory upgrade
             // permitting third-party CW20s would let reserves drift
@@ -855,9 +855,8 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
             //
             // The dispatch arm is gated on `PENDING_MINT_REPLIES.has(id)`
             // so any id ≥ BASE without a stash entry falls through to the
-            // canonical "unknown reply id" handler below (preserves the
-            // pre-fix invariant and keeps the unknown-id regression test
-            // valid).
+            // canonical "unknown reply id" handler below (keeps the
+            // unknown-id regression test valid).
             let pending = PENDING_MINT_REPLIES
                 .load(deps.storage, msg.id)
                 .map_err(|e| {

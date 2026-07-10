@@ -448,8 +448,8 @@ pub const IS_THRESHOLD_HIT: Item<bool> = Item::new("threshold_hit");
 /// protection on standard pools is enforced via the
 /// `MIN_STANDARD_POOL_POSITION_LIQUIDITY` deposit/add floor instead. The
 /// `emergency_withdraw_core_drain` sweep still reads this Item
-/// unconditionally as defense-in-depth (handles pre-fix records / future
-/// drift); on a healthy standard pool the swept amount is zero.
+/// unconditionally as defense-in-depth (handles unexpected records /
+/// future drift); on a healthy standard pool the swept amount is zero.
 pub const CREATOR_FEE_POT: Item<CreatorFeePot> = Item::new("creator_fee_pot");
 
 /// When `true` (default-on-load via `.unwrap_or(true)` for backwards

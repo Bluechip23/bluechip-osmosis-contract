@@ -141,11 +141,10 @@ fn standard_pool_collect_fees_does_not_clip_to_creator_pot() {
     // Deposit JUST above the dust floor. `sqrt(amount0 * amount1)`
     // produces the LP units; we need ≥ 100_000 LP units after the
     // first-deposit lock of 1000. amount0 = amount1 = 200_000 gives
-    // sqrt = 200_000 — well above the floor and well below the legacy
-    // OPTIMAL_LIQUIDITY = 1_000_000 (which is where the old multiplier
-    // would have hit 100%). Pre-fix this would have clipped most of
-    // the fees to CREATOR_FEE_POT; post-fix the multiplier stays at
-    // 1.0 and no clip happens.
+    // sqrt = 200_000 — well above the floor and well below
+    // OPTIMAL_LIQUIDITY = 1_000_000 (where the creator-pool multiplier
+    // reaches 100%). On a standard pool the multiplier stays at 1.0
+    // and no clip happens.
     execute(
         deps.as_mut(),
         mock_env(),
@@ -198,9 +197,9 @@ fn standard_pool_collect_fees_does_not_clip_to_creator_pot() {
 
 /// Standard-pool dust-griefing protection: a deposit whose produced LP
 /// units fall below `MIN_STANDARD_POOL_POSITION_LIQUIDITY` is rejected
-/// with `DustStandardPoolDeposit`. Replaces the multiplier-based
-/// deterrent that pre-fix routed small-position fees to an
-/// inaccessible CREATOR_FEE_POT.
+/// with `DustStandardPoolDeposit` — the standard-pool alternative to
+/// the creator-pool multiplier clip (whose slice would route to a
+/// CREATOR_FEE_POT that standard pools never expose).
 #[test]
 fn standard_pool_rejects_dust_deposit() {
     let (mut deps, addrs) = instantiate_default_pool();

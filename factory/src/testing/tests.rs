@@ -315,10 +315,9 @@ fn test_create_pair_with_custom_params() {
     let info = message_info(&admin_addr(), &[]);
     instantiate(deps.as_mut(), env, info, msg).unwrap();
 
-    // (custom_params field on CreatePool was removed in the refactor —
-    // see `pool_struct::CreatePool` doc-comment. Caller-supplied threshold
-    // params are no longer honored; the factory config is the single source
-    // of truth. This test now exercises the simplified shape.)
+    // CreatePool carries only `pool_token_info` — see
+    // `pool_struct::CreatePool`. The factory config is the single
+    // source of truth for threshold params.
 
     let create_msg = ExecuteMsg::Create {
         pool_msg: CreatePool {

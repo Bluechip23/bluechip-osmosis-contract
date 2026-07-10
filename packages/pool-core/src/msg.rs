@@ -52,8 +52,8 @@ pub struct PoolConfigUpdate {
     // `usd_payment_tolerance_bps` removed — see `PoolSpecs` doc-comment
     // in `pool-core::state` for rationale.
     //
-    // `oracle_address` removed. Per-pool price-source rotation is a
-    // documented admin-compromise vector: a malicious source can return
+    // There is deliberately no per-pool price-source knob. One would
+    // be an admin-compromise vector: a malicious source can return
     // arbitrary `ConversionResponse.amount`, letting a $5 commit register
     // as a $25k threshold-cross and capturing the full pool seed +
     // creator rewards on a single pool. USD pricing is pinned to the

@@ -83,11 +83,9 @@ fn add_to_position_internal(
 
     // Standard-pool dust-floor on the produced LP units. Mirrors the
     // check inside `execute_deposit_liquidity_inner`. No-op on creator
-    // pools. Applied here rather than only on initial deposit because a
-    // tiny add-to-position on a standard pool would otherwise still
-    // produce a low-fee_size_multiplier in the pre-fix world; with the
-    // multiplier now pinned at 1.0 on standard pools, the floor is the
-    // only remaining dust-griefing deterrent and must apply at every
+    // pools. Applied here rather than only on initial deposit because
+    // the multiplier is pinned at 1.0 on standard pools, so this floor
+    // is the only dust-griefing deterrent and must apply at every
     // liquidity-in entry point.
     enforce_standard_pool_min_position(deps.storage, prep.liquidity)?;
 

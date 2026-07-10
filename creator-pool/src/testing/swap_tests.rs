@@ -581,9 +581,8 @@ fn test_continue_distribution_batches() {
                 "Should record the actual batch size that was processed"
             );
 
-            // Messages: `processed` mint messages only. The factory
-            // distribution bounty was removed along with the oracle
-            // machinery, and there is no self-call ContinueDistribution —
+            // Messages: `processed` mint messages only. There is no
+            // bounty message and no self-call ContinueDistribution —
             // external callers trigger subsequent batches in separate
             // transactions.
             assert_eq!(

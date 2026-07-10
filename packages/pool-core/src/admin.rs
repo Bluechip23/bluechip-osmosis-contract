@@ -167,19 +167,17 @@ pub fn execute_emergency_withdraw_initiate(
 ///
 /// - **Non-LP funds** (`CREATOR_FEE_POT` + caller-supplied
 /// `accumulation_drain_*`): swept to the bluechip wallet
-/// immediately, matching the pre-fix economics for those buckets.
+/// immediately.
 /// `CREATOR_FEE_POT` and `accumulation_drain_*` are not part of
 /// any LP's claim — `accumulation_drain_*` is the creator-pool's
 /// `CREATOR_EXCESS_POSITION` (creator-owned), and
 /// `CREATOR_FEE_POT` is the protocol's clip-slice accumulator.
 ///
-/// Pre-fix, the function swept ALL pool funds (including LP reserves
-/// and pending fees) to `bluechip_wallet_address` after a 24-hour
-/// timelock. The 24h window allowed active LPs to exit, but
-/// set-and-forget LPs lost their funds entirely. The escrow pattern
-/// preserves the 24h pause-with-LP-exits semantics AND gives passive
-/// LPs a year to surface and claim their share — substantially closing
-/// the "passive LP loses everything to treasury" gap.
+/// LP reserves and pending fees are deliberately NOT swept to
+/// `bluechip_wallet_address`: sweeping them would strand
+/// set-and-forget LPs who miss the 24-hour exit window. The escrow
+/// pattern keeps the 24h pause-with-LP-exits semantics AND gives
+/// passive LPs a year to surface and claim their share.
 ///
 /// Writes `EMERGENCY_WITHDRAWAL` with the swept (non-LP) totals,
 /// writes `EMERGENCY_DRAIN_SNAPSHOT` with the LP-owned snapshot,
@@ -388,10 +386,10 @@ pub fn execute_claim_emergency_share(
         .ok_or(ContractError::NoEmergencyDrainSnapshot)?;
 
     // Hard-close per-position claims once `SweepUnclaimedEmergencyShares`
-    // has fired. Pre-fix, late claims were tolerated in principle (bank
-    // module would reject if balance insufficient), but the snapshot's
-    // `total_claimed_*` tally would still get bumped, producing an
-    // inconsistent record where cumulative claims exceeded drainable.
+    // has fired. Tolerating a late claim would bump the snapshot's
+    // `total_claimed_*` tally even where the bank send ultimately
+    // fails, producing an inconsistent record where cumulative claims
+    // exceed drainable.
     // Matches the documented design intent ("after 1 year, abandoned
     // funds are gone") and gives off-chain observers a clean signal
     // that the claim window has closed.
@@ -737,8 +735,8 @@ pub fn execute_update_config_from_factory(
     // proposals carrying those fields at propose time, so a standard-pool
     // apply that reaches here can only have `None` for both.
 
-    // Per-pool `oracle_address` rotation removed — USD pricing is
-    // pinned to the factory; see `pool-core::msg::PoolConfigUpdate`
+    // USD pricing is pinned to the factory — there is deliberately no
+    // per-pool price-source knob; see `pool-core::msg::PoolConfigUpdate`
     // for the rationale.
 
     Ok(Response::new()

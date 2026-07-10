@@ -345,8 +345,8 @@ pub fn calculate_fee_size_multiplier(liquidity: Uint128) -> Decimal {
 /// pool. Enforced only when `APPLY_DUST_MULTIPLIER == false` (i.e., the
 /// standard-pool path). Picked at `OPTIMAL_LIQUIDITY / 10` so the smallest
 /// admitted position is one tenth of the size at which the
-/// `fee_size_multiplier` would have reached 100% under the legacy
-/// creator-pool scaling — preserves "small positions are economically
+/// `fee_size_multiplier` reaches 100% under the creator-pool
+/// scaling — preserves "small positions are economically
 /// discouraged" without routing fees to the inaccessible-on-standard
 /// `CREATOR_FEE_POT`. Creator pools continue to use the multiplier-based
 /// dust deterrent and do NOT enforce this floor.
@@ -355,7 +355,7 @@ pub const MIN_STANDARD_POOL_POSITION_LIQUIDITY: Uint128 = Uint128::new(100_000);
 /// Read `APPLY_DUST_MULTIPLIER` (defaulting to `true` when unset for
 /// backwards compatibility with pre-flag pool storage / test fixtures)
 /// and return either:
-/// - the legacy `calculate_fee_size_multiplier(liquidity)` (creator-pool
+/// - `calculate_fee_size_multiplier(liquidity)` (creator-pool
 ///   behavior — small positions clipped, slice flows to
 ///   `CREATOR_FEE_POT`), OR
 /// - `Decimal::one()` (standard-pool behavior — no clip; dust protection

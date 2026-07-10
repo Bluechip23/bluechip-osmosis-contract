@@ -344,11 +344,8 @@ fn test_first_deposit_locks_minimum_liquidity() {
 
 #[test]
 fn test_distribution_bounty_does_not_touch_pool_funds() {
-    // Pre-refactor name: test_distribution_bounty_from_reserves.
-    //
-    // The distribution bounty was removed entirely in the strip-down:
-    // ContinueDistribution neither skims the pool's own reserves nor
-    // sends a PayDistributionBounty message to the factory. This test
+    // ContinueDistribution pays no bounty: it neither skims the pool's
+    // own reserves nor sends any message to the factory. This test
     // pins the invariant that ContinueDistribution leaves reserve0 and
     // fee_reserve_0 completely untouched and emits NO message to the
     // factory at all.
@@ -427,13 +424,9 @@ fn test_distribution_bounty_does_not_touch_pool_funds() {
     );
 }
 
-/// Regression: ContinueDistribution must NOT push a PayDistributionBounty
-/// message when the call processed zero committers.
-///
-/// Before the fix, a keeper could collect a free bounty by calling
-/// ContinueDistribution after the ledger was already empty but before the
-/// state had been cleaned up — the pool would emit an unconditional bounty
-/// msg regardless of whether work was done. This test sets up exactly that
+/// ContinueDistribution on an already-empty ledger must be a pure
+/// cleanup no-op: no payout messages, no bounty of any kind, state
+/// removed. This test sets up exactly that
 /// scenario and asserts (a) the response contains zero messages, (b) the
 /// `bounty_paid=false` attribute is emitted, and (c) DISTRIBUTION_STATE is
 /// removed in the same tx.
@@ -2173,9 +2166,6 @@ mod distribution_liveness_tests {
         install_factory(&mut deps);
         EMERGENCY_DRAINED.save(&mut deps.storage, &true).unwrap();
 
-        // (SkipDistributionUser was removed pre-launch.
-        // Its drained-pool rejection is no longer applicable.)
-
         // Self-recover
         let info = message_info(&Addr::unchecked("anyone"), &[]);
         let err = execute(
@@ -3531,7 +3521,3 @@ mod emergency_claim_escrow_tests {
         }
     }
 }
-
-// (oracle_staleness_boundary_tests module deleted: the commit flow no
-// longer performs any oracle conversion — `get_oracle_conversion_with_staleness`
-// and `MAX_ORACLE_STALENESS_SECONDS` were removed from swap_helper.)
