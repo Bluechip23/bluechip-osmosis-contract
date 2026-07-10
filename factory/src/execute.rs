@@ -90,13 +90,13 @@ pub fn decode_reply_id(reply_id: u64) -> (u64, u64) {
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
     _info: MessageInfo,
     msg: crate::state::FactoryInstantiate,
 ) -> Result<Response, ContractError> {
     cw2::set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    config::validate_factory_config(deps.as_ref(), &msg)?;
+    config::validate_factory_config(deps.as_ref(), &env, &msg)?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &msg)?;
     Ok(Response::new().add_attribute("action", "init_contract"))

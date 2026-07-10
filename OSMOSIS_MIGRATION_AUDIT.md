@@ -58,12 +58,12 @@ moot (mint machinery removed; `crossed_at` is event-only).
 
 | ID | Sev | Title | Location |
 |----|-----|-------|----------|
-| F-N1 | **Medium** | Pricing config never probed on-chain at propose/apply; a bad `pricing_pool_id`/denom bricks every commit chain-wide for ≥48h (fail-closed outage, 48h timelock to repair) | `factory/src/execute/config.rs:66-93` |
-| F-N2 | Low | 6-decimal assumption on `bluechip_denom`/`usd_quote_denom` is unenforced; a wrong-decimals quote asset misprices commits by ~1e12× (fail-open). Admin-gated + timelocked | `factory/src/usd_price.rs:25-28,71-102` |
-| F-N3 | Low | No rate sanity clamp and no liquidity/staleness floor on the pricing pool. The old 30%-drift breaker + staleness gate have no analog; manipulation cost silently decays if OSMO/USDC liquidity ever migrates off the configured pool | `factory/src/usd_price.rs:39-91` |
+| F-N1 | **Medium** | Pricing config never probed on-chain at propose/apply; a bad `pricing_pool_id`/denom bricks every commit chain-wide for ≥48h (fail-closed outage, 48h timelock to repair). **Fixed** — see "Remediations applied" | `factory/src/execute/config.rs` |
+| F-N2 | Low | 6-decimal assumption on `bluechip_denom`/`usd_quote_denom` is unenforced; a wrong-decimals quote asset misprices commits by ~1e12× (fail-open). Admin-gated + timelocked. **Mitigated** — the RATE_MAX ceiling now rejects the inflated rate at probe time and on every commit | `factory/src/usd_price.rs` |
+| F-N3 | Low | No rate sanity clamp and no liquidity/staleness floor on the pricing pool. The old 30%-drift breaker + staleness gate have no analog; manipulation cost silently decays if OSMO/USDC liquidity ever migrates off the configured pool. **Partially fixed** — RATE_MAX caps the upside of any spike/misconfig; an operational liquidity alarm is still recommended | `factory/src/usd_price.rs` |
 | F-N4 | Low | Coverage regression: `fuzz-stateful/` deleted (found F-9; modeled still-alive flows); `twap_dec_to_rate`/`native_to_usd`/`usd_to_native_at_rate` unfuzzed (`fuzz_threshold_check` still models retired Pyth math); no TwapQuerier mock, so `query_native_usd_rate` is untested; 6–7 rate-variation tests deleted without replacement | `fuzz/`, `factory/src/mock_querier.rs`, `creator-pool/src/mock_querier.rs:103-112` |
 | F-N5 | Low | Documented deploy/ops path is not executable: `deploy_osmosis.sh` / `deploy_robust.sh` / `scripts/verify_deploy.sh` do not exist in the tree; RUNBOOK's health probe targets the deleted `internal_blue_chip_oracle_query`; no monitoring guidance exists for the new single price dependency | `docs/OSMOSIS_DEPLOY.md:46,103`, `RUNBOOK.md:130-141`, `Makefile` |
-| F-N6 | Info | 60s minimum TWAP window (a single block carries 2.5–7% weight at the floor) and arithmetic (not geometric) TWAP — spike-sensitive in the attacker-profitable direction. Default 600s is sound | `factory/src/usd_price.rs:34-35` |
+| F-N6 | Info | 60s minimum TWAP window (a single block carries 2.5–7% weight at the floor) and arithmetic (not geometric) TWAP — spike-sensitive in the attacker-profitable direction. Default 600s is sound. **Partially fixed** — floor raised to 300s; arithmetic TWAP retained (geometric left as a future consideration) | `factory/src/usd_price.rs` |
 | F-N7 | Info | Creation fee changed from USD-pegged to flat native — anti-spam friction floats with OSMO price (deliberate; rate limits backstop) | `factory/src/execute/pool_lifecycle/create.rs` |
 | F-N8 | Info | Mainnet env fail-opens to deploy-key ownership: `PROTOCOL_WALLET=""` defaults to deployer; contract admin moves to the multisig only post-deploy | `osmosis_mainnet.env:66-68`, `docs/OSMOSIS_DEPLOY.md:117-118` |
 | F-N9 | Info | Migration leftovers: `"bounty_paid"` event attribute emitted though no bounty exists (`creator-pool/src/commit/distribution.rs:93`); stale comments referencing removed oracle/mint machinery in ~10 files; `InvalidOraclePrice` error variant still live on the commit path; distribution liveness now depends entirely on the protocol-run keeper (unpaid `ContinueDistribution`) while RUNBOOK still describes the bounty model | various |
@@ -111,22 +111,46 @@ moot (mint machinery removed; `crossed_at` is event-only).
   exists anywhere. CI retains fmt, clippy `-D warnings`, cargo-deny
   advisories, workspace tests, wasm builds (standard-pool build added).
 
+## Remediations applied on this branch
+
+- **F-N1 fixed:** `validate_factory_config` now takes `Env` and ends with a
+  live `usd_price::probe_native_usd_rate` call against the candidate
+  config, running at **instantiate, propose, and apply** (apply re-probes
+  so a pool that dies during the 48h window is caught before the config
+  lands). A typo'd `pricing_pool_id`, a pool missing one of the denoms, or
+  a pool younger than the window now fails instantly instead of as a
+  chain-wide commit outage. Regression tests:
+  `instantiate_rejects_dead_pricing_route`,
+  `propose_rejects_dead_pricing_route`, `apply_reprobes_pricing_route`.
+- **F-N2/F-N3 mitigated:** `twap_dec_to_rate` now enforces `RATE_MAX`
+  ($10,000 per native token) in addition to the zero/dust floor — the
+  stateless replacement for the old oracle's drift breaker. A
+  wrong-decimals quote denom (~1e12× inflation) or a spiked pricing pool
+  is refused both at config-probe time and on every commit valuation.
+  Regression tests: `rejects_rates_above_sanity_ceiling`,
+  `propose_rejects_wrong_decimals_quote_rate`.
+- **F-N6 partially fixed:** `TWAP_WINDOW_MIN_SECONDS` raised 60 → 300 (all
+  shipped configs already used 600).
+- **F-N4 partially addressed:** the factory mock querier now answers the
+  x/twap Stargate query (`twap_result`, default $1.00, with
+  `set_twap_price` / `set_twap_error` overrides), so the live pricing
+  entry point is exercisable in tests; the config-probe regression tests
+  above use it. The deleted stateful fuzz harness and rate-variation
+  scenario tests remain to be restored.
+
 ## Priority recommendations
 
-1. **F-N1 (cheap, high value):** call `usd_price::query_native_usd_rate`
-   against the *proposed* config inside `validate_factory_config` at both
-   propose and apply — a live probe turns a 96h outage into an instant
-   propose-time error.
-2. **F-N2/F-N3 (restore the missing clamp):** reject parsed rates outside a
-   sane band (e.g. > $10,000 per native unit), document the 6-decimal
-   invariant at the validation site, consider `GeometricTwapToNow`, and
-   raise `TWAP_WINDOW_MIN_SECONDS` from 60 to 300.
-3. **F-N4 (restore verification muscle):** add a TwapQuerier mock + tests
-   for `query_native_usd_rate`; re-point `fuzz_threshold_check` at the live
+1. ~~**F-N1:** live-probe the proposed pricing config~~ — **done** (above).
+2. **F-N2/F-N3 (residual):** consider `GeometricTwapToNow`, and add an
+   operational alarm on pricing-pool liquidity depth; the RATE_MAX clamp
+   and 300s window floor are in place.
+3. **F-N4 (restore verification muscle, residual):** re-point
+   `fuzz_threshold_check` at the live
    `twap_dec_to_rate`/`native_to_usd`/`usd_to_native_at_rate` math; make
    the creator-pool mock rate configurable and reinstate rate-variation /
    rounding-accumulation scenarios; ideally resurrect the stateful harness
-   for the still-alive commit→threshold→swap/liquidity flows.
+   for the still-alive commit→threshold→swap/liquidity flows. (The factory
+   TwapQuerier mock is now in place.)
 4. **F-N5 (ops):** add the missing deploy/verify scripts (or fix the docs),
    and rewrite RUNBOOK monitoring around the new dependency — probe
    `PoolFactoryQuery::ConvertNativeToUsd` and alarm on pricing-pool

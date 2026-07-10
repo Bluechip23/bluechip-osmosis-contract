@@ -19,11 +19,13 @@ use crate::state::{
 use super::ensure_admin;
 
 /// Validates every caller-supplied address + the bluechip_denom on a
-/// `FactoryInstantiate` payload. Shared between `instantiate` and
+/// `FactoryInstantiate` payload, then live-probes the pricing route.
+/// Shared between `instantiate` and
 /// `execute_propose_factory_config_update` so the same rules apply to
 /// the initial config and any subsequent config proposal.
 pub(crate) fn validate_factory_config(
     deps: cosmwasm_std::Deps,
+    env: &Env,
     config: &FactoryInstantiate,
 ) -> Result<(), ContractError> {
     deps.api
@@ -92,6 +94,27 @@ pub(crate) fn validate_factory_config(
         ))));
     }
 
+    // Live probe of the pricing route. The syntactic checks above
+    // cannot tell a typo'd pool id (or a pool missing one of the two
+    // denoms, or one too young for the window) from a working route —
+    // and because the price path is fail-closed, that typo would
+    // otherwise surface only as a chain-wide commit outage costing a
+    // further 48h timelock cycle to repair. Running the actual x/twap
+    // query against the proposed config turns it into an instant
+    // instantiate/propose/apply-time error. The parsed rate also rides
+    // through the zero / dust / RATE_MAX sanity gates, so a
+    // wrong-decimals quote denom is caught here too.
+    crate::usd_price::probe_native_usd_rate(deps, env, config).map_err(|e| {
+        ContractError::Std(StdError::generic_err(format!(
+            "pricing config failed live TWAP probe (pool {}, {}/{}, window {}s): {}",
+            config.pricing_pool_id,
+            config.bluechip_denom,
+            config.usd_quote_denom,
+            config.twap_window_seconds,
+            e
+        )))
+    })?;
+
     // Threshold-payout splits are stored on FactoryInstantiate so they
     // ride the standard 48h propose/apply flow rather than requiring a
     // contract migration. Validate non-zero components + no overflow at
@@ -135,9 +158,11 @@ pub fn execute_update_factory_config(
     }
 
     // Re-validate at apply time. Between propose (48h ago) and apply,
-    // on-chain state can have moved; re-running the validation here
-    // catches stale-proposal hazards before the state lands.
-    validate_factory_config(deps.as_ref(), &pending.new_config)?;
+    // on-chain state can have moved (the pricing pool could have been
+    // drained or pruned); re-running the validation — including the
+    // live TWAP probe — catches stale-proposal hazards before the
+    // state lands.
+    validate_factory_config(deps.as_ref(), &env, &pending.new_config)?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &pending.new_config)?;
     PENDING_CONFIG.remove(deps.storage);
@@ -171,7 +196,7 @@ pub fn execute_propose_factory_config_update(
     // otherwise would (the existing config keeps flowing until the timelock
     // elapses and the admin calls UpdateConfig, but a malformed proposal
     // should fail loudly now, not then).
-    validate_factory_config(deps.as_ref(), &config)?;
+    validate_factory_config(deps.as_ref(), &env, &config)?;
 
     let pending = PendingConfig {
         new_config: config,
