@@ -11,7 +11,11 @@
 > with no keepers, no Pyth pusher, and no bespoke oracle to attack.
 > Sections of this document describing the old oracle engine, bounties, or
 > expand-economy are **historical** and no longer reflect the deployed
-> contracts.
+> contracts. See **`OSMOSIS_MIGRATION_AUDIT.md`** for the review of the
+> migration itself, the post-migration status of every finding below
+> (F-4/F-5/F-6 are moot — their subsystems were removed; F-7 is
+> partially fixed; F-3/M-1/I-1/L-1 carry forward), and the current test
+> count (464; the "644 tests" below reflects the pre-migration tree).
 
 **Scope:** all production CosmWasm contracts — `factory` (including the
 ~2,860-line internal price oracle), `creator-pool`, `standard-pool`,
