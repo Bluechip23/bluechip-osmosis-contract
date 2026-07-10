@@ -149,6 +149,12 @@ pub fn execute_receive_cw20(
 /// Shared route setup. Validates the route, captures the recipient's
 /// pre-route balance of the final ask token, and builds the per-hop
 /// self-call sequence plus the final assertion call.
+//
+// Eight parameters: this is the funnel both the native and CW20 entry
+// points feed after unpacking their wire messages — each argument is one
+// already-validated field, and bundling them into a struct would just
+// re-create the wire message under another name.
+#[allow(clippy::too_many_arguments)]
 fn start_multi_hop(
     deps: DepsMut,
     env: Env,

@@ -182,8 +182,9 @@ impl WasmMockQuerier {
     /// Register an explicit `PoolStateResponseForFactory` for a given
     /// contract address. Subsequent `GetPoolState` queries against that
     /// address will return the override verbatim, bypassing the default
-    /// 50B/10B response. Used by integration tests that need to model
+    /// 50B/10B response. For integration tests that need to model
     /// drained / lopsided / healthy pools side-by-side.
+    #[allow(dead_code)]
     pub fn set_pool_state(&mut self, addr: &str, state: PoolStateResponseForFactory) {
         self.pool_state_overrides.insert(addr.to_string(), state);
     }

@@ -1178,8 +1178,8 @@ fn test_m2_helper_arms_auto_pause_when_reserves_below_min() {
     };
     let armed = maybe_auto_pause_on_low_liquidity(&mut deps.storage, &drained).unwrap();
     assert!(armed, "should arm auto-pause when reserve0 < MIN");
-    assert_eq!(POOL_PAUSED.load(&deps.storage).unwrap(), true);
-    assert_eq!(POOL_PAUSED_AUTO.load(&deps.storage).unwrap(), true);
+    assert!(POOL_PAUSED.load(&deps.storage).unwrap());
+    assert!(POOL_PAUSED_AUTO.load(&deps.storage).unwrap());
 
     // Case 2: helper is idempotent — calling again on already-paused pool
     // returns false (no override) and leaves both flags as-is.
@@ -1188,8 +1188,8 @@ fn test_m2_helper_arms_auto_pause_when_reserves_below_min() {
         !armed_again,
         "helper must not re-arm an already-paused pool"
     );
-    assert_eq!(POOL_PAUSED.load(&deps.storage).unwrap(), true);
-    assert_eq!(POOL_PAUSED_AUTO.load(&deps.storage).unwrap(), true);
+    assert!(POOL_PAUSED.load(&deps.storage).unwrap());
+    assert!(POOL_PAUSED_AUTO.load(&deps.storage).unwrap());
 
     // Case 3: reserves healthy → helper is no-op even on a fresh pool.
     let mut deps2 = mock_dependencies();
@@ -1235,8 +1235,8 @@ fn test_m2_helper_does_not_override_admin_pause() {
     };
     let armed = maybe_auto_pause_on_low_liquidity(&mut deps.storage, &drained).unwrap();
     assert!(!armed, "helper must not override an existing admin pause");
-    assert_eq!(POOL_PAUSED.load(&deps.storage).unwrap(), true);
-    assert_eq!(POOL_PAUSED_AUTO.load(&deps.storage).unwrap(), false);
+    assert!(POOL_PAUSED.load(&deps.storage).unwrap());
+    assert!(!POOL_PAUSED_AUTO.load(&deps.storage).unwrap());
 }
 
 #[test]
@@ -1257,8 +1257,8 @@ fn test_m2_admin_pause_overrides_auto_flag() {
     let factory_info = message_info(&pool_info.factory_addr, &[]);
     execute_pause(deps.as_mut(), mock_env(), factory_info).unwrap();
 
-    assert_eq!(POOL_PAUSED.load(&deps.storage).unwrap(), true);
-    assert_eq!(POOL_PAUSED_AUTO.load(&deps.storage).unwrap(), false);
+    assert!(POOL_PAUSED.load(&deps.storage).unwrap());
+    assert!(!POOL_PAUSED_AUTO.load(&deps.storage).unwrap());
 }
 
 // ---------------------------------------------------------------------------

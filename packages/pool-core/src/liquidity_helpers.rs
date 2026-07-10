@@ -149,6 +149,10 @@ pub fn calc_capped_fees(
     Ok(capped)
 }
 
+/// `(capped_fees, raw_fees, clipped_fees)` — each pair is `(token0, token1)`.
+/// See [`calc_capped_fees_with_clip`] for what each pair means.
+pub type CappedFeesWithClip = ((Uint128, Uint128), (Uint128, Uint128), (Uint128, Uint128));
+
 /// Extended variant that returns `(capped_fees, raw_fees, clipped_fees)`.
 ///
 /// - `capped_fees.0/1`: what the LP actually receives (clamped to fee_reserve).
@@ -164,7 +168,7 @@ pub fn calc_capped_fees(
 pub fn calc_capped_fees_with_clip(
     position: &Position,
     pool_fee_state: &PoolFeeState,
-) -> Result<((Uint128, Uint128), (Uint128, Uint128), (Uint128, Uint128)), ContractError> {
+) -> Result<CappedFeesWithClip, ContractError> {
     let (adj_0, clip_0) = calculate_fees_owed_split(
         position.liquidity,
         pool_fee_state.fee_growth_global_0,

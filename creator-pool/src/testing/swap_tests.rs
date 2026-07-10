@@ -2123,11 +2123,10 @@ fn test_swap_fails_when_reserves_below_pause_threshold() {
         Err(ContractError::InsufficientReserves {})
     ));
     assert!(
-        POOL_PAUSED
+        !POOL_PAUSED
             .may_load(&deps.storage)
             .unwrap()
-            .unwrap_or(false)
-            == false,
+            .unwrap_or(false),
         "POOL_PAUSED should not be set by the drain guard (save would be rolled back on chain)"
     );
 }
@@ -2273,11 +2272,10 @@ fn test_swap_triggers_pause_at_threshold() {
         result
     );
     assert!(
-        POOL_PAUSED
+        !POOL_PAUSED
             .may_load(&deps.storage)
             .unwrap()
-            .unwrap_or(false)
-            == false,
+            .unwrap_or(false),
         "POOL_PAUSED flag must stay unset on the drain-guard path (rollback semantics)"
     );
 }
@@ -2483,11 +2481,10 @@ fn test_pause_state_persistence() {
         second
     );
     assert!(
-        POOL_PAUSED
+        !POOL_PAUSED
             .may_load(&deps.storage)
             .unwrap()
-            .unwrap_or(false)
-            == false,
+            .unwrap_or(false),
         "POOL_PAUSED must stay unset — the swap path never persists it"
     );
 }

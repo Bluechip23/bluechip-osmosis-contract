@@ -88,6 +88,7 @@ impl WasmMockQuerier {
     }
 
     // Seed bluechip bank balances
+    #[allow(dead_code)]
     pub fn with_balance(&mut self, balances: &[(&String, &[Coin])]) {
         for (addr, coins) in balances {
             self.base

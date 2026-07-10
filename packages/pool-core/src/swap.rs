@@ -319,7 +319,7 @@ pub fn execute_swap_cw20(
                 .asset_infos
                 .iter()
                 .position(|t| {
-                    matches!(t, TokenType::CreatorToken { contract_addr } if contract_addr == &info.sender)
+                    matches!(t, TokenType::CreatorToken { contract_addr } if *contract_addr == info.sender)
                 })
                 .ok_or(ContractError::Unauthorized {})?;
             // confirm the CW20 actually transferred the

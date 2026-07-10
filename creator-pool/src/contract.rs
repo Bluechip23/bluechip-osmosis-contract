@@ -91,7 +91,7 @@ pub fn instantiate(
                     reason: "Bluechip denom must be non-empty".to_string(),
                 });
             }
-            if contract_addr != &msg.token_address {
+            if *contract_addr != msg.token_address {
                 return Err(ContractError::InvalidPairShape {
                     reason: "CreatorToken.contract_addr in pool_token_info must equal \
                              msg.token_address"
