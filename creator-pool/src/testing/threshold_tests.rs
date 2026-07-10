@@ -1826,12 +1826,11 @@ mod native_raised_net_semantics_tests {
         // Either it's been left at its default false (covered by
         // setup_pool_storage) or set explicitly to false — either way
         // the entry gate passes.
-        assert_eq!(
-            IS_THRESHOLD_HIT
+        assert!(
+            !IS_THRESHOLD_HIT
                 .may_load(&deps.storage)
                 .unwrap()
                 .unwrap_or(false),
-            false,
             "pre-trigger: flag must be false"
         );
 
@@ -1859,9 +1858,8 @@ mod native_raised_net_semantics_tests {
         // tail. Subsequent commits will route to the post-threshold
         // AMM path; subsequent trigger_threshold_payout calls reject
         // at the entry gate.
-        assert_eq!(
+        assert!(
             IS_THRESHOLD_HIT.load(&deps.storage).unwrap(),
-            true,
             "post-trigger: flag must be true (set inside trigger_threshold_payout's tail)"
         );
     }
@@ -1927,9 +1925,8 @@ mod crossed_at_snapshot_tests {
 
         // Post-trigger: snapshot equals env.block.time used at crossing
         // and matches the flipped IS_THRESHOLD_HIT flag.
-        assert_eq!(
+        assert!(
             IS_THRESHOLD_HIT.load(&deps.storage).unwrap(),
-            true,
             "IS_THRESHOLD_HIT must be true post-trigger"
         );
         assert_eq!(

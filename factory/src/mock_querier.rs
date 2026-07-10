@@ -5,9 +5,18 @@ use cosmwasm_std::{
     from_json, to_json_binary, Addr, Coin, Empty, OwnedDeps, Querier, QuerierResult, QueryRequest,
     SystemError, SystemResult, WasmQuery,
 };
+use osmosis_std::types::osmosis::twap::v1beta1::ArithmeticTwapToNowResponse;
 use pool_factory_interfaces::{IsPausedResponse, PoolQueryMsg, PoolStateResponseForFactory};
 
 use crate::query::QueryMsg;
+
+/// Stargate path of the x/twap query `usd_price::probe_native_usd_rate`
+/// emits. Kept in sync with osmosis-std's `ArithmeticTwapToNowRequest`.
+pub const TWAP_QUERY_PATH: &str = "/osmosis.twap.v1beta1.Query/ArithmeticTwapToNow";
+
+/// Default mock TWAP: $1.00 per native token, the identity rate most
+/// existing tests were written against.
+pub const DEFAULT_MOCK_TWAP: &str = "1.000000000000000000";
 
 pub fn mock_dependencies(
     contract_balance: &[Coin],
@@ -35,6 +44,11 @@ pub struct WasmMockQuerier {
     // Falls back to the default 50B/10B reserves below if no override is
     // registered for the queried address.
     pub pool_state_overrides: std::collections::HashMap<String, PoolStateResponseForFactory>,
+    // Result served for the x/twap Stargate query: Ok(dec string) is
+    // returned as the arithmetic TWAP; Err(reason) makes the query fail
+    // the way a typo'd pricing_pool_id / missing denom / too-young pool
+    // does on-chain. Defaults to $1.00.
+    pub twap_result: Result<String, String>,
 }
 
 impl Querier for WasmMockQuerier {
@@ -53,8 +67,26 @@ impl Querier for WasmMockQuerier {
 }
 
 impl WasmMockQuerier {
+    // `QueryRequest::Stargate` is deprecated upstream in favor of `Grpc`,
+    // but it is the variant osmosis-std 0.27 emits, so it's what the
+    // mock must answer.
+    #[allow(deprecated)]
     pub fn handle_query(&self, request: &QueryRequest<Empty>) -> QuerierResult {
         match &request {
+            QueryRequest::Stargate { path, .. } if path == TWAP_QUERY_PATH => {
+                match &self.twap_result {
+                    Ok(dec) => SystemResult::Ok(
+                        to_json_binary(&ArithmeticTwapToNowResponse {
+                            arithmetic_twap: dec.clone(),
+                        })
+                        .into(),
+                    ),
+                    Err(reason) => SystemResult::Err(SystemError::InvalidRequest {
+                        error: reason.clone(),
+                        request: Default::default(),
+                    }),
+                }
+            }
             QueryRequest::Wasm(WasmQuery::Smart { contract_addr, msg }) => {
                 // Hard failure path — lets tests verify fallback behavior.
                 if self.query_error_pools.contains(contract_addr.as_str()) {
@@ -130,14 +162,29 @@ impl WasmMockQuerier {
             paused_pools: std::collections::HashSet::new(),
             query_error_pools: std::collections::HashSet::new(),
             pool_state_overrides: std::collections::HashMap::new(),
+            twap_result: Ok(DEFAULT_MOCK_TWAP.to_string()),
         }
+    }
+
+    /// Serve `dec` (an 18-decimal Dec string, quote per base) as the
+    /// x/twap price for subsequent queries.
+    pub fn set_twap_price(&mut self, dec: &str) {
+        self.twap_result = Ok(dec.to_string());
+    }
+
+    /// Make the x/twap query fail — models a typo'd pricing_pool_id, a
+    /// pool missing one of the configured denoms, or a pool younger
+    /// than the TWAP window.
+    pub fn set_twap_error(&mut self, reason: &str) {
+        self.twap_result = Err(reason.to_string());
     }
 
     /// Register an explicit `PoolStateResponseForFactory` for a given
     /// contract address. Subsequent `GetPoolState` queries against that
     /// address will return the override verbatim, bypassing the default
-    /// 50B/10B response. Used by integration tests that need to model
+    /// 50B/10B response. For integration tests that need to model
     /// drained / lopsided / healthy pools side-by-side.
+    #[allow(dead_code)]
     pub fn set_pool_state(&mut self, addr: &str, state: PoolStateResponseForFactory) {
         self.pool_state_overrides.insert(addr.to_string(), state);
     }

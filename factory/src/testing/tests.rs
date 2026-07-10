@@ -36,10 +36,6 @@ pub(crate) fn creation_fee_funds() -> [Coin; 1] {
     }]
 }
 
-fn bluechip_wallet_addr() -> Addr {
-    MockApi::default().addr_make("bluechip_wallet")
-}
-
 fn addr0000() -> Addr {
     MockApi::default().addr_make("addr0000")
 }

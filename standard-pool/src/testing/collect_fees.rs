@@ -5,9 +5,7 @@
 
 use cosmwasm_std::testing::{message_info, mock_env};
 use cosmwasm_std::{Coin, CosmosMsg, Decimal, Uint128, WasmMsg};
-use pool_core::state::{
-    CreatorFeePot, PoolFeeState, CREATOR_FEE_POT, LIQUIDITY_POSITIONS, POOL_FEE_STATE,
-};
+use pool_core::state::{PoolFeeState, CREATOR_FEE_POT, LIQUIDITY_POSITIONS, POOL_FEE_STATE};
 
 use super::fixtures::{instantiate_default_pool, BLUECHIP_DENOM};
 use crate::contract::execute;
@@ -185,7 +183,7 @@ fn standard_pool_collect_fees_does_not_clip_to_creator_pot() {
     let pot = CREATOR_FEE_POT
         .may_load(&deps.storage)
         .unwrap()
-        .unwrap_or_else(CreatorFeePot::default);
+        .unwrap_or_default();
     assert_eq!(
         pot.amount_0,
         Uint128::zero(),

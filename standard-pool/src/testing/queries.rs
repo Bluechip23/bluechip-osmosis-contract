@@ -41,7 +41,7 @@ fn seed(
 fn query_pair_returns_pool_details() {
     let (deps, addrs) = instantiate_default_pool();
     let bin = query(deps.as_ref(), mock_env(), QueryMsg::Pair {}).unwrap();
-    let details: PoolDetails = from_json(&bin).unwrap();
+    let details: PoolDetails = from_json(bin).unwrap();
     // contract_addr equals env.contract.address from instantiate, which
     // MockEnv.contract.address returns. Just verify it's non-empty rather
     // than pinning to a specific MockApi-internal value.
@@ -59,7 +59,7 @@ fn query_pair_returns_pool_details() {
 fn query_config_returns_block_time() {
     let (deps, _) = instantiate_default_pool();
     let bin = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
-    let config: ConfigResponse = from_json(&bin).unwrap();
+    let config: ConfigResponse = from_json(bin).unwrap();
     assert!(config.block_time_last > 0);
     assert!(config.params.is_none());
 }
@@ -68,7 +68,7 @@ fn query_config_returns_block_time() {
 fn query_fee_info_returns_placeholder() {
     let (deps, addrs) = instantiate_default_pool();
     let bin = query(deps.as_ref(), mock_env(), QueryMsg::FeeInfo {}).unwrap();
-    let resp: FeeInfoResponse = from_json(&bin).unwrap();
+    let resp: FeeInfoResponse = from_json(bin).unwrap();
     // Standard pools use zero fees, with the factory's configured
     // bluechip wallet (NOT the factory contract address) as the drain
     // recipient.
@@ -84,7 +84,7 @@ fn query_fee_info_returns_placeholder() {
 fn query_pool_state_empty_at_instantiate() {
     let (deps, _) = instantiate_default_pool();
     let bin = query(deps.as_ref(), mock_env(), QueryMsg::PoolState {}).unwrap();
-    let resp: PoolStateResponse = from_json(&bin).unwrap();
+    let resp: PoolStateResponse = from_json(bin).unwrap();
     assert_eq!(resp.reserve0, Uint128::zero());
     assert_eq!(resp.reserve1, Uint128::zero());
     assert_eq!(resp.total_liquidity, Uint128::zero());
@@ -95,7 +95,7 @@ fn query_pool_state_empty_at_instantiate() {
 fn query_fee_state_zero_at_instantiate() {
     let (deps, _) = instantiate_default_pool();
     let bin = query(deps.as_ref(), mock_env(), QueryMsg::FeeState {}).unwrap();
-    let resp: PoolFeeStateResponse = from_json(&bin).unwrap();
+    let resp: PoolFeeStateResponse = from_json(bin).unwrap();
     assert_eq!(resp.fee_growth_global_0, cosmwasm_std::Decimal::zero());
     assert_eq!(resp.total_fees_collected_0, Uint128::zero());
 }
@@ -113,7 +113,7 @@ fn query_position_after_deposit() {
         },
     )
     .unwrap();
-    let pos: PositionResponse = from_json(&bin).unwrap();
+    let pos: PositionResponse = from_json(bin).unwrap();
     assert_eq!(pos.position_id, "1");
     assert_eq!(pos.owner, addrs.pool_owner);
     assert!(!pos.liquidity.is_zero());
@@ -133,7 +133,7 @@ fn query_positions_lists_deposited_positions() {
         },
     )
     .unwrap();
-    let resp: PositionsResponse = from_json(&bin).unwrap();
+    let resp: PositionsResponse = from_json(bin).unwrap();
     // "0" is the instantiate placeholder; position "1" is the first real.
     assert!(resp.positions.iter().any(|p| p.position_id == "1"));
 }
@@ -149,7 +149,7 @@ fn query_positions_lists_deposited_positions() {
 fn query_analytics_always_fully_committed() {
     let (deps, _) = instantiate_default_pool();
     let bin = query(deps.as_ref(), mock_env(), QueryMsg::Analytics {}).unwrap();
-    let resp: PoolAnalyticsResponse = from_json(&bin).unwrap();
+    let resp: PoolAnalyticsResponse = from_json(bin).unwrap();
     // Standard pools report FullyCommitted + zero raised, regardless of
     // activity (no commit ledger).
     assert!(matches!(

@@ -469,7 +469,7 @@ pub(crate) fn lookup_pool_by_addr(
         use cosmwasm_std::Order;
         for entry in POOLS_BY_ID.range(deps.storage, None, None, Order::Ascending) {
             let (_, details) = entry?;
-            if &details.creator_pool_addr == pool_addr {
+            if details.creator_pool_addr == *pool_addr {
                 return Ok(Some(details));
             }
         }

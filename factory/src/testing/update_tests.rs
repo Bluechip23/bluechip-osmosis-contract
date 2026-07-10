@@ -1,6 +1,5 @@
 use cosmwasm_std::testing::{
-    message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
-    MOCK_CONTRACT_ADDR,
+    message_info, mock_env, MockApi, MockQuerier, MockStorage, MOCK_CONTRACT_ADDR,
 };
 use cosmwasm_std::{
     to_json_binary, Addr, Coin, CosmosMsg, Decimal, Empty, OwnedDeps, Uint128, WasmMsg,
@@ -151,10 +150,127 @@ fn test_propose_and_execute_update_config() {
     assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_none());
 }
 
+// The pricing route (pricing_pool_id / usd_quote_denom / window) is
+// live-probed with a real x/twap query at instantiate, propose, AND
+// apply. A typo'd pool id used to pass all syntactic validation and
+// surface only as a chain-wide commit outage 48h later.
+#[test]
+fn instantiate_rejects_dead_pricing_route() {
+    let mut deps = mock_dependencies_2(&[]);
+    deps.querier
+        .set_twap_error("pool 999 does not exist or lacks the requested denom pair");
+
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&make_addr("deployer"), &[]),
+        default_factory_instantiate_msg(),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("live TWAP probe"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
+fn propose_rejects_dead_pricing_route() {
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
+
+    // Route breaks (or was typo'd in the proposal) after instantiate.
+    deps.querier.set_twap_error("pool not found");
+
+    let admin_info = message_info(&admin_addr(), &[]);
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        admin_info,
+        ExecuteMsg::ProposeConfigUpdate {
+            config: default_factory_instantiate_msg(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("live TWAP probe"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_none());
+}
+
+#[test]
+fn apply_reprobes_pricing_route() {
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
+
+    let admin_info = message_info(&admin_addr(), &[]);
+    let env = mock_env();
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        admin_info.clone(),
+        ExecuteMsg::ProposeConfigUpdate {
+            config: default_factory_instantiate_msg(),
+        },
+    )
+    .unwrap();
+
+    // The pricing pool dies during the 48h window; apply must re-probe
+    // and refuse rather than land a config that bricks every commit.
+    deps.querier.set_twap_error("pool drained and pruned");
+
+    let pending = PENDING_CONFIG.load(&deps.storage).unwrap();
+    let mut later_env = env;
+    later_env.block.time = pending.effective_after.plus_seconds(1);
+    let err = execute(
+        deps.as_mut(),
+        later_env,
+        admin_info,
+        ExecuteMsg::UpdateConfig {},
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("live TWAP probe"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
+fn propose_rejects_wrong_decimals_quote_rate() {
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
+
+    // An 18-decimal quote denom inflates a ~$1 real price by ~1e12.
+    // The probe parses the rate through the same sanity gates the
+    // commit path uses, so the misconfig dies at propose time.
+    deps.querier
+        .set_twap_price("1000000000000.000000000000000000");
+
+    let admin_info = message_info(&admin_addr(), &[]);
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        admin_info,
+        ExecuteMsg::ProposeConfigUpdate {
+            config: default_factory_instantiate_msg(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("sanity ceiling"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_none());
+}
+
 #[test]
 fn test_pool_registry_population() {
-    let mut deps = mock_dependencies();
-    setup_factory(&mut deps);
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
     let pool_id = 1u64;
     let pool_address = Addr::unchecked("pool_1");
     register_test_pool_addr(&mut deps.storage, pool_id, &pool_address);
@@ -251,8 +367,8 @@ fn test_upgrade_pools_with_registry() {
 
 #[test]
 fn test_update_specific_pool_from_registry() {
-    let mut deps = mock_dependencies();
-    setup_factory(&mut deps);
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
 
     let pool_id = 3u64;
     let pool_addr = Addr::unchecked("pool_3_address");
@@ -708,8 +824,8 @@ fn test_upgrade_retry_path_keeps_still_paused_pool() {
 
 #[test]
 fn test_continue_upgrade_unauthorized() {
-    let mut deps = mock_dependencies();
-    setup_factory(&mut deps);
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
 
     // After removing self-dispatch, ContinuePoolUpgrade is admin-only.
     // A random caller must be rejected.
@@ -731,8 +847,8 @@ fn test_continue_upgrade_unauthorized() {
 
 #[test]
 fn test_cancel_pool_upgrade() {
-    let mut deps = mock_dependencies();
-    setup_factory(&mut deps);
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
 
     for i in 1..=3 {
         register_test_pool_addr(
@@ -786,17 +902,6 @@ fn test_cancel_pool_upgrade() {
         .may_load(&deps.storage)
         .unwrap()
         .is_none());
-}
-
-fn setup_factory(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>) {
-    let msg = default_factory_instantiate_msg();
-    instantiate(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&make_addr("deployer"), &[]),
-        msg,
-    )
-    .unwrap();
 }
 
 fn setup_factory_custom(deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQuerier>) {

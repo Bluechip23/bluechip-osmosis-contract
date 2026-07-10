@@ -20,24 +20,51 @@ use cosmwasm_std::{Decimal, Deps, Env, StdError, StdResult, Uint128};
 use osmosis_std::types::osmosis::twap::v1beta1::TwapQuerier;
 use pool_factory_interfaces::ConversionResponse;
 
-use crate::state::FACTORYINSTANTIATEINFO;
+use crate::state::{FactoryInstantiate, FACTORYINSTANTIATEINFO};
 
 /// Fixed-point scale for `ConversionResponse.rate_used`: micro-USD per
 /// micro-native. `1_000_000` == $1.00 per native token (both sides carry
 /// 6 decimals, so the per-base-unit and per-token rates coincide).
+///
+/// The 6/6-decimal assumption is load-bearing: `RATE_MAX` below exists
+/// precisely to catch a quote asset that violates it.
 pub const RATE_PRECISION: u128 = 1_000_000;
 
-/// Lower/upper bounds on the configurable TWAP window. Below 60s the
-/// manipulation cost collapses toward a single-block spot read; above
-/// 3600s the price lags real markets enough to misvalue commits in
-/// fast moves (and approaches the x/twap pruning horizon).
-pub const TWAP_WINDOW_MIN_SECONDS: u64 = 60;
+/// Sanity ceiling on the parsed rate: $10,000 per native token. No
+/// plausible host-chain native asset trades anywhere near this, so a
+/// rate above it means either the quote denom does not carry 6 decimals
+/// (an 18-decimal stable inflates the rate ~1e12×, letting a dust
+/// commit cross the USD threshold) or the pricing pool is being spiked.
+/// The old internal oracle's drift circuit breaker played this role;
+/// this bound is its stateless replacement. Fail closed on both.
+pub const RATE_MAX: u128 = 10_000 * RATE_PRECISION;
+
+/// Lower/upper bounds on the configurable TWAP window. Below 300s a
+/// single block carries enough weight in the arithmetic mean that a
+/// one-block spike moves the rate materially — the manipulation cost
+/// collapses toward a spot read; above 3600s the price lags real
+/// markets enough to misvalue commits in fast moves (and approaches
+/// the x/twap pruning horizon).
+pub const TWAP_WINDOW_MIN_SECONDS: u64 = 300;
 pub const TWAP_WINDOW_MAX_SECONDS: u64 = 3_600;
 
 /// Query the chain's arithmetic TWAP for the configured pricing pool and
 /// return the native→USD rate in `RATE_PRECISION` fixed point.
 pub fn query_native_usd_rate(deps: Deps, env: &Env) -> StdResult<Uint128> {
     let config = FACTORYINSTANTIATEINFO.load(deps.storage)?;
+    probe_native_usd_rate(deps, env, &config)
+}
+
+/// Run the TWAP query against an explicit (possibly not-yet-stored)
+/// config. Split out from [`query_native_usd_rate`] so config
+/// validation can probe a *proposed* pricing route live at
+/// instantiate/propose/apply time instead of discovering a typo'd pool
+/// id only when every commit starts reverting.
+pub fn probe_native_usd_rate(
+    deps: Deps,
+    env: &Env,
+    config: &FactoryInstantiate,
+) -> StdResult<Uint128> {
     let start_time = env
         .block
         .time
@@ -87,6 +114,18 @@ pub fn twap_dec_to_rate(twap: &str) -> StdResult<Uint128> {
         return Err(StdError::generic_err(format!(
             "twap price {} too small for {}-precision rate",
             twap, RATE_PRECISION
+        )));
+    }
+    if rate > Uint128::new(RATE_MAX) {
+        // See RATE_MAX: a rate this high means a wrong-decimals quote
+        // denom or a spiked pricing pool, not a real price. Refuse
+        // rather than letting a dust commit value as thousands of
+        // dollars and cross the threshold.
+        return Err(StdError::generic_err(format!(
+            "twap price {} exceeds the ${} per native sanity ceiling — \
+             wrong-decimals usd_quote_denom or manipulated pricing pool",
+            twap,
+            RATE_MAX / RATE_PRECISION
         )));
     }
     Ok(rate)
@@ -147,6 +186,19 @@ mod tests {
         // 1e-7 truncates below the 1e6 fixed point.
         assert!(twap_dec_to_rate("0.0000001").is_err());
         assert!(twap_dec_to_rate("not-a-number").is_err());
+    }
+
+    #[test]
+    fn rejects_rates_above_sanity_ceiling() {
+        // Exactly at the ceiling is accepted...
+        assert_eq!(twap_dec_to_rate("10000").unwrap(), Uint128::new(RATE_MAX));
+        // ...one micro-USD above is refused.
+        let err = twap_dec_to_rate("10000.000001").unwrap_err();
+        assert!(err.to_string().contains("sanity ceiling"), "{}", err);
+        // The wrong-decimals scenario: an 18-decimal quote denom
+        // inflates a $1 price to ~1e12 — must be refused, not used to
+        // value commits.
+        assert!(twap_dec_to_rate("1000000000000").is_err());
     }
 
     #[test]

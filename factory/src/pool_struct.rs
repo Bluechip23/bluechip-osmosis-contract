@@ -349,8 +349,10 @@ mod threshold_payout_validate_tests {
 
     #[test]
     fn rejects_bluechip_reward_drift() {
-        let mut payout = ThresholdPayoutAmounts::default();
-        payout.bluechip_reward_amount = Uint128::new(1);
+        let payout = ThresholdPayoutAmounts {
+            bluechip_reward_amount: Uint128::new(1),
+            ..Default::default()
+        };
         let err = payout
             .validate()
             .expect_err("non-canonical bluechip must reject");
@@ -382,8 +384,10 @@ mod threshold_payout_validate_tests {
 
     #[test]
     fn rejects_commit_return_drift() {
-        let mut payout = ThresholdPayoutAmounts::default();
-        payout.commit_return_amount = Uint128::zero();
+        let payout = ThresholdPayoutAmounts {
+            commit_return_amount: Uint128::zero(),
+            ..Default::default()
+        };
         let err = payout
             .validate()
             .expect_err("non-canonical commit_return must reject");
