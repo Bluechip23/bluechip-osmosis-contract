@@ -41,7 +41,7 @@ use pool_factory_interfaces::cw721_msgs::{Action as Cw721Action, Cw721ExecuteMsg
 use pool_factory_interfaces::StandardPoolInstantiateMsg;
 
 /// cw2 contract name written at instantiate / migrate; identifies this binary in on-chain version metadata.
-const CONTRACT_NAME: &str = "bluechip-contracts-standard-pool";
+const CONTRACT_NAME: &str = "bluechip-osmosis-standard-pool";
 /// cw2 contract version (sourced from Cargo.toml); compared against the stored value in `migrate` to reject downgrades.
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 

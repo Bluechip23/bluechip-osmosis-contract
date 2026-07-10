@@ -1,12 +1,9 @@
 # Bluechip Keepers
 
-> **Strip-down note (native denomination refactor).** The factory's internal
-> price oracle, Pyth integration, keeper bounties (oracle-update and
-> distribution), expand-economy, and bluechip mint rewards were all removed
-> from the contracts. The commit threshold is now denominated directly in the
-> chain's native asset. Consequently the **oracle keeper no longer exists**,
-> and the remaining keeper actions pay **no bounty** — the operator absorbs
-> gas costs as part of running the protocol.
+> Keeper actions pay **no bounty** — the operator absorbs gas costs as
+> part of running the protocol. There is no price-oracle keeper: USD
+> pricing is chain-native (Osmosis `x/twap`) and needs no off-chain
+> upkeep.
 
 One off-chain bot keeps the Bluechip protocol tidy — the **distribution
 keeper**, which per sweep:

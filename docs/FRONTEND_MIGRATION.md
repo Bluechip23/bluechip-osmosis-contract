@@ -1,18 +1,5 @@
 # BlueChip Frontend Integration Guide
 
-> **⚠️ Strip-down notice (Osmosis relaunch).** The internal price oracle
-> (bespoke TWAP engine + Pyth), keeper bounties, the expand-economy
-> reservoir, and the bluechip mint-reward machinery have been **removed**
-> from the contracts. Pools now pair against the host chain's main native
-> asset (`bluechip_denom`, e.g. `uosmo`). The commit threshold remains
-> **USD-denominated** (`commit_threshold_limit_usd`), but commits are now
-> valued via Osmosis's chain-native `x/twap` module over a configured
-> native/USDC pool (`factory::usd_price`) — a single stateless chain query
-> with no keepers, no Pyth pusher, and no bespoke oracle to attack.
-> Sections of this document describing the old oracle engine, bounties, or
-> expand-economy are **historical** and no longer reflect the deployed
-> contracts.
-
 > **This guide is for website owners, content creators, and community builders** who want to add BlueChip buttons and features to their own website. You do **not** need to be a programmer — just copy and paste the code blocks below.
 
 ---
@@ -2043,7 +2030,7 @@ Here's a complete, self-contained HTML page you can save and use. It includes wa
     </div>
 
     <p style="text-align:center;color:#999;font-size:12px;">
-        Powered by <a href="https://github.com/Bluechip23/bluechip-contracts"
+        Powered by <a href="https://github.com/Bluechip23/bluechip-osmosis-contract"
         target="_blank" style="color:#1976d2;">BlueChip Protocol</a>
     </p>
 
@@ -2107,5 +2094,5 @@ Or check the pool creation transaction on your block explorer — the token cont
 
 ---
 
-**Questions?** Check the [BlueChip GitHub](https://github.com/Bluechip23/bluechip-contracts) or reach out to the BlueChip community.
+**Questions?** Check the [BlueChip GitHub](https://github.com/Bluechip23/bluechip-osmosis-contract) or reach out to the BlueChip community.
 

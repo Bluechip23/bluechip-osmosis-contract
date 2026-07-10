@@ -41,11 +41,11 @@ use pool_core::balance_verify::handle_deposit_verify_reply;
 
 /// cw2 contract name. Includes the `creator` discriminator so a
 /// migration tool inspecting cw2 names can distinguish a creator-pool
-/// from a `standard-pool` (`bluechip-contracts-standard-pool`).
+/// from a `standard-pool` (`bluechip-osmosis-standard-pool`).
 /// Pre-rename pools migrating up will fail any cw2-name check; that's
 /// the desired behaviour — name drift across pool kinds is exactly
 /// the foot-gun this rename closes.
-const CONTRACT_NAME: &str = "bluechip-contracts-creator-pool";
+const CONTRACT_NAME: &str = "bluechip-osmosis-creator-pool";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------------------------------------------------------------------------

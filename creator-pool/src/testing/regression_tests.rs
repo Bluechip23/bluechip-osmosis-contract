@@ -1269,7 +1269,7 @@ fn test_m3_migrate_rejects_downgrade() {
     // current binary could be.
     cw2::set_contract_version(
         &mut deps.storage,
-        "bluechip-contracts-creator-pool",
+        "bluechip-osmosis-creator-pool",
         "9.9.9",
     )
     .unwrap();

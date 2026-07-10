@@ -6,13 +6,6 @@ chain's native asset (**OSMO**, `uosmo`); the commit threshold is
 USD-denominated and valued through Osmosis's chain-native `x/twap`
 module — no keepers, no external price feeds, no bespoke oracle.
 
-> This repository is the Osmosis relaunch of `bluechip-contracts`. The
-> internal price oracle (TWAP engine + Pyth), keeper bounties, the
-> expand-economy reservoir, and the bluechip mint-reward machinery were
-> removed in the migration. `OSMOSIS_MIGRATION_AUDIT.md` documents the
-> line-by-line security review of that migration; `SECURITY_AUDIT.md`
-> and `AUDIT_DELTA.md` are the prior audits of the shared codebase.
-
 ## Overview
 
 Bluechip enables content creators to launch their own tokens and build
@@ -445,12 +438,9 @@ before rendering.
 
 ## Security Considerations
 
-The full security record lives in three in-repo documents:
-`SECURITY_AUDIT.md` (baseline line-by-line audit), `AUDIT_DELTA.md`
-(delta review of post-baseline changes), and
-`OSMOSIS_MIGRATION_AUDIT.md` (four-pass review of the Osmosis
-migration, including verification that every previously-audited defense
-survived it). Highlights:
+The full security record lives in `SECURITY_AUDIT.md` — a multi-pass
+review of every contract with findings, verified defenses, and
+priorities. Highlights:
 
 ### Reentrancy & funds handling
 - Single shared `REENTRANCY_LOCK` across commit, swap, and every
@@ -461,8 +451,7 @@ survived it). Highlights:
 
 ### Pricing security
 - Fail-closed x/twap valuation with zero/dust rejection and the
-  `RATE_MAX` ($10k/OSMO) sanity ceiling replacing the old oracle's
-  drift breaker; TWAP window floor 300s.
+  `RATE_MAX` ($10k/OSMO) sanity ceiling; TWAP window floor 300s.
 - Live probe of any proposed pricing config at instantiate / propose /
   apply — a typo'd pool id cannot brick commits.
 - Residual operator duty: **monitor the pricing pool's liquidity**
@@ -535,7 +524,7 @@ Commit (1000 OSMO)
 ```
 
 Note: the creator allocation is **not vested** and creators may commit
-to their own pools; weigh that (documented as finding M-1 in
+to their own pools; weigh that (documented as finding S-4 in
 `SECURITY_AUDIT.md`) when deciding pool parameters.
 
 ---
@@ -656,10 +645,9 @@ cargo fmt --all -- --check
 ```
 
 Current suite: creator-pool 218, factory 112, standard-pool 77,
-pool-core 34, router 23. `fuzz/` carries cargo-fuzz math targets (see
-`FUZZING.md` for status — the stateful harness was retired with the
-migration and its restoration is tracked in
-`OSMOSIS_MIGRATION_AUDIT.md`).
+pool-core 34, router 23. `fuzz/` carries cargo-fuzz math targets; see
+`FUZZING.md` for status and the planned property-harness work (tracked
+as S-8 in `SECURITY_AUDIT.md`).
 
 ### Repository layout
 

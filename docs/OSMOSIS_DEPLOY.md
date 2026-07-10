@@ -1,6 +1,6 @@
 # Shipping to Osmosis
 
-The stripped-down stack (factory + creator-pool + standard-pool + router)
+The stack (factory + creator-pool + standard-pool + router)
 deploys to Osmosis with pools pairing against **OSMO** (`uosmo`). The
 commit threshold is **USD-denominated**: commits are made in OSMO and
 valued via Osmosis's chain-native `x/twap` module over the configured
