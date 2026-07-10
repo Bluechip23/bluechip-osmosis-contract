@@ -54,14 +54,6 @@ pub fn execute_propose_pool_upgrade(
     // 2. Every supplied ID must reference a registered pool. An
     // invalid ID would error inside `build_upgrade_batch` at apply
     // time and revert the entire batch.
-    // 3. The anchor pool is rejected. Migrating it mid-flight
-    // would leave the oracle querying `GetPoolState` against
-    // possibly-mid-migration storage; if the migrate changes
-    // the reserve representation the cumulative-delta math
-    // breaks silently. Operators must propose a new anchor first
-    // (CreateStandardPool + 48h ProposeConfigUpdate / one-shot
-    // SetAnchorPool semantics), repoint the factory at it, then
-    // migrate the old anchor in a dedicated cycle.
     //
     // None means "all pools" — same dedup/existence is implicit
     // (POOLS_BY_ID.keys already returns unique, registered IDs) but

@@ -178,9 +178,9 @@ pub fn execute_sweep_unclaimed_emergency_shares_pool(
     )
 }
 
-/// Called by a pool when its commit threshold has been crossed. Triggers
-/// the bluechip mint for this pool (only once per pool — the
-/// `POOL_THRESHOLD_MINTED` gate prevents a malicious pool from calling
+/// Called by a pool when its commit threshold has been crossed. Records
+/// the crossing and emits the crossing event (only once per pool — the
+/// `POOL_THRESHOLD_CROSSED` gate prevents a malicious pool from calling
 /// back repeatedly).
 ///
 /// `crossed_at` is the pool's `env.block.time` at the moment the

@@ -4,8 +4,7 @@
 //! depositable at creation.
 //!
 //! ECONOMIC SCOPE.
-//! Standard pools are completely OUTSIDE the bluechip
-//! expand-economy / mint-decay flow:
+//! Standard pools are completely OUTSIDE the commit / threshold flow:
 //! - They never cross a commit threshold (there is no `Commit`
 //! ExecuteMsg variant on this contract).
 //! - They never call `NotifyThresholdCrossed` on the factory.

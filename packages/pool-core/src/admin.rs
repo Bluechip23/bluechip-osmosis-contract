@@ -737,12 +737,9 @@ pub fn execute_update_config_from_factory(
     // proposals carrying those fields at propose time, so a standard-pool
     // apply that reaches here can only have `None` for both.
 
-    // Per-pool `oracle_address` rotation removed. The oracle
-    // endpoint is pinned at instantiate to the factory address and is
-    // no longer mutable through the per-pool config flow. If the
-    // protocol ever splits the oracle off the factory, the rerouting
-    // path is a coordinated `UpgradePools` migration that writes
-    // ORACLE_INFO directly — not a runtime config knob.
+    // Per-pool `oracle_address` rotation removed — USD pricing is
+    // pinned to the factory; see `pool-core::msg::PoolConfigUpdate`
+    // for the rationale.
 
     Ok(Response::new()
         .add_attributes(attributes)

@@ -127,9 +127,10 @@ pub enum ExecuteMsg {
     },
     // Re-sends NotifyThresholdCrossed to the factory when the initial
     // notification during threshold-crossing failed and PENDING_FACTORY_NOTIFY
-    // is set. Anyone can call: factory's POOL_THRESHOLD_MINTED idempotency
-    // check gates double-mints, so at worst a stray caller burns gas on a
-    // no-op. Clears the pending flag on successful reply.
+    // is set. Anyone can call: factory's POOL_THRESHOLD_CROSSED
+    // idempotency check gates double-processing, so at worst a stray
+    // caller burns gas on a no-op. Clears the pending flag on
+    // successful reply.
     RetryFactoryNotify {},
     CancelEmergencyWithdraw {},
 

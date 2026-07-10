@@ -696,11 +696,9 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
     // in `pool_core::swap::update_price_accumulator` (e.g. the
     // `PRICE_ACCUMULATOR_SCALE` introduction) does not produce a one-shot
     // garbage TWAP from a `cumulative_delta` that crosses the upgrade
-    // boundary with mixed-units endpoints. The factory's oracle observes
-    // a zero `cumulative_delta` for the round straddling the migrate
-    // (`saturating_sub(scaled_new, unscaled_old) == 0` once new > old, but
-    // for the first post-migrate read both ends will be small) and
-    // `continue`s, then steady-state TWAP resumes from the next round.
+    // boundary with mixed-units endpoints. An external TWAP consumer
+    // observes a zero `cumulative_delta` for the round straddling the
+    // migrate, then steady-state TWAP resumes from the next round.
     // Cheap and idempotent — costs at most one TWAP round per upgrade.
     if let Ok(mut state) = POOL_STATE.load(deps.storage) {
         state.price0_cumulative_last = cosmwasm_std::Uint128::zero();

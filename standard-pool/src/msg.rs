@@ -168,8 +168,7 @@ pub enum QueryMsg {
     /// flag). This is the response used by frontends and SDKs.
     /// Do NOT confuse with the factory-facing `GetPoolState {}`
     /// variant below, which returns a DIFFERENT type
-    /// (`PoolStateResponseForFactory`) consumed by the factory's
-    /// oracle / liquidity-snapshot machinery.
+    /// (`PoolStateResponseForFactory`) consumed by the factory.
     #[returns(PoolStateResponse)]
     PoolState {},
     #[returns(PoolFeeStateResponse)]
@@ -203,7 +202,7 @@ pub enum QueryMsg {
     #[returns(AllPoolsResponse)]
     GetAllPools {},
     /// Factory-facing pause-status query. Returns `IsPausedResponse`.
-    /// Used by the factory's oracle / health-checks; LP-facing pause
+    /// Used by the factory (e.g. the pool-upgrade batcher); LP-facing pause
     /// state is exposed indirectly via `PoolState {}` reserves and the
     /// per-handler error responses.
     #[returns(IsPausedResponse)]

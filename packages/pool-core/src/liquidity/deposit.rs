@@ -614,8 +614,8 @@ pub(crate) fn snapshot_pool_cw20_balances(
 /// TransferFroms have already settled and the post-balance query
 /// reflects the actual delta.
 ///
-/// When `pre_snapshot.is_some()` BUT every side is Native (e.g. the
-/// ATOM/bluechip anchor pool shape): same as the verify=false path —
+/// When `pre_snapshot.is_some()` BUT every side is Native (a
+/// native/native pair): same as the verify=false path —
 /// nothing to verify, no SubMsg conversion, no transient state.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_deposit_response(

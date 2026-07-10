@@ -2,10 +2,10 @@
 //!
 //! Once a pool crosses its commit threshold, the commit ledger is paid
 //! out to committers in batches. Each call to
-//! `execute_continue_distribution` processes the next slice, awards the
-//! caller the distribution bounty (paid by the factory from its own
-//! native reserve, not LP funds), and advances the cursor in
-//! `DISTRIBUTION_STATE` until the pool is fully distributed.
+//! `execute_continue_distribution` processes the next slice and
+//! advances the cursor in `DISTRIBUTION_STATE` until the pool is fully
+//! distributed. The call is permissionless and unpaid; the protocol's
+//! distribution keeper runs it as housekeeping (see keepers/).
 
 use cosmwasm_std::{DepsMut, Env, MessageInfo, Response, SubMsg};
 

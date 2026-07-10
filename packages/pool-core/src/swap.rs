@@ -10,8 +10,8 @@
 //! shape-agnostic — no commit-phase logic; `query_check_commit` is
 //! the only gate and it's `true` on standard pools by default.
 //!
-//! Oracle-backed USD conversion helpers — which query the factory's
-//! internal oracle and are only needed by the commit flow — stay in
+//! USD conversion helpers — which query the factory's x/twap-backed
+//! pricing and are only needed by the commit flow — stay in
 //! `creator-pool::swap_helper`.
 
 use crate::asset::{TokenInfo, TokenInfoPoolExt, TokenType};
@@ -100,14 +100,12 @@ pub fn compute_swap(
 /// that produces a permanently-zero cumulative on one side and a useless TWAP
 /// downstream. Multiplying the numerator by `1_000_000` before the divide
 /// preserves 6 decimal places of precision in the accumulator — the same
-/// scale the factory's internal oracle treats prices in
-/// (`PRICE_PRECISION = 1_000_000`), so consumers no longer need to re-multiply
-/// when computing per-pool TWAPs.
+/// 1e6 fixed-point scale as `factory::usd_price::RATE_PRECISION`, so
+/// consumers no longer need to re-multiply when computing per-pool TWAPs.
 ///
-/// Mirrors `factory::internal_bluechip_price_oracle::PRICE_PRECISION` and
-/// `creator-pool::swap_helper::ORACLE_PRICE_PRECISION`. Any change here MUST
-/// be propagated to those three constants AND to a coordinated migration that
-/// resets `price{0,1}_cumulative_last` on every deployed pool.
+/// Any change here MUST be propagated to `RATE_PRECISION` AND to a
+/// coordinated migration that resets `price{0,1}_cumulative_last` on
+/// every deployed pool.
 pub const PRICE_ACCUMULATOR_SCALE: u128 = 1_000_000;
 
 pub fn update_price_accumulator(

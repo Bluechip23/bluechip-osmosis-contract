@@ -172,8 +172,8 @@ pub enum FactoryExecuteMsg {
 /// reply chain to a freshly instantiated standard pool wasm.
 ///
 /// Standard pools are plain xyk pools around two pre-existing assets:
-/// they do not have a commit phase, do not mint a fresh CW20, and do not
-/// participate in oracle sampling. Compared to the commit-pool
+/// they do not have a commit phase and do not mint a fresh CW20.
+/// Compared to the commit-pool
 /// instantiate shape (`pool::msg::PoolInstantiateMsg`), the only inputs
 /// the pool needs are: which two assets it wraps, which CW721 contract
 /// to mint position NFTs on, and which factory it belongs to.

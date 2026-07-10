@@ -717,11 +717,12 @@ fn execute_accept_nft_ownership(
 /// Re-sends `NotifyThresholdCrossed` to the factory when the initial
 /// notification (dispatched via `reply_on_error` during threshold-crossing
 /// commit) failed. This entrypoint is callable by ANYONE; the factory's
-/// POOL_THRESHOLD_MINTED idempotency check prevents a successful mint from
-/// firing twice. Reply handling clears PENDING_FACTORY_NOTIFY on success.
+/// POOL_THRESHOLD_CROSSED idempotency check prevents a successful notify
+/// from registering twice. Reply handling clears PENDING_FACTORY_NOTIFY
+/// on success.
 ///
-/// Why permissionless: recovery-path tx. If a factory misconfiguration or
-/// expand-economy stall caused the initial notification to fail, we want
+/// Why permissionless: recovery-path tx. If a factory misconfiguration
+/// caused the initial notification to fail, we want
 /// anyone — a keeper, a committer, Bluechip ops — to be able to nudge the
 /// system back to consistent state once the root cause is fixed. The worst
 /// an abusive caller can do is waste their own gas on a factory reject.
@@ -738,11 +739,9 @@ pub fn execute_retry_factory_notify(
     }
 
     let pool_info = POOL_INFO.load(deps.storage)?;
-    // Re-supply the ORIGINAL threshold-crossing time so the
-    // factory's bluechip-mint decay formula uses the same `s` reference
-    // as it would have at first-attempt. Without this, a retry after a
-    // long delay would receive a smaller mint than the pool was
-    // entitled to at original crossing.
+    // Re-supply the ORIGINAL threshold-crossing time so the factory
+    // records the same crossing time it would have recorded at
+    // first-attempt, regardless of how long the retry took.
     //
     // THRESHOLD_CROSSED_AT is saved alongside IS_THRESHOLD_HIT inside
     // `trigger_threshold_payout`. If PENDING_FACTORY_NOTIFY is true,
@@ -977,8 +976,7 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
     // block in `standard-pool::contract::migrate`; the rationale (clean
     // unit-scale boundary across a `PRICE_ACCUMULATOR_SCALE` change in
     // `pool_core::swap::update_price_accumulator`) lives there. Costs at
-    // most one factory oracle TWAP round per upgrade, which the breaker /
-    // snapshot machinery handles cleanly.
+    // most one external-TWAP round per upgrade.
     if let Ok(mut state) = POOL_STATE.load(deps.storage) {
         state.price0_cumulative_last = cosmwasm_std::Uint128::zero();
         state.price1_cumulative_last = cosmwasm_std::Uint128::zero();

@@ -10,7 +10,7 @@ use pool_factory_interfaces::PoolKind;
 /// Only `pool_token_info` is honored end-to-end — the factory's stored
 /// config is the authoritative source of truth for every other knob
 /// (commit threshold, commit fee splits, threshold payout amounts, lock
-/// caps, oracle config). The previous version of this struct included
+/// caps, pricing config). The previous version of this struct included
 /// caller-supplied versions of those fields, but `mint_create_pool`
 /// silently overwrote them with `factory_config.*` values, so a caller
 /// thinking they were tuning their pool was just being ignored.
@@ -44,13 +44,12 @@ pub struct PoolConfigUpdate {
     /// Same shape and bounds as `min_commit_usd_pre_threshold` above.
     #[serde(default)]
     pub min_commit_usd_post_threshold: Option<Uint128>,
-    // `oracle_address` removed. Mirrors the same field's
-    // removal from `pool_core::msg::PoolConfigUpdate`. Per-pool oracle
-    // rotation was an admin-compromise vector — a malicious oracle could
-    // return arbitrary USD valuations, letting a tiny commit register
-    // as a full threshold cross. Future re-routing, if ever needed,
-    // goes through a coordinated `UpgradePools` migration that writes
-    // ORACLE_INFO directly.
+    // `oracle_address` removed. Mirrors the same field's removal from
+    // `pool_core::msg::PoolConfigUpdate`. Per-pool price-source rotation
+    // was an admin-compromise vector — a malicious source could return
+    // arbitrary USD valuations, letting a tiny commit register as a full
+    // threshold cross. USD pricing is factory-global by design
+    // (`factory::usd_price`).
 }
 
 /// Inclusive upper bound on `min_commit_interval` (seconds). Mirrors the pool

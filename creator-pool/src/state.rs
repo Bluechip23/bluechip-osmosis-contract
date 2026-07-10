@@ -79,11 +79,11 @@ pub const LAST_THRESHOLD_ATTEMPT: Item<Timestamp> = Item::new("last_threshold_at
 /// `env.block.time` snapshotted at the moment threshold flipped (set
 /// inside `trigger_threshold_payout` immediately after
 /// `IS_THRESHOLD_HIT.save(true)`). Threaded into the
-/// `NotifyThresholdCrossed` SubMsg payload so the factory's bluechip-
-/// mint decay formula uses the ORIGINAL crossing time, not the time
-/// the (possibly retried-after-failure) notify finally lands. Read by
-/// `execute_retry_factory_notify` to keep retries deterministic in mint
-/// amount regardless of delay.
+/// `NotifyThresholdCrossed` SubMsg payload so the factory records the
+/// ORIGINAL crossing time, not the time the (possibly
+/// retried-after-failure) notify finally lands. Read by
+/// `execute_retry_factory_notify` to keep retries deterministic
+/// regardless of delay.
 ///
 /// Storage key is `"threshold_crossed_at"`.
 pub const THRESHOLD_CROSSED_AT: Item<Timestamp> = Item::new("threshold_crossed_at");
@@ -93,8 +93,8 @@ pub const THRESHOLD_CROSSED_AT: Item<Timestamp> = Item::new("threshold_crossed_a
 ///
 /// All pool-side threshold state (`IS_THRESHOLD_HIT`, reserves,
 /// committer distribution) still succeeds — only the factory's
-/// `POOL_THRESHOLD_MINTED` flag and the per-pool Bluechip mint reward
-/// are pending. Any caller can invoke
+/// `POOL_THRESHOLD_CROSSED` registry flag is pending. Any caller can
+/// invoke
 /// [`crate::msg::ExecuteMsg::RetryFactoryNotify`] to re-send the
 /// notification; on success this flag is cleared by the reply
 /// handler. Absence or `false` means "either never crossed threshold,
@@ -181,7 +181,7 @@ pub const PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS: u64 = 7 * 86_400;
 // in 4d. Now that standard pools run their own wasm (`standard-pool`
 // crate), the kind is determined by which binary is executing — the
 // runtime discriminator is gone. The factory still tracks `pool_kind`
-// on `PoolDetails` for its own routing (e.g. oracle sample filtering)
+// on `PoolDetails` for its own routing (commit-vs-standard checks)
 // but the pool side doesn't need it.
 
 // -- Commit-phase-only constants -----------------------------------------
@@ -203,8 +203,8 @@ pub const DISTRIBUTION_STALL_TIMEOUT_SECONDS: u64 = 86_400;
 
 /// Per-keeper rate limit on `ContinueDistribution`. Prevents a single
 /// keeper (or a competing keeper losing the race) from same-block
-/// spamming no-op tx that pay no bounty but still cost ledger reads
-/// and gas. Each `info.sender` must wait
+/// spamming no-op tx that still cost ledger reads and gas. Each
+/// `info.sender` must wait
 /// [`CONTINUE_DISTRIBUTION_RATE_LIMIT_SECONDS`] between calls; another
 /// address can still call sooner, so legitimate keepers rotating
 /// through addresses (e.g. a multi-keeper service) aren't blocked.
@@ -226,12 +226,6 @@ pub const LAST_CONTINUE_DISTRIBUTION_AT: cw_storage_plus::Map<&Addr, u64> =
 /// enough that a legitimate keeper polling at any reasonable cadence
 /// (every block, every 30s, every 5min) is unaffected on the slow path.
 pub const CONTINUE_DISTRIBUTION_RATE_LIMIT_SECONDS: u64 = 5;
-
-// Distribution keeper bounty is paid by the factory, not the pool —
-// see `factory::execute_pay_distribution_bounty`. The pool just emits
-// a `WasmMsg` to the factory and the factory pays from its own native
-// reserve. This keeps LP funds isolated from keeper infrastructure
-// costs.
 
 // -- Commit-phase-only structs -------------------------------------------
 

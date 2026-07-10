@@ -166,7 +166,7 @@ fn execute_commit_logic(
     // the inner `match` below only handles bluechip Native and returns
     // `AssetMismatch` for everything else. Tighten the outer check to
     // bluechip-only so a caller passing the creator-token side surfaces
-    // the clearer error earlier and skips the oracle-conversion +
+    // the clearer error earlier and skips the USD-conversion +
     // min-commit + analytics work that would otherwise run before the
     // inner reject. The inner `_ => AssetMismatch` arm is preserved as
     // defense-in-depth against config corruption.

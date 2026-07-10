@@ -52,16 +52,14 @@ pub struct PoolConfigUpdate {
     // `usd_payment_tolerance_bps` removed — see `PoolSpecs` doc-comment
     // in `pool-core::state` for rationale.
     //
-    // `oracle_address` removed. Per-pool oracle rotation is a
-    // documented admin-compromise vector: a malicious oracle can return
+    // `oracle_address` removed. Per-pool price-source rotation is a
+    // documented admin-compromise vector: a malicious source can return
     // arbitrary `ConversionResponse.amount`, letting a $5 commit register
     // as a $25k threshold-cross and capturing the full pool seed +
-    // creator/bluechip rewards on a single pool. There is no current
-    // operational need to point an individual pool at a non-factory
-    // oracle. If a future architecture splits the oracle off the
-    // factory, the accepted re-routing path is a coordinated wasm
-    // migration via `UpgradePools` (already 48h-timelocked + batched)
-    // that updates `ORACLE_INFO` directly, not a per-pool config knob.
+    // creator rewards on a single pool. USD pricing is pinned to the
+    // factory (`factory::usd_price`); re-routing, if ever needed, is a
+    // coordinated wasm migration via `UpgradePools` (already
+    // 48h-timelocked + batched), not a per-pool config knob.
 }
 
 #[cw_serde]

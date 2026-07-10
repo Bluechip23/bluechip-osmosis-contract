@@ -21,7 +21,7 @@
 //! Out of scope (lives in the consuming contract crates):
 //! - Commit-phase logic: commit, threshold crossing, distribution,
 //! claim-creator-excess, claim-creator-fees, retry-factory-notify,
-//! oracle-backed USD conversions.  (creator-pool/)
+//! factory-backed USD conversions.  (creator-pool/)
 //! - Entry points, factory message dispatch, contract-level tests.
 //!
 //! Intended consumers:

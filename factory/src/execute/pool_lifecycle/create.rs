@@ -166,7 +166,7 @@ pub(crate) fn execute_create_creator_pool(
     // reverts the whole tx atomically) also reverts the stamp —
     // no permanent rate-limit state leaks from failed creates.
     //
-    // Runs BEFORE the fee oracle / funds check so a rate-limited
+    // Runs BEFORE the fee/funds check so a rate-limited
     // caller sees the rate-limit error directly rather than a
     // misleading "insufficient fee" error (when the actual block
     // is the cooldown, not the fee).
@@ -218,9 +218,7 @@ pub(crate) fn execute_create_creator_pool(
     //
     // Two-mode behavior keyed off the live fee:
     // - Fee enabled (`required_bluechip > 0`): use `must_pay`. Surplus
-    // over `required_bluechip` is refunded in the same tx, since
-    // callers can't predict the exact oracle-converted amount
-    // between quoting and submission.
+    // over `required_bluechip` is refunded in the same tx.
     // - Fee disabled (`required_bluechip == 0`): no funds are expected
     // and none are accepted. Any attached funds (even bluechip)
     // error out — callers who paid by mistake get everything back on
@@ -459,10 +457,10 @@ fn validate_standard_pool_token_info(
 }
 
 /// Permissionless entry point for creating a plain xyk pool around two
-/// pre-existing assets. Caller pays a USD-denominated fee (in ubluechip)
+/// pre-existing assets. Caller pays the flat native-denom creation fee
 /// configured on the factory; the fee is forwarded to
-/// `bluechip_wallet_address`. The pool is NOT eligible for oracle sampling
-/// and has no commit phase or distribution.
+/// `bluechip_wallet_address`. The pool has no commit phase or
+/// distribution.
 ///
 /// Reply chain (2 steps, vs the commit-pool chain's 3): NFT instantiate
 /// → pool instantiate → register & transfer NFT ownership. CW20 minting

@@ -103,10 +103,8 @@ pub fn execute_emergency_withdraw(
         if excess.is_some() {
             CREATOR_EXCESS_POSITION.remove(deps.storage);
         }
-        // The pool no longer holds a bounty reserve; distribution
-        // bounties are paid by the factory. Halt any in-flight
-        // distribution so future ContinueDistribution calls reject
-        // cleanly.
+        // Halt any in-flight distribution so future
+        // ContinueDistribution calls reject cleanly.
         if let Ok(mut dist_state) = DISTRIBUTION_STATE.load(deps.storage) {
             dist_state.is_distributing = false;
             dist_state.distributions_remaining = 0;

@@ -10,7 +10,7 @@
 //! truth is whether `COMMIT_LEDGER` has any entries past the cursor.
 //! This means a single tx can both process the final committer AND
 //! remove `DISTRIBUTION_STATE`, eliminating the previous "one extra
-//! empty cleanup call" pattern that paid a free bounty.
+//! empty cleanup call" pattern.
 //!
 //! See also `commit/distribution.rs` for the
 //! `execute_continue_distribution` entry point that routes incoming
@@ -100,9 +100,8 @@ pub(crate) fn build_distribution_mint_submsg(
 ///
 /// Returns `(submsgs, processed_count)` where `processed_count` is the number
 /// of committers whose ledger entries were drained in this call. Callers use
-/// this to decide whether the call did real work — important for the
-/// distribution-keeper bounty, which should never pay out for an empty/no-op
-/// batch (factory funds are finite, and keepers shouldn't farm empty calls).
+/// this to decide whether the call did real work (an empty batch means
+/// the pool is fully distributed and the keeper can stop sweeping it).
 ///
 /// Each per-user mint is wrapped in a `SubMsg::reply_always` (see
 /// `build_distribution_mint_submsg`). A failing mint is captured by the

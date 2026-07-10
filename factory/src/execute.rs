@@ -239,8 +239,8 @@ fn execute_prune_rate_limits(
 /// Prune up to `batch` entries from a per-address `Addr -> Timestamp`
 /// rate-limit map whose timestamp is older than
 /// `now_secs - stale_after_secs`. Returns the number of entries actually
-/// removed (`<= batch`). Centralized so adding a third such map (e.g.
-/// per-keeper bounty cooldown) is a one-line addition rather than a
+/// removed (`<= batch`). Centralized so adding a third such map is a
+/// one-line addition rather than a
 /// copy-pasted loop with risk of attribute-key drift.
 ///
 /// The walk is timestamp-ordered via the secondary `(ts, addr)` index,
