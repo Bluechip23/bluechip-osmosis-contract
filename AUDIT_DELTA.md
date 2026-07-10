@@ -1,5 +1,13 @@
 # Delta Security Review — post-baseline changes
 
+> **⚠️ Strip-down notice (Osmosis relaunch).** This review predates the
+> Osmosis migration: expand-economy (C8) has since been removed, the
+> test count and "five contracts" below reflect the pre-migration tree
+> (current: four contracts, 464 tests), and `scripts/verify_deploy.sh`
+> was superseded by `deploy_osmosis.sh`'s built-in verification. The
+> C1–C7 changes reviewed here all survive in the current code. See
+> `OSMOSIS_MIGRATION_AUDIT.md` for the migration review.
+
 **Scope:** all contract-source changes on `claude/loving-albattani-eolo8l`
 relative to merge-base `618fb9d` (the last externally-reviewed baseline;
 see `SECURITY_AUDIT.md` for the full-codebase review that baseline had).

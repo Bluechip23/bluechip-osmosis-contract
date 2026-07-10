@@ -72,7 +72,7 @@ moot (mint machinery removed; `crossed_at` is event-only).
 
 | ID | Old status | New status |
 |----|-----------|------------|
-| F-3 (balance-lying CW20 drains own pool; docs overclaim "hostile-CW20 safe") | Open (decision) | **Still open, unchanged** — `packages/pool-core/src/balance_verify.rs:90,119`; README overclaims persist at `:170,:307,:608`. Neither remediation (allowlist or doc correction) was taken |
+| F-3 (balance-lying CW20 drains own pool; docs overclaim "hostile-CW20 safe") | Open (decision) | **Docs remediation taken** — README rewritten with an explicit "Standard-pool CW20 risk" disclosure (pool-isolated drain by a balance-lying token; LPs must trust the CW20). The code-side option (token allowlist) remains not implemented, by decision |
 | F-4 (`crossed_at` anchors mint schedule) | Open | **Moot** — mint machinery deleted; `crossed_at` is event-only (`factory/.../admin.rs:226-246`). Stale doc-comment at `:182-183` |
 | F-5 (oracle cooldown bypass) | Open | **Moot** — no cached price, no update cadence exists |
 | F-6 (staleness gate fail-open on `timestamp==0`) | Open | **Moot as written**; new path is fail-closed end-to-end. The x/twap-shaped analog (no liveness gate on the pricing pool) is F-N3 |
