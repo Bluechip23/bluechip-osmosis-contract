@@ -109,18 +109,47 @@ impl WasmMockQuerier {
                 enum WrapperProbe {
                     PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
                 }
-                if let Ok(WrapperProbe::PoolFactoryQuery(
-                    pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
-                )) = from_json(msg)
-                {
-                    let resp = pool_factory_interfaces::ConversionResponse {
-                        amount,
-                        rate_used: Uint128::new(1_000_000),
-                        timestamp: 0,
-                    };
-                    return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
-                        to_json_binary(&resp).unwrap(),
-                    ));
+                if let Ok(WrapperProbe::PoolFactoryQuery(factory_msg)) = from_json(msg) {
+                    match factory_msg {
+                        pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd {
+                            amount,
+                        } => {
+                            let resp = pool_factory_interfaces::ConversionResponse {
+                                amount,
+                                rate_used: Uint128::new(1_000_000),
+                                timestamp: 0,
+                            };
+                            return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
+                                to_json_binary(&resp).unwrap(),
+                            ));
+                        }
+                        // Answer the two admin-path queries at the same wire
+                        // shape production uses (the pool_factory_query
+                        // envelope). The emergency-initiate regression that
+                        // shipped these queries UNWRAPPED survived the test
+                        // suite precisely because this mock only understood
+                        // ConvertNativeToUsd — an unrecognized query fell
+                        // through to a generic error, which the fail-soft
+                        // BluechipWalletAddress callers masked with their
+                        // snapshot fallback. Answering here keeps every
+                        // envelope-wrapped call site covered by unit tests.
+                        pool_factory_interfaces::FactoryQueryMsg::EmergencyWithdrawDelaySeconds {} => {
+                            let resp = pool_factory_interfaces::EmergencyWithdrawDelayResponse {
+                                delay_seconds: 86_400,
+                            };
+                            return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
+                                to_json_binary(&resp).unwrap(),
+                            ));
+                        }
+                        pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {} => {
+                            let resp = pool_factory_interfaces::BluechipWalletResponse {
+                                address: Addr::unchecked("ubluechip"),
+                            };
+                            return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
+                                to_json_binary(&resp).unwrap(),
+                            ));
+                        }
+                    }
                 }
 
                 // 1) factory fee-info

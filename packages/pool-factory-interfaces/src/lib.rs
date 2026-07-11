@@ -78,6 +78,27 @@ pub enum FactoryQueryMsg {
     BluechipWalletAddress {},
 }
 
+/// Top-level envelope matching the factory's
+/// `QueryMsg::PoolFactoryQuery(FactoryQueryMsg)` variant (wire key
+/// `pool_factory_query`). The factory's root QueryMsg does NOT accept a
+/// bare `FactoryQueryMsg` — pool-side callers MUST wrap their query in
+/// this envelope or the factory fails to deserialize it.
+///
+/// Lives here (not in the factory crate) because pools intentionally
+/// have no compile-time factory dependency; the two communicate only
+/// over wasm message boundaries. Every pool-side factory query goes
+/// through this one type so an unwrapped call can't slip in again —
+/// exactly that happened pre-launch: `EmergencyWithdrawDelaySeconds`
+/// was sent bare from `pool-core::execute_emergency_withdraw_initiate`
+/// (hard-failing every emergency initiate on-chain), and the three
+/// fail-soft `BluechipWalletAddress` callers silently fell back to
+/// their instantiate-time snapshots forever, defeating live wallet
+/// rotation.
+#[cw_serde]
+pub enum FactoryQueryEnvelope {
+    PoolFactoryQuery(FactoryQueryMsg),
+}
+
 #[cw_serde]
 pub struct EmergencyWithdrawDelayResponse {
     pub delay_seconds: u64,

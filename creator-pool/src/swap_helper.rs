@@ -8,23 +8,14 @@
 pub use pool_core::swap::*;
 
 use crate::state::POOL_INFO;
-use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Deps, StdError, StdResult, Uint128};
-use pool_factory_interfaces::{ConversionResponse, FactoryQueryMsg};
-
-/// Local mirror of the factory's `QueryMsg::PoolFactoryQuery(..)` wrapper
-/// variant (wire key `pool_factory_query`). Defined here rather than
-/// importing the factory crate — the pool intentionally has no
-/// compile-time factory dependency; the two communicate only over wasm
-/// message boundaries.
-#[cw_serde]
-enum FactoryQueryWrapper {
-    PoolFactoryQuery(FactoryQueryMsg),
-}
+use pool_factory_interfaces::{ConversionResponse, FactoryQueryEnvelope, FactoryQueryMsg};
 
 /// Fixed-point scale of `ConversionResponse.rate_used`: micro-USD per
 /// micro-native. Must match `factory::usd_price::RATE_PRECISION`.
-/// Duplicated rather than imported (see wrapper note above).
+/// Duplicated rather than imported — the pool intentionally has no
+/// compile-time factory dependency; the two communicate only over wasm
+/// message boundaries.
 pub const RATE_PRECISION: u128 = 1_000_000;
 
 /// Values `native_amount` in USD via the factory, which computes the
@@ -41,7 +32,7 @@ pub fn get_usd_conversion(deps: Deps, native_amount: Uint128) -> StdResult<Conve
     let factory_addr = POOL_INFO.load(deps.storage)?.factory_addr;
     deps.querier.query_wasm_smart(
         factory_addr,
-        &FactoryQueryWrapper::PoolFactoryQuery(FactoryQueryMsg::ConvertNativeToUsd {
+        &FactoryQueryEnvelope::PoolFactoryQuery(FactoryQueryMsg::ConvertNativeToUsd {
             amount: native_amount,
         }),
     )

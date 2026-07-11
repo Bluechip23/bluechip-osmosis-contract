@@ -134,7 +134,9 @@ pub fn execute_emergency_withdraw_initiate(
     // tunability guarantee.
     let delay: EmergencyWithdrawDelayResponse = deps.querier.query_wasm_smart(
         pool_info.factory_addr.to_string(),
-        &FactoryQueryMsg::EmergencyWithdrawDelaySeconds {},
+        &pool_factory_interfaces::FactoryQueryEnvelope::PoolFactoryQuery(
+            FactoryQueryMsg::EmergencyWithdrawDelaySeconds {},
+        ),
     )?;
     let effective_after = now.plus_seconds(delay.delay_seconds);
     PENDING_EMERGENCY_WITHDRAW.save(deps.storage, &effective_after)?;
@@ -255,7 +257,9 @@ pub fn execute_emergency_withdraw_core_drain(
         .querier
         .query_wasm_smart::<pool_factory_interfaces::BluechipWalletResponse>(
             pool_info.factory_addr.to_string(),
-            &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+            &pool_factory_interfaces::FactoryQueryEnvelope::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+            ),
         ) {
         Ok(resp) => resp.address,
         Err(_) => fee_info.bluechip_wallet_address.clone(),
@@ -591,7 +595,9 @@ pub fn execute_sweep_unclaimed_emergency_shares(
         .querier
         .query_wasm_smart::<pool_factory_interfaces::BluechipWalletResponse>(
             pool_info.factory_addr.to_string(),
-            &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+            &pool_factory_interfaces::FactoryQueryEnvelope::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+            ),
         ) {
         Ok(resp) => resp.address,
         Err(_) => fee_info.bluechip_wallet_address,

@@ -58,7 +58,9 @@ pub fn resolve_live_bluechip_wallet(
         .querier
         .query_wasm_smart::<pool_factory_interfaces::BluechipWalletResponse>(
             factory_addr.to_string(),
-            &pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+            &pool_factory_interfaces::FactoryQueryEnvelope::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+            ),
         ) {
         Ok(resp) => resp.address,
         Err(_) => snapshot_fallback.clone(),

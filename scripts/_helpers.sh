@@ -145,11 +145,13 @@ query_smart() {
     raw="$(osmosisd query wasm contract-state smart "$contract" "$msg" \
         --node "$NODE" -o json 2>&1)"
     # Newer osmosisd wraps responses in {data: ...}; older versions
-    # return the response directly. Strip the wrapper if present.
-    local data
-    data="$(echo "$raw" | jq -c '.data // empty' 2>/dev/null || true)"
-    if [ -n "$data" ] && [ "$data" != "null" ]; then
-        echo "$data"
+    # return the response directly. Strip the wrapper whenever the key
+    # is present — including when data is legitimately `null` (an
+    # Option<T> query like DistributionState after completion), which
+    # the previous `.data // empty` check misread as "no wrapper" and
+    # passed through as `{"data":null}`, breaking callers' null checks.
+    if echo "$raw" | jq -e 'type == "object" and has("data")' >/dev/null 2>&1; then
+        echo "$raw" | jq -c '.data'
     else
         echo "$raw"
     fi

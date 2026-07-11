@@ -67,10 +67,12 @@ rate_limit_pause() {
 }
 
 # Suffix from the block height keeps re-runs unique without $RANDOM
-# (which repeats across fast re-invocations).
+# (which repeats across fast re-invocations). cw20-base validates
+# symbols against [a-zA-Z-]{3,12} — digits are rejected — so map each
+# height digit onto a letter (0-9 -> A-J).
 SUFFIX="$(query_json block 2>/dev/null | jq -r '.header.height // empty' 2>/dev/null | tail -c 5)"
 SUFFIX="${SUFFIX:-$$}"
-SYMBOL="LFC${SUFFIX//[^0-9]/}"
+SYMBOL="LFC$(printf '%s' "$SUFFIX" | tr -cd '0-9' | tr '0-9' 'A-J')"
 NAME="Lifecycle Test $SYMBOL"
 
 POOL_ADDR=""
@@ -181,6 +183,10 @@ lp_positions() {
 step "positions listed for owner" lp_positions
 
 if [ -n "$POSITION_ID" ]; then
+    # LP actions share the per-wallet 13s rate limit with commits and
+    # swaps; without a pause the remove lands within 13s of the deposit
+    # tx and reverts with "trying to commit too frequently".
+    rate_limit_pause
     step "remove all liquidity" "$SCRIPTS/liquidity.sh" remove "$POOL_ADDR" "$POSITION_ID"
 else
     echo "SKIP: remove liquidity (no position id captured)"

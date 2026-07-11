@@ -52,12 +52,11 @@ if [ "$NAME_LEN" -lt 3 ] || [ "$NAME_LEN" -gt 50 ]; then
     echo "error: name must be 3-50 printable ASCII chars (got $NAME_LEN)" >&2
     exit 1
 fi
-if ! [[ "$SYMBOL" =~ ^[A-Z0-9]{3,12}$ ]]; then
-    echo "error: symbol must be 3-12 chars matching ^[A-Z0-9]+$ (got '$SYMBOL')" >&2
-    exit 1
-fi
-if ! [[ "$SYMBOL" =~ [A-Z] ]]; then
-    echo "error: symbol must contain at least one A-Z letter (got '$SYMBOL')" >&2
+# cw20-base rejects digits at token instantiation ([a-zA-Z-]{3,12}),
+# so a digit here would pass the factory's pre-check and revert only
+# deep in the reply chain. Validate against the strictest link.
+if ! [[ "$SYMBOL" =~ ^[A-Z]{3,12}$ ]]; then
+    echo "error: symbol must be 3-12 chars matching ^[A-Z]+$ — cw20-base rejects digits (got '$SYMBOL')" >&2
     exit 1
 fi
 
