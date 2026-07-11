@@ -186,7 +186,7 @@ pub fn get_bank_transfer_to_msg(
 /// the `pool_kind` discriminator in the message makes off-chain log
 /// scrapers able to filter by pool kind without parsing the
 /// surrounding event context. Use [`crate::state::POOL_KIND_COMMIT`]
-/// (or [`crate::state::POOL_KIND_STANDARD`]) for `pool_kind`.
+/// (or [`crate::state::POOL_KIND_COMMIT`]) for `pool_kind`.
 pub fn unknown_reply_id_msg(pool_kind: &str, reply_id: u64) -> String {
     format!("{}-pool reply: unknown reply id {}", pool_kind, reply_id)
 }

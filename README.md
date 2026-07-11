@@ -350,7 +350,7 @@ Creator-pool only: creator wallet, claimable fee pot, locked excess (+
 
 **Factory:** `{ "pools": { "start_after": null, "limit": 30 } }` pages
 the registry (max 100/page) — each entry has `pool_id`, `pool_addr`,
-`pool_token_info`, `pool_kind`. `pool_by_address { pool_addr }` is the
+and `pool_token_info`. `pool_by_address { pool_addr }` is the
 authoritative single lookup the router itself uses.
 
 ---
