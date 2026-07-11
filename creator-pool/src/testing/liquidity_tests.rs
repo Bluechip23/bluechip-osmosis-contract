@@ -115,6 +115,104 @@ fn test_deposit_liquidity_with_slippage() {
     }
 }
 
+/// Regression: the first deposit into a genuinely empty pool must seed
+/// BOTH reserves at or above `MINIMUM_LIQUIDITY`. The geometric-mean
+/// floor alone is not sufficient — an asymmetric seed such as
+/// (20, 500_000_000) yields raw_liquidity = sqrt(20 * 5e8) = 100_000,
+/// far above the floor, yet would leave reserve0 at 20, below the floor
+/// the swap path and `maybe_auto_pause_on_low_liquidity` assume every
+/// live pool upholds. `calc_liquidity_for_deposit` therefore enforces a
+/// per-side floor on empty-pool first deposits.
+#[test]
+fn first_deposit_rejects_subfloor_reserve_side() {
+    use pool_core::state::MINIMUM_LIQUIDITY;
+
+    let mut deps = mock_dependencies();
+    setup_pool_post_threshold(&mut deps);
+
+    // Rewind the pool to a genuinely empty state (both reserves and
+    // total_liquidity zero) so the deposit exercises the empty-pool
+    // first-deposit branch of `calc_liquidity_for_deposit`.
+    let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
+    pool_state.reserve0 = Uint128::zero();
+    pool_state.reserve1 = Uint128::zero();
+    pool_state.total_liquidity = Uint128::zero();
+    POOL_STATE.save(&mut deps.storage, &pool_state).unwrap();
+
+    let env = mock_env();
+
+    // Asymmetric seed: passes the geometric-mean check but would leave
+    // reserve0 at 20 — sub-floor and swap-broken on that side.
+    let attacker = Addr::unchecked("subfloor_seeder");
+    let bad_amount0 = Uint128::new(20);
+    let bad_amount1 = Uint128::new(500_000_000);
+    let info = message_info(
+        &attacker,
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: bad_amount0,
+        }],
+    );
+    let err = execute_deposit_liquidity(
+        deps.as_mut(),
+        env.clone(),
+        info,
+        attacker,
+        bad_amount0,
+        bad_amount1,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("First deposit must seed both reserves"),
+        "expected per-side MINIMUM_LIQUIDITY floor rejection, got: {err}"
+    );
+
+    // The rejected deposit must not have touched pool state.
+    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
+    assert!(pool_state.reserve0.is_zero());
+    assert!(pool_state.reserve1.is_zero());
+    assert!(pool_state.total_liquidity.is_zero());
+
+    // A seed at/above the floor on both sides succeeds. (Exactly
+    // (1000, 1000) trips the separate raw_liquidity <= MINIMUM_LIQUIDITY
+    // dust gate, so seed comfortably above it; a fresh sender avoids the
+    // per-user liquidity rate limit stamped by the failed attempt.)
+    let seeder = Addr::unchecked("honest_seeder");
+    let good_amount = Uint128::new(2_000_000);
+    let info = message_info(
+        &seeder,
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: good_amount,
+        }],
+    );
+    execute_deposit_liquidity(
+        deps.as_mut(),
+        env,
+        info,
+        seeder,
+        good_amount,
+        good_amount,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
+    assert_eq!(pool_state.reserve0, good_amount);
+    assert_eq!(pool_state.reserve1, good_amount);
+    assert_eq!(pool_state.total_liquidity, good_amount); // sqrt(a*a) = a
+
+    // First depositor carries the unwithdrawable MINIMUM_LIQUIDITY lock.
+    let position = LIQUIDITY_POSITIONS.load(&deps.storage, "2").unwrap();
+    assert_eq!(position.locked_liquidity, MINIMUM_LIQUIDITY);
+}
+
 #[test]
 fn test_add_to_existing_position() {
     let mut deps = mock_dependencies();
