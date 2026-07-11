@@ -2,12 +2,12 @@
 name = "factory"
 
 version.workspace = true
-authors = ["bestselection18 <noahsflood908@gmail.com>"]
+authors = ["Bluechip"]
 edition = "2021"
 description = "Bluechip Factory"
 
 license = "Apache-2.0"
-repository = "https://github.com/bestselection18"
+repository = "https://github.com/Bluechip23/bluechip-osmosis-contract"
 
 exclude = [
   # Those files are rust-optimizer artifacts. You might want to commit them for convenience but they should not be part of the source code publication.

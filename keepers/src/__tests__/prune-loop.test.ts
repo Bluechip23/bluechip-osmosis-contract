@@ -23,15 +23,14 @@ describe("prune-loop iteration", () => {
     expect(mock.pruneCalls[0]?.batchSize).toBe(250);
   });
 
-  it("parses commit_pruned + standard_pruned from response events", async () => {
-    mock.setNextPruneCounters(7, 3);
+  it("parses commit_pruned from response events", async () => {
+    mock.setNextPruneCounters(7);
 
     const outcome = await runPruneIteration(mock, FACTORY, 100);
 
     expect(outcome.kind).toBe("pruned");
     if (outcome.kind === "pruned") {
       expect(outcome.commitPruned).toBe(7);
-      expect(outcome.standardPruned).toBe(3);
     }
   });
 
@@ -43,7 +42,6 @@ describe("prune-loop iteration", () => {
     expect(outcome.kind).toBe("pruned");
     if (outcome.kind === "pruned") {
       expect(outcome.commitPruned).toBe(0);
-      expect(outcome.standardPruned).toBe(0);
     }
   });
 

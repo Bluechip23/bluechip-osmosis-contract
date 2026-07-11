@@ -160,9 +160,9 @@ pub fn trigger_threshold_payout(
     //
     // `crossed_at = env.block.time` is the original threshold-crossing
     // time, snapshotted into THRESHOLD_CROSSED_AT below for
-    // RetryFactoryNotify to read on later retries, so the factory's
-    // bluechip-mint decay formula uses the same `s` regardless of when
-    // the notify finally lands.
+    // RetryFactoryNotify to read on later retries, so the factory
+    // records the same crossing time regardless of when the notify
+    // finally lands.
     let factory_notify = SubMsg::reply_on_error(
         CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: pool_info.factory_addr.to_string(),
@@ -282,9 +282,6 @@ pub fn trigger_threshold_payout(
     // math. Previously the field stored gross and was recovered via
     // `gross * (1 - fee_rate)` floor here, which combined with the
     // per-commit fee floor to leave up to ~2 units stranded per commit.
-    // The keeper bounty for distribution batches is paid by the factory
-    // from its own reserve, not skimmed from LP funds —
-    // see `factory::execute_pay_distribution_bounty`.
     let pools_bluechip_seed = crate::state::NATIVE_RAISED_FROM_COMMIT.load(storage)?;
 
     if pools_bluechip_seed > commit_config.max_bluechip_lock_per_pool {
@@ -342,11 +339,9 @@ pub fn trigger_threshold_payout(
     IS_THRESHOLD_HIT.save(storage, &true)?;
 
     // Snapshot the original crossing time so `execute_retry_factory_notify`
-    // can re-supply it on later retries. The factory's bluechip-mint decay
-    // formula uses this timestamp as its `s` reference, so a retried notify
-    // after a long delay still mints the amount the pool was entitled to at
-    // original crossing time. Paired with IS_THRESHOLD_HIT — both flip
-    // together atomically.
+    // can re-supply it on later retries — the factory records the true
+    // crossing time regardless of how long the retry takes. Paired with
+    // IS_THRESHOLD_HIT — both flip together atomically.
     crate::state::THRESHOLD_CROSSED_AT.save(storage, &env.block.time)?;
 
     Ok(ThresholdPayoutMsgs {

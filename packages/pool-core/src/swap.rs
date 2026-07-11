@@ -8,10 +8,10 @@
 //! `simple_swap` (reentrancy + rate-limit wrapper), and
 //! `execute_simple_swap` (the actual swap handler). All
 //! shape-agnostic — no commit-phase logic; `query_check_commit` is
-//! the only gate and it's `true` on standard pools by default.
+//! the only gate.
 //!
-//! Oracle-backed USD conversion helpers — which query the factory's
-//! internal oracle and are only needed by the commit flow — stay in
+//! USD conversion helpers — which query the factory's x/twap-backed
+//! pricing and are only needed by the commit flow — stay in
 //! `creator-pool::swap_helper`.
 
 use crate::asset::{TokenInfo, TokenInfoPoolExt, TokenType};
@@ -100,14 +100,12 @@ pub fn compute_swap(
 /// that produces a permanently-zero cumulative on one side and a useless TWAP
 /// downstream. Multiplying the numerator by `1_000_000` before the divide
 /// preserves 6 decimal places of precision in the accumulator — the same
-/// scale the factory's internal oracle treats prices in
-/// (`PRICE_PRECISION = 1_000_000`), so consumers no longer need to re-multiply
-/// when computing per-pool TWAPs.
+/// 1e6 fixed-point scale as `factory::usd_price::RATE_PRECISION`, so
+/// consumers no longer need to re-multiply when computing per-pool TWAPs.
 ///
-/// Mirrors `factory::internal_bluechip_price_oracle::PRICE_PRECISION` and
-/// `creator-pool::swap_helper::ORACLE_PRICE_PRECISION`. Any change here MUST
-/// be propagated to those three constants AND to a coordinated migration that
-/// resets `price{0,1}_cumulative_last` on every deployed pool.
+/// Any change here MUST be propagated to `RATE_PRECISION` AND to a
+/// coordinated migration that resets `price{0,1}_cumulative_last` on
+/// every deployed pool.
 pub const PRICE_ACCUMULATOR_SCALE: u128 = 1_000_000;
 
 pub fn update_price_accumulator(
@@ -281,8 +279,8 @@ pub fn execute_swap_cw20(
     info: MessageInfo,
     cw20_msg: Cw20ReceiveMsg,
 ) -> Result<Response, ContractError> {
-    // Gate: standard pools set IS_THRESHOLD_HIT=true at instantiate so this
-    // is a no-op for them; creator pools set it at threshold-crossing time.
+    // Gate: IS_THRESHOLD_HIT is set at threshold-crossing time, so
+    // pre-threshold swaps are rejected here.
     if !IS_THRESHOLD_HIT.load(deps.storage)? {
         return Err(ContractError::ShortOfThreshold {});
     }
@@ -324,11 +322,11 @@ pub fn execute_swap_cw20(
                 .ok_or(ContractError::Unauthorized {})?;
             // confirm the CW20 actually transferred the
             // claimed `cw20_msg.amount` before letting `simple_swap`
-            // credit the offer side. Standard pools accept arbitrary
-            // user-supplied CW20 contracts (no whitelist on
-            // `create_standard_pool`), so a hostile creator can deploy
-            // a CW20 that dispatches Receive hooks with fabricated
-            // amounts and drain the opposite reserve at AMM rates. We
+            // credit the offer side. The pool's CW20 is factory-minted
+            // and trusted today, but a hostile CW20 could dispatch
+            // Receive hooks with fabricated amounts and drain the
+            // opposite reserve at AMM rates, so we verify as
+            // defense-in-depth. We
             // verify by comparing the pool's actual CW20 balance to the
             // pre-Receive invariant
             // balance == reserve_X + fee_reserve_X + creator_pot.X
@@ -452,11 +450,10 @@ pub fn execute_simple_swap(
     to: Option<Addr>,
 ) -> Result<Response, ContractError> {
     // defense-in-depth threshold gate at the shared
-    // handler. All three current entry points already gate on
+    // handler. The current entry points already gate on
     // IS_THRESHOLD_HIT (creator-pool dispatcher via query_check_commit,
-    // CW20 hook at the top of execute_swap_cw20, standard-pool has the
-    // flag set at instantiate), so this check is idempotent against
-    // existing call sites — standard pools always pass it. The point is
+    // CW20 hook at the top of execute_swap_cw20), so this check is
+    // idempotent against existing call sites. The point is
     // to close the future-regression vector where a new entry point
     // (router-friendly variant, batch swap, etc.) might forget the
     // gate; with the check here, the shared handler is self-protecting.
@@ -492,9 +489,9 @@ pub fn execute_simple_swap(
     // Post-threshold-crossing cooldown. Set inside the threshold-crossing
     // commit handler to (crossing_block + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
     // so the crossing block plus the next N blocks are gated. Eliminates
-    // the atomic same-block sandwich on the freshly-seeded pool. Standard
-    // pools never set this (no threshold crossing), so the may_load default
-    // of 0 makes this a no-op for them.
+    // the atomic same-block sandwich on the freshly-seeded pool. Unset
+    // before the threshold crossing, so the may_load default of 0 makes
+    // this a no-op until then.
     let cooldown_until = POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
         .may_load(deps.storage)?
         .unwrap_or(0);
@@ -508,7 +505,7 @@ pub fn execute_simple_swap(
     // "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks. Bounds
     // per-tx MEV on the freshly-seeded pool while still allowing
     // legitimate first traders to participate. Returns None (skips the
-    // check) for standard pools (cooldown_until == 0) and for creator
+    // check) for pre-threshold pools (cooldown_until == 0) and for
     // pools past the ramp window.
     if let Some(cap) =
         crate::state::post_threshold_swap_cap(deps.storage, env.block.height, offer_pool)?

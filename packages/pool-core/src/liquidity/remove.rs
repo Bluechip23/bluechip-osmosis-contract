@@ -17,8 +17,8 @@ use crate::generic::{
     check_liquidity_rate_limit, enforce_transaction_deadline, with_reentrancy_guard,
 };
 use crate::liquidity_helpers::{
-    build_fee_transfer_msgs, calc_capped_fees_with_clip, calculate_fees_owed_split_pair,
-    check_ratio_deviation, check_slippage, effective_fee_size_multiplier,
+    build_fee_transfer_msgs, calc_capped_fees_with_clip, calculate_fee_size_multiplier,
+    calculate_fees_owed_split_pair, check_ratio_deviation, check_slippage,
     sync_position_on_transfer, verify_position_ownership,
 };
 use crate::state::{
@@ -149,7 +149,7 @@ pub fn remove_all_liquidity(
     // the new holder — same flow as a non-empty position.
     liquidity_position.liquidity = liquidity_position.locked_liquidity;
     liquidity_position.fee_size_multiplier =
-        effective_fee_size_multiplier(deps.storage, liquidity_position.liquidity)?;
+        calculate_fee_size_multiplier(liquidity_position.liquidity);
     liquidity_position.last_fee_collection = env.block.time.seconds();
     liquidity_position.unclaimed_fees_0 = Uint128::zero();
     liquidity_position.unclaimed_fees_1 = Uint128::zero();
@@ -408,7 +408,7 @@ pub fn remove_partial_liquidity(
         .checked_sub(liquidity_to_remove)?;
 
     liquidity_position.fee_size_multiplier =
-        effective_fee_size_multiplier(deps.storage, liquidity_position.liquidity)?;
+        calculate_fee_size_multiplier(liquidity_position.liquidity);
 
     LIQUIDITY_POSITIONS.save(deps.storage, &position_id, &liquidity_position)?;
 

@@ -1,12 +1,10 @@
 # BlueChip Production Runbook (Osmosis)
 
-How to operate this stack in production. The old runbook's oracle
-pipeline — Pyth pusher, oracle keeper, anchor heartbeat, bounty
-funding — is **gone**: USD pricing is now a single stateless query
-against Osmosis's own `x/twap` module, so there is nothing to keep
-alive for prices. What remains to operate is exactly one recurring
-job (the distribution keeper), one standing monitor (the pricing
-canary), and governance hygiene around the 48h timelocks.
+How to operate this stack in production. USD pricing is a single
+stateless query against Osmosis's own `x/twap` module, so there is
+nothing to keep alive for prices. The operational surface is exactly
+one recurring job (the distribution keeper), one standing monitor (the
+pricing canary), and governance hygiene around the 48h timelocks.
 
 Money never moves incorrectly when your infra dies; it just stops
 moving until someone calls the permissionless entry points again.

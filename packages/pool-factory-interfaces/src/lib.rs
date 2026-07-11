@@ -25,31 +25,6 @@ pub struct IsPausedResponse {
     pub paused: bool,
 }
 
-/// Distinguishes the two pool flavors registered in the factory:
-///
-/// - `Commit`  — the original two-phase pool. Starts in a commit phase, mints
-///   a fresh creator CW20 at creation, only opens to swaps/liquidity after
-///   native-asset commits cross the configured threshold.
-///
-/// - `Standard` — a plain xyk pool around two pre-existing assets (any
-///   combination of native-denom and CW20). No threshold, no commit phase,
-///   no distribution; immediately ready for deposits and swaps at pool
-///   creation.
-///
-/// Default is `Commit` so that old serialized `PoolDetails` records that
-/// lack a `pool_kind` field round-trip cleanly as commit pools.
-#[cw_serde]
-pub enum PoolKind {
-    Commit,
-    Standard,
-}
-
-impl Default for PoolKind {
-    fn default() -> Self {
-        Self::Commit
-    }
-}
-
 /// Registry-membership + canonical-pair record for a pool *contract
 /// address*, returned by the factory's `PoolByAddress` query. The factory
 /// returns `Some(..)` only for an address it created and registered, and
@@ -66,7 +41,6 @@ impl Default for PoolKind {
 pub struct RegisteredPoolResponse {
     pub pool_id: u64,
     pub pool_token_info: [TokenType; 2],
-    pub pool_kind: PoolKind,
 }
 #[cw_serde]
 #[derive(QueryResponses)]
@@ -166,33 +140,4 @@ pub enum FactoryExecuteMsg {
         #[serde(default)]
         crossed_at: Option<cosmwasm_std::Timestamp>,
     },
-}
-
-/// Wire-format instantiate message sent by the factory's CreateStandardPool
-/// reply chain to a freshly instantiated standard pool wasm.
-///
-/// Standard pools are plain xyk pools around two pre-existing assets:
-/// they do not have a commit phase, do not mint a fresh CW20, and do not
-/// participate in oracle sampling. Compared to the commit-pool
-/// instantiate shape (`pool::msg::PoolInstantiateMsg`), the only inputs
-/// the pool needs are: which two assets it wraps, which CW721 contract
-/// to mint position NFTs on, and which factory it belongs to.
-///
-/// Lives in `pool_factory_interfaces` (not the factory or pool crate)
-/// because both sides need to agree on the layout exactly. The pool's
-/// instantiate handler dispatches between this struct and the existing
-/// commit-pool instantiate shape based on which one deserializes
-/// successfully.
-#[cw_serde]
-pub struct StandardPoolInstantiateMsg {
-    pub pool_id: u64,
-    pub pool_token_info: [TokenType; 2],
-    pub used_factory_addr: Addr,
-    pub position_nft_address: Addr,
-    /// Wallet that receives drained funds when an emergency withdraw
-    /// completes. Sourced from the factory's `bluechip_wallet_address`
-    /// at instantiate time. Must NOT default to the factory address —
-    /// the factory has no withdrawal mechanism, so funds drained to it
-    /// would be permanently locked.
-    pub bluechip_wallet_address: Addr,
 }

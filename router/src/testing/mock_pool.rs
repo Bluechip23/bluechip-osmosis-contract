@@ -8,7 +8,7 @@
 //!
 //! This contract is not part of the production router build -- it lives
 //! under `#[cfg(test)]` solely so the integration tests can stand up
-//! pools without dragging the entire factory + oracle + threshold flow
+//! pools without dragging the entire factory + threshold flow
 //! into every test.
 
 #![allow(clippy::too_many_arguments)]
@@ -26,11 +26,6 @@ use pool_factory_interfaces::asset::{query_pools, PoolPairType, TokenInfo, Token
 pub struct MockPoolState {
     pub asset_infos: [TokenType; 2],
     pub fully_committed: bool,
-    /// Mimic a standard pool: `IsFullyCommited` is a commit-only query,
-    /// so a standard pool rejects it at deserialization. `true` makes
-    /// this mock do the same.
-    #[serde(default)]
-    pub standard: bool,
 }
 
 const STATE: Item<MockPoolState> = Item::new("mock_pool_state");
@@ -43,8 +38,6 @@ const LAST_MAX_SPREAD: Item<Option<Decimal>> = Item::new("last_max_spread");
 pub struct InstantiateMsg {
     pub asset_infos: [TokenType; 2],
     pub fully_committed: bool,
-    #[serde(default)]
-    pub standard: bool,
 }
 
 /// JSON-compatible with `pool_factory_interfaces::routing::PoolSwapExecuteMsg`
@@ -119,7 +112,6 @@ pub fn instantiate(
         &MockPoolState {
             asset_infos: msg.asset_infos,
             fully_committed: msg.fully_committed,
-            standard: msg.standard,
         },
     )?;
     Ok(Response::new())
@@ -268,13 +260,6 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::IsFullyCommited {} => {
             let state = STATE.load(deps.storage)?;
-            // Standard pools don't implement this commit-only query; the
-            // real contract fails variant deserialization. Mirror that.
-            if state.standard {
-                return Err(StdError::generic_err(
-                    "Error parsing into type standard_pool::msg::QueryMsg: unknown variant `is_fully_commited`",
-                ));
-            }
             let status = if state.fully_committed {
                 CommitStatus::FullyCommitted
             } else {

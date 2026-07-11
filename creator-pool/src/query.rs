@@ -5,8 +5,6 @@
 //! `query_analytics` wraps pool-core's `query_analytics_core` by
 //! loading commit-phase state (USD_RAISED_FROM_COMMIT,
 //! NATIVE_RAISED_FROM_COMMIT) and deriving `threshold_status`.
-//! Standard-pool's equivalent (Step 4b) passes `FullyCommitted` and
-//! zeroes directly into `query_analytics_core`.
 pub use pool_core::query::*;
 
 use crate::msg::{

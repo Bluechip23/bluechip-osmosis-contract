@@ -13,7 +13,7 @@
 //! - `execute_recover_stuck_states` + private recovery helpers —
 //! all three failure modes (stuck threshold, stalled distribution,
 //! jammed reentrancy guard) only ever occur inside the commit
-//! flow, so standard-pool doesn't need them.
+//! flow, so they stay here rather than in the shared library.
 
 pub use pool_core::admin::{
     ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_emergency_share,
@@ -103,10 +103,8 @@ pub fn execute_emergency_withdraw(
         if excess.is_some() {
             CREATOR_EXCESS_POSITION.remove(deps.storage);
         }
-        // The pool no longer holds a bounty reserve; distribution
-        // bounties are paid by the factory. Halt any in-flight
-        // distribution so future ContinueDistribution calls reject
-        // cleanly.
+        // Halt any in-flight distribution so future
+        // ContinueDistribution calls reject cleanly.
         if let Ok(mut dist_state) = DISTRIBUTION_STATE.load(deps.storage) {
             dist_state.is_distributing = false;
             dist_state.distributions_remaining = 0;
@@ -295,11 +293,10 @@ fn recover_reentrancy_guard(
 // surgically remove a single poison row without resetting the cursor).
 // ---------------------------------------------------------------------------
 
-// `SkipDistributionUser` was removed pre-launch. The handler was
-// factory-only by auth but the factory never carried a matching forward,
-// so the recovery path was unreachable; it existed for an exceptional
-// "corrupt ledger row that range(..) cannot deserialize" scenario that
-// cw_storage_plus's static typing makes practically impossible. Per-mint
+// There is deliberately no "skip one distribution row" recovery hook:
+// it would only serve an exceptional "corrupt ledger row that
+// range(..) cannot deserialize" scenario that cw_storage_plus's static
+// typing makes practically impossible. Per-mint
 // reply isolation (FAILED_MINTS / ClaimFailedDistribution) handles every
 // realistic "one recipient can't be minted to" case automatically without
 // admin intervention. The remaining recovery levers

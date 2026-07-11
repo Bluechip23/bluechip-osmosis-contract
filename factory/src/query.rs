@@ -10,7 +10,7 @@ use cosmwasm_std::{
 };
 use cw20::{Cw20QueryMsg, TokenInfoResponse};
 use cw_storage_plus::Bound;
-use pool_factory_interfaces::{FactoryQueryMsg, PoolKind};
+use pool_factory_interfaces::FactoryQueryMsg;
 
 #[cw_serde]
 pub struct CreatorTokenInfoResponse {
@@ -48,7 +48,6 @@ pub struct PoolListEntry {
     pub pool_id: u64,
     pub pool_addr: Addr,
     pub pool_token_info: [TokenType; 2],
-    pub pool_kind: PoolKind,
 }
 
 #[cw_serde]
@@ -131,7 +130,6 @@ pub fn query_pools(
                 pool_id,
                 pool_addr: details.creator_pool_addr,
                 pool_token_info: details.pool_token_info,
-                pool_kind: details.pool_kind,
             })
         })
         .collect::<StdResult<Vec<_>>>()?;
@@ -139,7 +137,7 @@ pub fn query_pools(
 }
 
 /// Resolve a pool *contract address* against the registry. Returns the
-/// pool's canonical pair + kind, or `None` if the address is not a
+/// pool's canonical pair, or `None` if the address is not a
 /// registered Bluechip pool. Reuses the same `lookup_pool_by_addr` helper
 /// the notify auth path uses, so a router validating a hop address
 /// sees exactly the registry the factory itself trusts.
@@ -153,7 +151,6 @@ pub fn query_pool_by_address(
         details.map(|d| pool_factory_interfaces::RegisteredPoolResponse {
             pool_id: d.pool_id,
             pool_token_info: d.pool_token_info,
-            pool_kind: d.pool_kind,
         }),
     )
 }

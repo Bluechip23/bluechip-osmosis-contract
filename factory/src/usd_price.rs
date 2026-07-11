@@ -1,15 +1,12 @@
 //! Native→USD valuation backed by Osmosis's chain-native `x/twap` module.
 //!
-//! This replaces the old multi-thousand-line internal oracle (anchor pool
-//! TWAP × Pyth, circuit breakers, keeper updates) with a single stateless
-//! chain query: the arithmetic TWAP of the factory-configured
-//! `bluechip_denom` / `usd_quote_denom` pool over the last
-//! `twap_window_seconds`. The old oracle existed because the protocol's
-//! own token had no external price; on Osmosis the pairing asset is the
-//! chain's native token, whose price against a USD stablecoin is
-//! maintained by the chain itself — no keeper, no push liveness, and
-//! manipulating it requires moving one of Osmosis's deepest pools for the
-//! entire TWAP window.
+//! A single stateless chain query: the arithmetic TWAP of the
+//! factory-configured `bluechip_denom` / `usd_quote_denom` pool over
+//! the last `twap_window_seconds`. The pairing asset is the chain's
+//! native token, whose price against a USD stablecoin is maintained by
+//! the chain itself — no keeper, no push liveness, and manipulating
+//! the valuation requires moving one of Osmosis's deepest pools for
+//! the entire TWAP window.
 //!
 //! Fail-closed: any TWAP query error (mis-configured pool id, pool too
 //! young for the window, module pruning) surfaces as an error to the
@@ -35,8 +32,7 @@ pub const RATE_PRECISION: u128 = 1_000_000;
 /// rate above it means either the quote denom does not carry 6 decimals
 /// (an 18-decimal stable inflates the rate ~1e12×, letting a dust
 /// commit cross the USD threshold) or the pricing pool is being spiked.
-/// The old internal oracle's drift circuit breaker played this role;
-/// this bound is its stateless replacement. Fail closed on both.
+/// Fail closed on both.
 pub const RATE_MAX: u128 = 10_000 * RATE_PRECISION;
 
 /// Lower/upper bounds on the configurable TWAP window. Below 300s a

@@ -130,26 +130,14 @@ pub fn execute_recover_pool_stuck_states(
     recovery_type: crate::pool_struct::RecoveryType,
 ) -> Result<Response, ContractError> {
     // Commit-pool-only escape hatch — the pool-side handler lives in
-    // `creator-pool::admin::execute_recover_stuck_states` and is not
-    // mirrored on standard-pool (`RecoverStuckStates` is absent from
-    // `standard-pool::msg::ExecuteMsg`). Reject standard pools at the
-    // factory dispatch so the admin gets a clean typed error instead
-    // of a confusing message-deserialization failure deep in the
-    // forwarded `WasmMsg::Execute`.
-    let pool_details = POOLS_BY_ID.load(deps.storage, pool_id).map_err(|_| {
+    // `creator-pool::admin::execute_recover_stuck_states`. Verify the
+    // pool exists before forwarding.
+    POOLS_BY_ID.load(deps.storage, pool_id).map_err(|_| {
         ContractError::Std(StdError::generic_err(format!(
             "Pool {} not found in registry",
             pool_id
         )))
     })?;
-    if pool_details.pool_kind == pool_factory_interfaces::PoolKind::Standard {
-        return Err(ContractError::Std(StdError::generic_err(format!(
-            "Pool {} is a standard pool; stuck-state recovery (threshold / \
-             distribution / reentrancy-guard) is creator-pool-only. \
-             Standard pools have no commit phase and no distribution queue.",
-            pool_id
-        ))));
-    }
     forward_pool_admin(
         deps.as_ref(),
         info,
@@ -178,9 +166,9 @@ pub fn execute_sweep_unclaimed_emergency_shares_pool(
     )
 }
 
-/// Called by a pool when its commit threshold has been crossed. Triggers
-/// the bluechip mint for this pool (only once per pool — the
-/// `POOL_THRESHOLD_MINTED` gate prevents a malicious pool from calling
+/// Called by a pool when its commit threshold has been crossed. Records
+/// the crossing and emits the crossing event (only once per pool — the
+/// `POOL_THRESHOLD_CROSSED` gate prevents a malicious pool from calling
 /// back repeatedly).
 ///
 /// `crossed_at` is the pool's `env.block.time` at the moment the
@@ -195,8 +183,7 @@ pub fn execute_notify_threshold_crossed(
     pool_id: u64,
     crossed_at: Option<cosmwasm_std::Timestamp>,
 ) -> Result<Response, ContractError> {
-    // Single load covers both the caller-address check and the standard-pool
-    // defense-in-depth gate below.
+    // Single registry load backs the caller-address check below.
     let pool_details = POOLS_BY_ID.load(deps.storage, pool_id).map_err(|_| {
         ContractError::Std(StdError::generic_err(format!(
             "Pool {} not found in registry",
@@ -207,15 +194,6 @@ pub fn execute_notify_threshold_crossed(
     if info.sender != pool_details.creator_pool_addr {
         return Err(ContractError::Std(StdError::generic_err(
             "Only the registered pool contract can notify threshold crossed",
-        )));
-    }
-
-    // Defense-in-depth against a standard pool somehow reaching this code
-    // path (it shouldn't — the pool-side Commit handler is gated on
-    // PoolKind::Commit).
-    if pool_details.pool_kind == pool_factory_interfaces::PoolKind::Standard {
-        return Err(ContractError::Std(StdError::generic_err(
-            "Standard pools do not have a commit threshold to cross",
         )));
     }
 

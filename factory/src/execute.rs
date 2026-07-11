@@ -6,7 +6,7 @@
 //! - [`config`]         — propose / apply / cancel for both factory
 //! config and per-pool config (48h timelock on
 //! every propose/apply pair).
-//! - [`pool_lifecycle`] — create (commit + standard), pause, unpause,
+//! - [`pool_lifecycle`] — create, pause, unpause,
 //! emergency withdraw (+ cancel), stuck-state
 //! recovery, and the threshold-crossed
 //! callback from pools.
@@ -59,10 +59,6 @@ use crate::{CONTRACT_NAME, CONTRACT_VERSION};
 pub const SET_TOKENS: u64 = 1;
 pub const MINT_CREATE_POOL: u64 = 2;
 pub const FINALIZE_POOL: u64 = 3;
-// Standard-pool reply chain. Sparse numbering leaves room for additional
-// commit-pool steps (4–9) without clashing.
-pub const MINT_STANDARD_NFT: u64 = 10;
-pub const FINALIZE_STANDARD_POOL: u64 = 11;
 
 /// Encodes a `pool_id` and a reply-chain step into a single SubMsg reply ID.
 ///
@@ -158,16 +154,6 @@ pub fn execute(
             pool_id,
             recovery_type,
         } => execute_recover_pool_stuck_states(deps, info, pool_id, recovery_type),
-        ExecuteMsg::CreateStandardPool {
-            pool_token_info,
-            label,
-        } => pool_lifecycle::create::execute_create_standard_pool(
-            deps,
-            env,
-            info,
-            pool_token_info,
-            label,
-        ),
         ExecuteMsg::PruneRateLimits { batch_size } => {
             execute_prune_rate_limits(deps, env, batch_size)
         }
@@ -201,16 +187,10 @@ fn execute_prune_rate_limits(
     let batch = batch_size.unwrap_or(100).min(500) as usize;
     let now_secs = env.block.time.seconds();
 
-    // 10× the longer of the two cooldowns. Both are 1h today so this
-    // is 10h, well beyond any legitimate user's natural retry cadence.
-    let stale_after_secs = std::cmp::max(
-        crate::state::COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS,
-        crate::state::STANDARD_POOL_CREATE_RATE_LIMIT_SECONDS,
-    )
-    .saturating_mul(10);
+    // 10× the cooldown (1h today → 10h), well beyond any legitimate
+    // user's natural retry cadence.
+    let stale_after_secs = crate::state::COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS.saturating_mul(10);
 
-    // Each map gets its own `batch` budget so a `batch_size` of 100
-    // prunes up to 100 from each.
     let commit_pruned = prune_rate_limit_map(
         deps.storage,
         crate::state::LAST_COMMIT_POOL_CREATE_AT,
@@ -219,19 +199,9 @@ fn execute_prune_rate_limits(
         stale_after_secs,
         batch,
     )?;
-    let std_pruned = prune_rate_limit_map(
-        deps.storage,
-        crate::state::LAST_STANDARD_POOL_CREATE_AT,
-        crate::state::STANDARD_POOL_CREATE_TS_INDEX,
-        now_secs,
-        stale_after_secs,
-        batch,
-    )?;
-
     Ok(Response::new()
         .add_attribute("action", "prune_rate_limits")
         .add_attribute("commit_pruned", commit_pruned.to_string())
-        .add_attribute("standard_pruned", std_pruned.to_string())
         .add_attribute("stale_after_secs", stale_after_secs.to_string())
         .add_attribute("batch_size", batch.to_string()))
 }
@@ -239,8 +209,8 @@ fn execute_prune_rate_limits(
 /// Prune up to `batch` entries from a per-address `Addr -> Timestamp`
 /// rate-limit map whose timestamp is older than
 /// `now_secs - stale_after_secs`. Returns the number of entries actually
-/// removed (`<= batch`). Centralized so adding a third such map (e.g.
-/// per-keeper bounty cooldown) is a one-line addition rather than a
+/// removed (`<= batch`). Centralized so adding a third such map is a
+/// one-line addition rather than a
 /// copy-pasted loop with risk of attribute-key drift.
 ///
 /// The walk is timestamp-ordered via the secondary `(ts, addr)` index,
@@ -296,10 +266,6 @@ pub fn pool_creation_reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Respon
         SET_TOKENS => set_tokens(deps, env, msg, pool_id),
         MINT_CREATE_POOL => mint_create_pool(deps, env, msg, pool_id),
         FINALIZE_POOL => finalize_pool(deps, env, msg, pool_id),
-        MINT_STANDARD_NFT => crate::pool_creation_reply::mint_standard_nft(deps, env, msg, pool_id),
-        FINALIZE_STANDARD_POOL => {
-            crate::pool_creation_reply::finalize_standard_pool(deps, env, msg, pool_id)
-        }
         _ => Err(ContractError::UnknownReplyId { id: msg.id }),
     }
 }

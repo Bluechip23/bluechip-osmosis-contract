@@ -1,9 +1,8 @@
 // PruneRateLimits sweep — folded into the distribution keeper.
 //
-// Background: the factory's `LAST_COMMIT_POOL_CREATE_AT` and
-// `LAST_STANDARD_POOL_CREATE_AT` maps are keyed on `info.sender`. They
-// grow by one entry every successful Create / CreateStandardPool call
-// and never shrink on their own. Over years of operation this becomes
+// Background: the factory's `LAST_COMMIT_POOL_CREATE_AT` map is keyed
+// on `info.sender`. It grows by one entry every successful Create call
+// and never shrinks on its own. Over years of operation this becomes
 // soft storage bloat — entries from addresses that created one pool
 // and disappeared.
 //
@@ -25,13 +24,12 @@ import { log } from "./logger.js";
 /**
  * Decision shape of one PruneRateLimits attempt.
  *
- * `pruned_*` counts are extracted from the contract's response
- * attributes (`commit_pruned`, `standard_pruned`). They will both be
- * zero on most calls — that's the steady-state when nothing has gone
- * stale yet.
+ * The pruned count is extracted from the contract's response
+ * attribute (`commit_pruned`). It will be zero on most calls —
+ * that's the steady-state when nothing has gone stale yet.
  */
 export type PruneOutcome =
-  | { kind: "pruned"; txHash: string; commitPruned: number; standardPruned: number }
+  | { kind: "pruned"; txHash: string; commitPruned: number }
   | { kind: "skipped"; detail: string }
   | { kind: "errored"; detail: string };
 
@@ -53,23 +51,21 @@ export async function runPruneIteration(
       factoryAddress,
       factoryExecPruneRateLimits(batchSize),
     );
-    // Extract the contract-emitted counters. The factory's handler
-    // always emits these two attributes, so missing values default to
+    // Extract the contract-emitted counter. The factory's handler
+    // always emits this attribute, so a missing value defaults to
     // zero rather than failing the parse.
     // tx.events is optional in the TxResult shape (some legacy
     // CosmJS responses omit it); default to an empty array so the
     // parse never blows up.
-    const { commitPruned, standardPruned } = parsePruneCounters(tx.events ?? []);
+    const { commitPruned } = parsePruneCounters(tx.events ?? []);
     log.info("rate-limit prune complete", {
       tx: tx.transactionHash,
       commit_pruned: commitPruned,
-      standard_pruned: standardPruned,
     });
     return {
       kind: "pruned",
       txHash: tx.transactionHash,
       commitPruned,
-      standardPruned,
     };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -84,12 +80,11 @@ export async function runPruneIteration(
   }
 }
 
-/** Internal: scrape `commit_pruned` and `standard_pruned` out of the tx events. */
+/** Internal: scrape `commit_pruned` out of the tx events. */
 function parsePruneCounters(
   events: ReadonlyArray<{ type: string; attributes: ReadonlyArray<{ key: string; value: string }> }>,
-): { commitPruned: number; standardPruned: number } {
+): { commitPruned: number } {
   let commitPruned = 0;
-  let standardPruned = 0;
   for (const ev of events) {
     // wasm event carries the contract-emitted attributes in CosmWasm 2.x.
     if (ev.type !== "wasm") continue;
@@ -97,11 +92,8 @@ function parsePruneCounters(
       if (attr.key === "commit_pruned") {
         const n = Number.parseInt(attr.value, 10);
         if (Number.isFinite(n)) commitPruned = n;
-      } else if (attr.key === "standard_pruned") {
-        const n = Number.parseInt(attr.value, 10);
-        if (Number.isFinite(n)) standardPruned = n;
       }
     }
   }
-  return { commitPruned, standardPruned };
+  return { commitPruned };
 }

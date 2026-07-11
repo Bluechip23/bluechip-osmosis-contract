@@ -60,7 +60,6 @@ fn register_test_pool_addr(
                     },
                 ],
                 creator_pool_addr: pool_addr.clone(),
-                pool_kind: pool_factory_interfaces::PoolKind::Commit,
             },
         )
         .unwrap();
@@ -79,7 +78,6 @@ fn test_propose_and_execute_update_config() {
         commit_threshold_limit_usd: Uint128::new(100),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: make_addr("ubluechip"),
         commit_fee_bluechip: Decimal::from_ratio(10u128, 100u128),
         commit_fee_creator: Decimal::from_ratio(10u128, 100u128),
@@ -89,7 +87,7 @@ fn test_propose_and_execute_update_config() {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -384,7 +382,6 @@ fn test_update_specific_pool_from_registry() {
             },
         ],
         creator_pool_addr: pool_addr.clone(),
-        pool_kind: pool_factory_interfaces::PoolKind::Commit,
     };
     POOLS_BY_ID
         .save(&mut deps.storage, pool_id, &pool_details)
@@ -922,7 +919,6 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         cw20_token_contract_id: 10,
         cw721_nft_contract_id: 20,
         create_pool_wasm_contract_id: 30,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: make_addr("ubluechip"),
         commit_fee_bluechip: Decimal::percent(1),
         commit_fee_creator: Decimal::percent(5),
@@ -932,7 +928,7 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     }

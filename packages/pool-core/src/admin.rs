@@ -7,8 +7,7 @@
 //! reserves+fee_reserves+CREATOR_FEE_POT, write the drain record, flip
 //! EMERGENCY_DRAINED). The creator-pool crate wraps these with its
 //! commit-only bookkeeping (pre-threshold rejection, CREATOR_EXCESS_POSITION
-//! sweep, DISTRIBUTION_STATE halt); standard-pool calls them directly
-//! with no extras.
+//! sweep, DISTRIBUTION_STATE halt).
 
 use crate::asset::{TokenInfo, TokenInfoPoolExt};
 use crate::error::ContractError;
@@ -26,8 +25,8 @@ use cosmwasm_std::{
 use pool_factory_interfaces::{EmergencyWithdrawDelayResponse, FactoryQueryMsg};
 
 /// Bundle returned by `execute_emergency_withdraw_core_drain`. Callers
-/// turn it into a `Response` — either directly (standard-pool) or after
-/// adding commit-only bookkeeping (creator-pool).
+/// turn it into a `Response` after adding any contract-specific
+/// bookkeeping (creator-pool adds its commit-only bookkeeping).
 pub struct CoreDrainResult {
     pub messages: Vec<CosmosMsg>,
     pub total_0: Uint128,
@@ -167,19 +166,17 @@ pub fn execute_emergency_withdraw_initiate(
 ///
 /// - **Non-LP funds** (`CREATOR_FEE_POT` + caller-supplied
 /// `accumulation_drain_*`): swept to the bluechip wallet
-/// immediately, matching the pre-fix economics for those buckets.
+/// immediately.
 /// `CREATOR_FEE_POT` and `accumulation_drain_*` are not part of
 /// any LP's claim — `accumulation_drain_*` is the creator-pool's
 /// `CREATOR_EXCESS_POSITION` (creator-owned), and
 /// `CREATOR_FEE_POT` is the protocol's clip-slice accumulator.
 ///
-/// Pre-fix, the function swept ALL pool funds (including LP reserves
-/// and pending fees) to `bluechip_wallet_address` after a 24-hour
-/// timelock. The 24h window allowed active LPs to exit, but
-/// set-and-forget LPs lost their funds entirely. The escrow pattern
-/// preserves the 24h pause-with-LP-exits semantics AND gives passive
-/// LPs a year to surface and claim their share — substantially closing
-/// the "passive LP loses everything to treasury" gap.
+/// LP reserves and pending fees are deliberately NOT swept to
+/// `bluechip_wallet_address`: sweeping them would strand
+/// set-and-forget LPs who miss the 24-hour exit window. The escrow
+/// pattern keeps the 24h pause-with-LP-exits semantics AND gives
+/// passive LPs a year to surface and claim their share.
 ///
 /// Writes `EMERGENCY_WITHDRAWAL` with the swept (non-LP) totals,
 /// writes `EMERGENCY_DRAIN_SNAPSHOT` with the LP-owned snapshot,
@@ -388,10 +385,10 @@ pub fn execute_claim_emergency_share(
         .ok_or(ContractError::NoEmergencyDrainSnapshot)?;
 
     // Hard-close per-position claims once `SweepUnclaimedEmergencyShares`
-    // has fired. Pre-fix, late claims were tolerated in principle (bank
-    // module would reject if balance insufficient), but the snapshot's
-    // `total_claimed_*` tally would still get bumped, producing an
-    // inconsistent record where cumulative claims exceeded drainable.
+    // has fired. Tolerating a late claim would bump the snapshot's
+    // `total_claimed_*` tally even where the bank send ultimately
+    // fails, producing an inconsistent record where cumulative claims
+    // exceed drainable.
     // Matches the documented design intent ("after 1 year, abandoned
     // funds are gone") and gives off-chain observers a clean signal
     // that the claim window has closed.
@@ -731,18 +728,12 @@ pub fn execute_update_config_from_factory(
     // wraps this handler: it reads the commit-floor fields off `update`,
     // applies them to `COMMIT_LIMIT_INFO`, and only then delegates to
     // this function for the shared knobs (lp_fee + min_commit_interval).
-    // Standard-pool's dispatch calls this handler directly and ignores
-    // the commit-floor fields entirely (standard pools have no commit
-    // phase); the factory-side `validate()` rejects standard-pool
-    // proposals carrying those fields at propose time, so a standard-pool
-    // apply that reaches here can only have `None` for both.
+    // A consumer without a commit phase would call this handler directly
+    // and simply leave both commit-floor fields as `None`.
 
-    // Per-pool `oracle_address` rotation removed. The oracle
-    // endpoint is pinned at instantiate to the factory address and is
-    // no longer mutable through the per-pool config flow. If the
-    // protocol ever splits the oracle off the factory, the rerouting
-    // path is a coordinated `UpgradePools` migration that writes
-    // ORACLE_INFO directly — not a runtime config knob.
+    // USD pricing is pinned to the factory — there is deliberately no
+    // per-pool price-source knob; see `pool-core::msg::PoolConfigUpdate`
+    // for the rationale.
 
     Ok(Response::new()
         .add_attributes(attributes)
@@ -755,20 +746,19 @@ pub fn execute_update_config_from_factory(
         .add_attribute("block_time", env.block.time.seconds().to_string()))
 }
 
-/// Two-phase emergency-withdraw dispatcher shared by `creator-pool` and
-/// `standard-pool`. Picks Phase 1 (initiate) or Phase 2 (core drain)
+/// Two-phase emergency-withdraw dispatcher for consuming contracts.
+/// Picks Phase 1 (initiate) or Phase 2 (core drain)
 /// based on whether `PENDING_EMERGENCY_WITHDRAW` is already set, and
 /// builds the canonical `action="emergency_withdraw"` response on the
-/// drain side. Each pool wasm wraps this helper to layer in any
-/// pool-kind-specific bookkeeping (creator-pool sweeps
+/// drain side. The consuming contract wraps this helper to layer in any
+/// contract-specific bookkeeping (creator-pool sweeps
 /// `CREATOR_EXCESS_POSITION` and halts `DISTRIBUTION_STATE` between
-/// the dispatch and the drain; standard-pool just calls through with
-/// zero `accumulation_drain_*`).
+/// the dispatch and the drain).
 ///
 /// `accumulation_drain_0` / `_1` are the additional reserve-0 / reserve-1
-/// amounts the caller's pool-kind-specific bookkeeping wants folded
+/// amounts the caller's contract-specific bookkeeping wants folded
 /// into the drain transfer messages (creator-pool passes its excess
-/// position; standard-pool passes zero). They are forwarded to the
+/// position). They are forwarded to the
 /// core drain so the drain record captures the grand total.
 pub fn execute_emergency_withdraw_dispatch(
     deps: DepsMut,

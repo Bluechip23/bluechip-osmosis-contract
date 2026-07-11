@@ -26,7 +26,7 @@ fn ubluechip_addr() -> Addr {
 }
 
 /// Funds covering the flat commit-pool creation fee in `info.funds`.
-/// The default test config sets `standard_pool_creation_fee` to
+/// The default test config sets `pool_creation_fee` to
 /// 1_000_000 ubluechip; paying 100_000_000 comfortably covers any fee a
 /// test configures (the handler refunds the surplus in the same tx).
 pub(crate) fn creation_fee_funds() -> [Coin; 1] {
@@ -51,7 +51,6 @@ fn create_default_instantiate_msg() -> FactoryInstantiate {
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: ubluechip_addr(),
         commit_fee_bluechip: Decimal::percent(1),
         commit_fee_creator: Decimal::percent(5),
@@ -61,7 +60,7 @@ fn create_default_instantiate_msg() -> FactoryInstantiate {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     }
@@ -91,7 +90,6 @@ pub fn register_test_pool_addr(
                     },
                 ],
                 creator_pool_addr: pool_addr.clone(),
-                pool_kind: pool_factory_interfaces::PoolKind::Commit,
             },
         )
         .unwrap();
@@ -115,7 +113,6 @@ fn proper_initialization() {
         commit_threshold_limit_usd: Uint128::new(100),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: ubluechip_addr(),
         commit_fee_bluechip: Decimal::percent(10),
         commit_fee_creator: Decimal::percent(10),
@@ -125,7 +122,7 @@ fn proper_initialization() {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -166,7 +163,6 @@ fn create_pair() {
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: ubluechip_addr(),
         commit_fee_bluechip: Decimal::percent(1),
         commit_fee_creator: Decimal::percent(5),
@@ -176,7 +172,7 @@ fn create_pair() {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -226,19 +222,19 @@ fn create_pair() {
         res.attributes
             .iter()
             .any(|attr| attr.key == "fee_source" && attr.value == "config"),
-        "fee_source must be \"config\" when standard_pool_creation_fee > 0"
+        "fee_source must be \"config\" when pool_creation_fee > 0"
     );
 }
 
 #[test]
 fn create_pair_fee_disabled_rejects_attached_funds() {
-    // With standard_pool_creation_fee == 0 the fee gate is disabled:
+    // With pool_creation_fee == 0 the fee gate is disabled:
     // a fund-less Create succeeds (fee_source = "disabled") and any
     // attached funds are rejected outright.
     let mut deps = mock_dependencies(&[]);
 
     let mut msg = create_default_instantiate_msg();
-    msg.standard_pool_creation_fee = Uint128::zero();
+    msg.pool_creation_fee = Uint128::zero();
     let env = mock_env();
     instantiate(
         deps.as_mut(),
@@ -282,7 +278,7 @@ fn create_pair_fee_disabled_rejects_attached_funds() {
         res.attributes
             .iter()
             .any(|attr| attr.key == "fee_source" && attr.value == "disabled"),
-        "fee_source must be \"disabled\" when standard_pool_creation_fee == 0"
+        "fee_source must be \"disabled\" when pool_creation_fee == 0"
     );
 }
 
@@ -296,7 +292,6 @@ fn test_create_pair_with_custom_params() {
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: ubluechip_addr(),
         commit_fee_bluechip: Decimal::percent(1),
         commit_fee_creator: Decimal::percent(5),
@@ -306,7 +301,7 @@ fn test_create_pair_with_custom_params() {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -315,10 +310,9 @@ fn test_create_pair_with_custom_params() {
     let info = message_info(&admin_addr(), &[]);
     instantiate(deps.as_mut(), env, info, msg).unwrap();
 
-    // (custom_params field on CreatePool was removed in the refactor —
-    // see `pool_struct::CreatePool` doc-comment. Caller-supplied threshold
-    // params are no longer honored; the factory config is the single source
-    // of truth. This test now exercises the simplified shape.)
+    // CreatePool carries only `pool_token_info` — see
+    // `pool_struct::CreatePool`. The factory config is the single
+    // source of truth for threshold params.
 
     let create_msg = ExecuteMsg::Create {
         pool_msg: CreatePool {
@@ -508,7 +502,6 @@ fn test_complete_pool_creation_flow() {
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: ubluechip_addr(),
         commit_fee_bluechip: Decimal::percent(1),
         commit_fee_creator: Decimal::percent(5),
@@ -518,7 +511,7 @@ fn test_complete_pool_creation_flow() {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -655,7 +648,6 @@ fn test_config() {
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 1,
         create_pool_wasm_contract_id: 1,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: Addr::unchecked("bluechip1..."),
         commit_fee_bluechip: Decimal::percent(10),
         commit_fee_creator: Decimal::percent(10),
@@ -665,7 +657,7 @@ fn test_config() {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -693,7 +685,6 @@ fn test_reply_handling() {
         commit_threshold_limit_usd: Uint128::new(100),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: ubluechip_addr(),
         commit_fee_bluechip: Decimal::from_ratio(10u128, 100u128),
         commit_fee_creator: Decimal::from_ratio(10u128, 100u128),
@@ -703,7 +694,7 @@ fn test_reply_handling() {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -947,65 +938,6 @@ fn test_notify_threshold_crossed_rejects_wrong_caller() {
     assert!(
         format!("{}", err)
             .contains("Only the registered pool contract can notify threshold crossed"),
-        "got: {}",
-        err
-    );
-    assert!(crate::state::POOL_THRESHOLD_CROSSED
-        .may_load(&deps.storage, 1)
-        .unwrap()
-        .is_none());
-}
-
-#[test]
-fn test_notify_threshold_crossed_rejects_standard_pool() {
-    let mut deps = mock_dependencies(&[]);
-    let env = mock_env();
-    instantiate(
-        deps.as_mut(),
-        env.clone(),
-        message_info(&admin_addr(), &[]),
-        create_default_instantiate_msg(),
-    )
-    .unwrap();
-
-    // Register a STANDARD pool — it has no commit threshold, so even the
-    // registered pool contract itself must be rejected (defense in depth).
-    let pool_addr = make_addr("standard_pool_1");
-    POOLS_BY_ID
-        .save(
-            deps.as_mut().storage,
-            1,
-            &PoolDetails {
-                pool_id: 1,
-                pool_token_info: [
-                    TokenType::Native {
-                        denom: "ubluechip".to_string(),
-                    },
-                    TokenType::CreatorToken {
-                        contract_addr: Addr::unchecked("token"),
-                    },
-                ],
-                creator_pool_addr: pool_addr.clone(),
-                pool_kind: pool_factory_interfaces::PoolKind::Standard,
-            },
-        )
-        .unwrap();
-    crate::state::POOL_ID_BY_ADDRESS
-        .save(deps.as_mut().storage, pool_addr.clone(), &1u64)
-        .unwrap();
-
-    let err = execute(
-        deps.as_mut(),
-        env,
-        message_info(&pool_addr, &[]),
-        ExecuteMsg::NotifyThresholdCrossed {
-            pool_id: 1,
-            crossed_at: None,
-        },
-    )
-    .unwrap_err();
-    assert!(
-        format!("{}", err).contains("Standard pools do not have a commit threshold to cross"),
         "got: {}",
         err
     );
@@ -1385,7 +1317,6 @@ fn create_pair_sets_marketing_admin_to_creator() {
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
-        standard_pool_wasm_contract_id: 0,
         bluechip_wallet_address: ubluechip_addr(),
         commit_fee_bluechip: Decimal::percent(1),
         commit_fee_creator: Decimal::percent(5),
@@ -1395,7 +1326,7 @@ fn create_pair_sets_marketing_admin_to_creator() {
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
-        standard_pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -1476,11 +1407,6 @@ fn pools_query_paginates_registry_in_pool_id_order() {
                 },
             ],
             creator_pool_addr: Addr::unchecked(format!("pool_{pool_id}")),
-            pool_kind: if pool_id % 2 == 0 {
-                pool_factory_interfaces::PoolKind::Standard
-            } else {
-                pool_factory_interfaces::PoolKind::Commit
-            },
         };
         POOLS_BY_ID
             .save(deps.as_mut().storage, pool_id, &details)
@@ -1495,10 +1421,6 @@ fn pools_query_paginates_registry_in_pool_id_order() {
         vec![1, 2, 3, 4, 5]
     );
     assert_eq!(all.pools[0].pool_addr, Addr::unchecked("pool_1"));
-    assert_eq!(
-        all.pools[1].pool_kind,
-        pool_factory_interfaces::PoolKind::Standard
-    );
 
     // Page 1.
     let page1 = crate::query::query_pools(deps.as_ref(), None, Some(2)).unwrap();
@@ -1539,12 +1461,11 @@ fn deploy_script_instantiate_json_deserializes() {
         "commit_fee_creator": "0.05",
         "max_bluechip_lock_per_pool": "25000000000",
         "creator_excess_liquidity_lock_days": 7,
-        "standard_pool_creation_fee": "1000000",
+        "pool_creation_fee": "1000000",
         "emergency_withdraw_delay_seconds": 86400,
         "cw20_token_contract_id": 1,
         "cw721_nft_contract_id": 2,
-        "create_pool_wasm_contract_id": 3,
-        "standard_pool_wasm_contract_id": 4
+        "create_pool_wasm_contract_id": 3
     }"#;
     let msg: FactoryInstantiate =
         cosmwasm_std::from_json(json.as_bytes()).expect("deploy script JSON must deserialize");

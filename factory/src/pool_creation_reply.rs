@@ -1,21 +1,16 @@
 use crate::{
     asset::TokenType,
     error::ContractError,
-    execute::{encode_reply_id, FINALIZE_POOL, FINALIZE_STANDARD_POOL, MINT_CREATE_POOL},
+    execute::{encode_reply_id, FINALIZE_POOL, MINT_CREATE_POOL},
     msg::CreatePoolReplyMsg,
     pool_create_cleanup::{extract_contract_address, give_pool_ownership_cw20_and_nft},
     pool_struct::{CommitFeeInfo, PoolDetails},
-    state::{
-        CreationStatus, FACTORYINSTANTIATEINFO, POOL_CREATION_CONTEXT,
-        STANDARD_POOL_CREATION_CONTEXT,
-    },
+    state::{CreationStatus, FACTORYINSTANTIATEINFO, POOL_CREATION_CONTEXT},
 };
 use cosmwasm_std::{
-    to_json_binary, CosmosMsg, DepsMut, Env, Reply, Response, StdError, StdResult, SubMsg, WasmMsg,
+    to_json_binary, CosmosMsg, DepsMut, Env, Reply, Response, StdResult, SubMsg, WasmMsg,
 };
-use pool_factory_interfaces::{
-    cw721_msgs::Cw721InstantiateMsg, PoolKind, StandardPoolInstantiateMsg,
-};
+use pool_factory_interfaces::cw721_msgs::Cw721InstantiateMsg;
 
 /// CW721 NFT branding for liquidity-position NFTs minted on commit-pool
 /// creation. Hoisted to module scope so a deployment-specific re-skin
@@ -239,16 +234,14 @@ pub fn finalize_pool(
         pool_id,
         pool_token_info,
         creator_pool_addr: pool_address.clone(),
-        // This reply handler is specifically for the commit-pool creation
-        // chain (triggered by ExecuteMsg::Create). Standard pools have
-        // their own reply chain that sets pool_kind = Standard.
-        pool_kind: pool_factory_interfaces::PoolKind::Commit,
+        // This reply handler completes the pool creation chain
+        // triggered by ExecuteMsg::Create.
     };
 
     let ownership_msgs =
         give_pool_ownership_cw20_and_nft(&token_address, &nft_address, &pool_address)?;
 
-    // Symmetric two-phase NFT accept (mirrors `finalize_standard_pool`).
+    // Symmetric two-phase NFT accept.
     // `give_pool_ownership_cw20_and_nft` only emits the CW721
     // `TransferOwnership` (cw_ownable is two-phase: sets pending_owner,
     // current owner unchanged). Without this trigger, the factory
@@ -285,155 +278,12 @@ pub fn finalize_pool(
         .add_attribute("pool_id", pool_id.to_string()))
 }
 
-// ---------------------------------------------------------------------------
-// Standard pool reply chain
-// ---------------------------------------------------------------------------
-//
-// Standard pools have a 2-step reply chain (vs the commit-pool's 3 steps):
-// 1. CW721 NFT instantiate (kicked off by `execute_create_standard_pool`)
-// -> reply lands in `mint_standard_nft`
-// 2. Pool wasm instantiate (kicked off by `mint_standard_nft`)
-// -> reply lands in `finalize_standard_pool` which transfers NFT
-// ownership to the new pool and registers it.
-//
-// No CW20 instantiate step — standard pools wrap pre-existing tokens.
-// No CW20 ownership transfer at finalize — there's nothing to transfer.
-// Same `reply_on_success` atomicity guarantees as the commit-pool chain
-// (see pool_create_cleanup.rs file-level comment).
-
-pub fn mint_standard_nft(
-    deps: DepsMut,
-    env: Env,
-    msg: Reply,
-    pool_id: u64,
-) -> Result<Response, ContractError> {
-    let reply_id = msg.id;
-    let result = msg
-        .result
-        .into_result()
-        .map_err(|e| ContractError::ReplyOnSuccessSawError {
-            id: reply_id,
-            msg: format!("mint_standard_nft: {}", e),
-        })?;
-
-    let mut ctx = STANDARD_POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
-    let nft_address = extract_contract_address(&deps, &result)?;
-    ctx.nft_addr = Some(nft_address.clone());
-    STANDARD_POOL_CREATION_CONTEXT.save(deps.storage, pool_id, &ctx)?;
-
-    let factory_config = FACTORYINSTANTIATEINFO.load(deps.storage)?;
-
-    let std_msg = StandardPoolInstantiateMsg {
-        pool_id,
-        pool_token_info: ctx.pool_token_info.clone(),
-        used_factory_addr: env.contract.address.clone(),
-        position_nft_address: nft_address.clone(),
-        // Real wallet address sourced from factory config so that
-        // an emergency drain on a standard pool sends funds to a
-        // controllable wallet instead of the factory contract (which
-        // has no withdrawal mechanism).
-        bluechip_wallet_address: factory_config.bluechip_wallet_address.clone(),
-    };
-    // Dual-code_id routing: standard pools instantiate against the
-    // separate standard-pool wasm, sending a flat
-    // StandardPoolInstantiateMsg (standard-pool's `instantiate` takes
-    // that type directly — no tagged-enum wrapper).
-    if factory_config.standard_pool_wasm_contract_id == 0 {
-        return Err(ContractError::Std(StdError::generic_err(
-            "standard_pool_wasm_contract_id is not configured; \
-             propose a factory config update that sets it before \
-             creating standard pools",
-        )));
-    }
-    let pool_msg = WasmMsg::Instantiate {
-        code_id: factory_config.standard_pool_wasm_contract_id,
-        msg: to_json_binary(&std_msg)?,
-        funds: vec![],
-        admin: Some(env.contract.address.to_string()),
-        label: ctx.label.clone(),
-    };
-
-    let sub_msg =
-        SubMsg::reply_on_success(pool_msg, encode_reply_id(pool_id, FINALIZE_STANDARD_POOL));
-
-    Ok(Response::new()
-        .add_attribute("action", "standard_nft_created")
-        .add_attribute("nft_address", nft_address)
-        .add_attribute("pool_id", pool_id.to_string())
-        .add_submessage(sub_msg))
-}
-
-pub fn finalize_standard_pool(
-    deps: DepsMut,
-    _env: Env,
-    msg: Reply,
-    pool_id: u64,
-) -> Result<Response, ContractError> {
-    let reply_id = msg.id;
-    let result = msg
-        .result
-        .into_result()
-        .map_err(|e| ContractError::ReplyOnSuccessSawError {
-            id: reply_id,
-            msg: format!("finalize_standard_pool: {}", e),
-        })?;
-
-    let ctx = STANDARD_POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
-    let pool_address = extract_contract_address(&deps, &result)?;
-    let nft_address = ctx
-        .nft_addr
-        .clone()
-        .ok_or(ContractError::ReplyMissingAddress {
-            step: "finalize_standard_pool",
-            kind: "nft",
-        })?;
-
-    let pool_details = PoolDetails {
-        pool_id,
-        pool_token_info: ctx.pool_token_info.clone(),
-        creator_pool_addr: pool_address.clone(),
-        pool_kind: PoolKind::Standard,
-    };
-
-    // Standard pools have only the NFT to transfer (no CW20 minter to
-    // hand off — the pool wraps pre-existing CW20s that already have
-    // their own minters set elsewhere, or two native denoms with no
-    // minter at all).
-    let nft_transfer = give_pool_nft_ownership(&nft_address, &pool_address)?;
-
-    // Close the pending-ownership window in the same tx as
-    // pool creation. The NFT contract sees TransferOwnership first
-    // (from the factory) → pool becomes pending_owner; then the pool
-    // itself processes AcceptNftOwnership and sends AcceptOwnership
-    // back to the NFT. By the end of this tx the NFT contract has
-    // the pool as its actual owner, with no window for an outside
-    // observer to interact with the half-transferred NFT.
-    let pool_accept_trigger = build_pool_accept_nft_ownership_call(&pool_address)?;
-
-    STANDARD_POOL_CREATION_CONTEXT.remove(deps.storage, pool_id);
-
-    crate::state::register_pool(deps.storage, pool_id, &pool_address, &pool_details)?;
-
-    Ok(Response::new()
-        // Order matters: TransferOwnership must process before the
-        // pool tries to accept, otherwise the NFT contract would
-        // reject AcceptOwnership with NoPendingOwner.
-        .add_message(nft_transfer)
-        .add_message(pool_accept_trigger)
-        .add_attribute("action", "standard_pool_created_successfully")
-        .add_attribute("pool_address", pool_address)
-        .add_attribute("pool_id", pool_id.to_string())
-        .add_attribute("creator", ctx.creator.to_string()))
-}
-
 /// Minimal typed mirror of the pool-side ExecuteMsg variants the factory
 /// ever needs to call back into. Intentionally NOT a re-export of
-/// `standard_pool::msg::ExecuteMsg` / `creator_pool::msg::ExecuteMsg` —
-/// the factory must not take a circular dep on either pool crate. Both
-/// pool kinds expose the same `AcceptNftOwnership {}` variant with the
-/// same snake_case wire shape, so a single helper here serves both
-/// finalize paths. Wire compatibility is locked in by the round-trip
-/// parse tests in each pool crate's testing module.
+/// `creator_pool::msg::ExecuteMsg` —
+/// the factory must not take a circular dep on the pool crate. Wire
+/// compatibility is locked in by the round-trip
+/// parse tests in the pool crate's testing module.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum PoolFactoryCallback {
@@ -441,36 +291,13 @@ enum PoolFactoryCallback {
 }
 
 /// Builds the `Wasm::Execute { AcceptNftOwnership {} }` call back into
-/// a freshly-created pool (either kind). Sender on the resulting
+/// a freshly-created pool. Sender on the resulting
 /// transaction is the factory contract, which is what the pool-side
 /// `execute_accept_nft_ownership` handlers authorise on.
 fn build_pool_accept_nft_ownership_call(pool_addr: &cosmwasm_std::Addr) -> StdResult<CosmosMsg> {
     Ok(WasmMsg::Execute {
         contract_addr: pool_addr.to_string(),
         msg: to_json_binary(&PoolFactoryCallback::AcceptNftOwnership {})?,
-        funds: vec![],
-    }
-    .into())
-}
-
-/// Standalone NFT-ownership transfer for the standard-pool finalize path.
-/// The commit-pool helper `give_pool_ownership_cw20_and_nft` bundles the
-/// CW20 minter handoff, which standard pools don't need; rather than
-/// branching that helper, we keep the two flows clean with separate
-/// builders.
-fn give_pool_nft_ownership(
-    nft_addr: &cosmwasm_std::Addr,
-    pool_addr: &cosmwasm_std::Addr,
-) -> StdResult<CosmosMsg> {
-    use pool_factory_interfaces::cw721_msgs::{Action, Cw721ExecuteMsg};
-    Ok(WasmMsg::Execute {
-        contract_addr: nft_addr.to_string(),
-        msg: to_json_binary(&Cw721ExecuteMsg::<()>::UpdateOwnership(
-            Action::TransferOwnership {
-                new_owner: pool_addr.to_string(),
-                expiry: None,
-            },
-        ))?,
         funds: vec![],
     }
     .into())

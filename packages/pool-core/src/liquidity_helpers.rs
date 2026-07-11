@@ -204,9 +204,8 @@ pub fn calc_capped_fees_with_clip(
 /// Build transfer messages for the two fee amounts, dispatching per-asset
 /// on the pair's actual `TokenType` rather than the old
 /// "asset 0 = native, asset 1 = CW20" assumption. Works for every pair
-/// shape — commit pools (native/CW20), standard native/CW20,
-/// standard native/native (e.g. the ATOM/bluechip anchor),
-/// standard CW20/CW20.
+/// shape — native/CW20 (the creator pool), native/native, and
+/// CW20/CW20.
 pub fn build_fee_transfer_msgs(
     pool_info: &PoolInfo,
     recipient: &Addr,
@@ -327,11 +326,9 @@ pub fn check_ratio_deviation(
 /// relative to OPTIMAL_LIQUIDITY. Penalizes small positions to discourage
 /// dust griefing.
 ///
-/// **Do not call directly from the deposit / add / remove paths** — use
-/// `effective_fee_size_multiplier` instead so the pool-kind switch
-/// (`APPLY_DUST_MULTIPLIER`) is honored. This raw function is kept `pub`
-/// for the unit tests in this file; production code routes through the
-/// effective helper.
+/// Dust-griefing deterrent: positions below `OPTIMAL_LIQUIDITY` earn
+/// fees at a clipped multiplier (10%..100%, linear in size); the
+/// clipped slice flows to `CREATOR_FEE_POT`.
 pub fn calculate_fee_size_multiplier(liquidity: Uint128) -> Decimal {
     if liquidity >= OPTIMAL_LIQUIDITY {
         Decimal::one()
@@ -339,68 +336,6 @@ pub fn calculate_fee_size_multiplier(liquidity: Uint128) -> Decimal {
         let ratio = Decimal::from_ratio(liquidity, OPTIMAL_LIQUIDITY);
         MIN_MULTIPLIER + (Decimal::one() - MIN_MULTIPLIER) * ratio
     }
-}
-
-/// Floor on the LP-units a single deposit/add can produce on a standard
-/// pool. Enforced only when `APPLY_DUST_MULTIPLIER == false` (i.e., the
-/// standard-pool path). Picked at `OPTIMAL_LIQUIDITY / 10` so the smallest
-/// admitted position is one tenth of the size at which the
-/// `fee_size_multiplier` would have reached 100% under the legacy
-/// creator-pool scaling — preserves "small positions are economically
-/// discouraged" without routing fees to the inaccessible-on-standard
-/// `CREATOR_FEE_POT`. Creator pools continue to use the multiplier-based
-/// dust deterrent and do NOT enforce this floor.
-pub const MIN_STANDARD_POOL_POSITION_LIQUIDITY: Uint128 = Uint128::new(100_000);
-
-/// Read `APPLY_DUST_MULTIPLIER` (defaulting to `true` when unset for
-/// backwards compatibility with pre-flag pool storage / test fixtures)
-/// and return either:
-/// - the legacy `calculate_fee_size_multiplier(liquidity)` (creator-pool
-///   behavior — small positions clipped, slice flows to
-///   `CREATOR_FEE_POT`), OR
-/// - `Decimal::one()` (standard-pool behavior — no clip; dust protection
-///   is enforced via the deposit-time `MIN_STANDARD_POOL_POSITION_LIQUIDITY`
-///   floor instead, see `enforce_standard_pool_min_position`).
-///
-/// Every production call site (`liquidity/deposit.rs`,
-/// `liquidity/add.rs`, `liquidity/remove.rs`) routes through this helper
-/// so the flag is honored uniformly across deposit / add / remove.
-pub fn effective_fee_size_multiplier(
-    storage: &dyn cosmwasm_std::Storage,
-    liquidity: Uint128,
-) -> StdResult<Decimal> {
-    let apply = crate::state::APPLY_DUST_MULTIPLIER
-        .may_load(storage)?
-        .unwrap_or(true);
-    if apply {
-        Ok(calculate_fee_size_multiplier(liquidity))
-    } else {
-        Ok(Decimal::one())
-    }
-}
-
-/// Reject a deposit/add on a standard pool whose produced
-/// `liquidity` is below `MIN_STANDARD_POOL_POSITION_LIQUIDITY`. No-op on
-/// creator pools (`APPLY_DUST_MULTIPLIER == true` or unset). Called from
-/// `execute_deposit_liquidity_inner` and `add_to_position_internal`
-/// after `prepare_deposit` has computed the produced LP units.
-///
-/// Returns `Err(ContractError::DustStandardPoolDeposit)` when the
-/// liquidity floor is violated on a standard pool.
-pub fn enforce_standard_pool_min_position(
-    storage: &dyn cosmwasm_std::Storage,
-    liquidity: Uint128,
-) -> Result<(), ContractError> {
-    let apply = crate::state::APPLY_DUST_MULTIPLIER
-        .may_load(storage)?
-        .unwrap_or(true);
-    if !apply && liquidity < MIN_STANDARD_POOL_POSITION_LIQUIDITY {
-        return Err(ContractError::DustStandardPoolDeposit {
-            liquidity,
-            minimum: MIN_STANDARD_POOL_POSITION_LIQUIDITY,
-        });
-    }
-    Ok(())
 }
 
 pub fn integer_sqrt(value: Uint128) -> Uint128 {
@@ -758,8 +693,7 @@ mod tests {
     }
 
     /// At multiplier = 1.0 (no clipping), both `removed_clip` and
-    /// `preserved_clip` must be zero. Confirms standard-pool semantics
-    /// (APPLY_DUST_MULTIPLIER=false → multiplier always 1.0) are
+    /// `preserved_clip` must be zero. Confirms the no-clip case is
     /// unaffected by the preserved-clip routing change.
     #[test]
     fn calculate_fees_owed_split_pair_zero_clip_at_full_multiplier() {

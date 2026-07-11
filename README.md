@@ -6,13 +6,6 @@ chain's native asset (**OSMO**, `uosmo`); the commit threshold is
 USD-denominated and valued through Osmosis's chain-native `x/twap`
 module — no keepers, no external price feeds, no bespoke oracle.
 
-> This repository is the Osmosis relaunch of `bluechip-contracts`. The
-> internal price oracle (TWAP engine + Pyth), keeper bounties, the
-> expand-economy reservoir, and the bluechip mint-reward machinery were
-> removed in the migration. `OSMOSIS_MIGRATION_AUDIT.md` documents the
-> line-by-line security review of that migration; `SECURITY_AUDIT.md`
-> and `AUDIT_DELTA.md` are the prior audits of the shared codebase.
-
 ## Overview
 
 Bluechip enables content creators to launch their own tokens and build
@@ -39,13 +32,13 @@ liquidity to earn trading fees.
 
 ## Architecture
 
-Four production contracts and two shared library packages:
+Three production contracts and two shared library packages:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      FACTORY CONTRACT                        │
-│  - Creates creator pools and standard pools (both            │
-│    permissionless: flat OSMO fee + 1h/address rate limit)    │
+│  - Creates creator pools (permissionless: flat OSMO fee +    │
+│    1h/address rate limit)                                    │
 │  - Global configuration behind a 48h timelock; every config  │
 │    change live-probes the pricing route before it can land   │
 │  - USD pricing: stateless x/twap query over the configured   │
@@ -53,23 +46,23 @@ Four production contracts and two shared library packages:
 │  - Pool registry (PoolByAddress / Pools enumeration)         │
 │  - Batched, timelocked pool code upgrades                    │
 └─────────────────────────────────────────────────────────────┘
-        │ creates                    │ creates
-        ▼                            ▼
-┌────────────────────┐      ┌────────────────────┐
-│   CREATOR POOL     │      │   STANDARD POOL    │
-│  - Commit phase    │      │  - Plain xyk AMM   │
-│    (OSMO in, USD-  │      │    around any two  │
-│    valued ledger)  │      │    existing assets │
-│  - Threshold cross │      │  - SubMsg-based    │
-│    mints + seeds   │      │    deposit balance │
-│    the AMM         │      │    verification    │
-│  - Post-threshold  │      │  - Tradeable from  │
-│    AMM + commits   │      │    instantiate     │
-│  - Batched token   │      │                    │
-│    distribution    │      │                    │
-└────────────────────┘      └────────────────────┘
-        │                            │
-        ▼                            ▼
+        │ creates
+        ▼
+┌────────────────────┐
+│   CREATOR POOL     │
+│  - Commit phase    │
+│    (OSMO in, USD-  │
+│    valued ledger)  │
+│  - Threshold cross │
+│    mints + seeds   │
+│    the AMM         │
+│  - Post-threshold  │
+│    AMM + commits   │
+│  - Batched token   │
+│    distribution    │
+└────────────────────┘
+        │
+        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              POOL-CORE  (shared library package)             │
 │  - Constant-product AMM math + slippage / spread guards      │
@@ -91,16 +84,6 @@ Four production contracts and two shared library packages:
 
 (`pool-factory-interfaces` carries the wire-format types the pools,
 factory, and router speak; `easy-addr` is a test-only helper.)
-
-### Pool kinds
-
-| Kind | Created by | Commit phase | Mints CW20 |
-|------|-----------|--------------|------------|
-| **Creator pool** | Anyone (flat OSMO fee, 1h/address rate limit) | Yes — commit-only until the USD threshold | Yes — CW20 minted at crossing, cap = exact payout total (1.2M tokens) |
-| **Standard pool** | Anyone (flat OSMO fee, 1h/address rate limit) | No — tradeable from instantiate | No — wraps two pre-existing assets |
-
-Both share the same liquidity/swap/position logic via `pool-core`, the
-same emergency-withdraw machinery, and the same factory envelope.
 
 ---
 
@@ -128,38 +111,14 @@ The CW20 address is filled in by the factory during the reply chain.
 ```
 
 **Funds attached:** exactly one coin entry of `uosmo`, amount ≥ the
-flat creation fee (`standard_pool_creation_fee`, factory config —
+flat creation fee (`pool_creation_fee`, factory config —
 mainnet default 1 OSMO). `cw_utils::must_pay` rejects any other shape;
 surplus is refunded in the same tx. The fee goes to the protocol
 wallet; a 1-hour per-address rate limit keeps registry spam in check.
 
-### Creating a standard pool
-
-Anyone can create a plain xyk pool around two pre-existing assets via
-`CreateStandardPool`, paying the same flat OSMO fee.
-
-```json
-{
-  "create_standard_pool": {
-    "pool_token_info": [
-      { "bluechip": { "denom": "uosmo" } },
-      { "creator_token": { "contract_addr": "osmo1..." } }
-    ],
-    "label": "uosmo-MYTOKEN-xyk"
-  }
-}
-```
-
-Standard pools are immediately tradeable/depositable, mint no CW20, and
-use `pool-core`'s SubMsg-based deposit balance verification (see
-[Security](#security-considerations) for what that does and does not
-protect against).
-
 ---
 
-## Two-Phase Pool Lifecycle (Creator Pool)
-
-Standard pools skip the commit phase entirely.
+## Two-Phase Pool Lifecycle
 
 ### Phase 1: Pre-threshold (funding)
 
@@ -295,7 +254,7 @@ uptime canary (see `RUNBOOK.md`).
 
 ## NFT Liquidity Positions
 
-Both pool kinds represent liquidity positions as NFTs (via `pool-core`):
+Liquidity positions are represented as NFTs (via `pool-core`):
 
 - **Fee collection without burning** — claim accumulated fees while
   keeping the position
@@ -321,9 +280,9 @@ share-price inflation and one-sided dust seeding.
 }
 ```
 
-Returns the position NFT. On standard pools the CW20 side is verified
-by a `reply_on_success` SubMsg asserting `post − pre == credited`
-against the token's reported balance.
+Returns the position NFT. CW20-side deposits are verified by a
+`reply_on_success` SubMsg asserting `post − pre == credited` against
+the token's reported balance.
 
 `add_to_position` tops up an existing position (auto-collecting
 pending fees first); `collect_fees { position_id }` claims fees using
@@ -356,7 +315,6 @@ floor.
 { "is_fully_commited": {} }
 ```
 `"fully_committed"` or `{ "in_progress": { "raised": "...", "target": "25000000000" } }`.
-Standard pools always return `"fully_committed"`.
 
 ```json
 { "position": { "position_id": "123" } }
@@ -416,14 +374,14 @@ await client.execute(sender, poolAddress, msg, "auto", undefined,
   [{ denom: "uosmo", amount }]);
 ```
 
-### Standard-pool deposit (CW20 approval required)
+### Depositing liquidity (CW20 approval required)
 
 ```javascript
 await client.execute(sender, cw20Address, {
-  increase_allowance: { spender: standardPoolAddress, amount: "1000000" }
+  increase_allowance: { spender: poolAddress, amount: "1000000" }
 }, "auto");
 
-await client.execute(sender, standardPoolAddress, {
+await client.execute(sender, poolAddress, {
   deposit_liquidity: {
     amount0: "1000000", amount1: "1000000",
     min_amount0: null, min_amount1: null, transaction_deadline: null
@@ -445,12 +403,9 @@ before rendering.
 
 ## Security Considerations
 
-The full security record lives in three in-repo documents:
-`SECURITY_AUDIT.md` (baseline line-by-line audit), `AUDIT_DELTA.md`
-(delta review of post-baseline changes), and
-`OSMOSIS_MIGRATION_AUDIT.md` (four-pass review of the Osmosis
-migration, including verification that every previously-audited defense
-survived it). Highlights:
+The full security record lives in `SECURITY_AUDIT.md` — a multi-pass
+review of every contract with findings, verified defenses, and
+priorities. Highlights:
 
 ### Reentrancy & funds handling
 - Single shared `REENTRANCY_LOCK` across commit, swap, and every
@@ -461,8 +416,7 @@ survived it). Highlights:
 
 ### Pricing security
 - Fail-closed x/twap valuation with zero/dust rejection and the
-  `RATE_MAX` ($10k/OSMO) sanity ceiling replacing the old oracle's
-  drift breaker; TWAP window floor 300s.
+  `RATE_MAX` ($10k/OSMO) sanity ceiling; TWAP window floor 300s.
 - Live probe of any proposed pricing config at instantiate / propose /
   apply — a typo'd pool id cannot brick commits.
 - Residual operator duty: **monitor the pricing pool's liquidity**
@@ -478,16 +432,11 @@ survived it). Highlights:
 - 3% excess-swap cap + refund on the crossing tx; 2-block cooldown and
   100-block swap-cap ramp after crossing.
 
-### Standard-pool CW20 risk — read this if you LP
-Deposit/swap balance verification queries the token's balance **from
-the token contract itself**. This reverts on fee-on-transfer and
-rebasing tokens, but a **fully hostile CW20 that lies about balances
-can defeat these checks and drain the paired asset within its own
-pool**. The blast radius is strictly pool-isolated — other pools and
-protocol funds are unreachable — but this is the standard
-permissionless-AMM risk: **only provide the paired side against a CW20
-whose contract you trust.** Standard-pool creation is permissionless;
-the registry does not vet tokens.
+### CW20 surface
+Creator pools only ever pair OSMO against the vanilla cw20-base token
+the factory itself mints, so no third-party CW20 code runs inside any
+pool. CW20-side deposits are additionally balance-verified by a
+`reply_on_success` SubMsg that reverts on any credited/actual mismatch.
 
 ### Rate limits & spam
 - 13s per-wallet commit/swap cooldown; independent cooldown map for
@@ -535,7 +484,7 @@ Commit (1000 OSMO)
 ```
 
 Note: the creator allocation is **not vested** and creators may commit
-to their own pools; weigh that (documented as finding M-1 in
+to their own pools; weigh that (documented as finding S-3 in
 `SECURITY_AUDIT.md`) when deciding pool parameters.
 
 ---
@@ -593,7 +542,7 @@ All through the factory, all admin-gated, all 48h propose→apply:
   the reserve auto-pause, which clears itself).
 - **Emergency withdraw**: two-phase with the config-set delay;
   cancellable during phase 1.
-- **Migration**: factory / creator-pool / standard-pool export migrate
+- **Migration**: factory / creator-pool export migrate
   entry points with semver downgrade protection. (The router has no
   migrate entry point — redeploy to change it.)
 
@@ -650,16 +599,15 @@ prod builds.
 ### Testing
 
 ```bash
-cargo test --workspace          # 464 tests
+cargo test --workspace          # 377 tests
 cargo clippy --workspace --tests -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Current suite: creator-pool 218, factory 112, standard-pool 77,
-pool-core 34, router 23. `fuzz/` carries cargo-fuzz math targets (see
-`FUZZING.md` for status — the stateful harness was retired with the
-migration and its restoration is tracked in
-`OSMOSIS_MIGRATION_AUDIT.md`).
+Current suite: creator-pool 218, factory 103, pool-core 34,
+router 22. `fuzz/` carries cargo-fuzz math targets; see
+`FUZZING.md` for status and the planned property-harness work (tracked
+as S-7 in `SECURITY_AUDIT.md`).
 
 ### Repository layout
 
@@ -667,7 +615,6 @@ migration and its restoration is tracked in
 bluechip-osmosis-contract/
 ├── factory/                  # Factory (registry, config, x/twap pricing)
 ├── creator-pool/             # Commit phase + AMM
-├── standard-pool/            # Plain xyk pool
 ├── router/                   # Multi-hop swap router
 ├── packages/
 │   ├── pool-core/            # Shared AMM library
@@ -693,7 +640,7 @@ bluechip-osmosis-contract/
 ./deploy_osmosis.sh osmosis_mainnet.env
 ```
 
-The script stores the six wasms (or reuses governance-passed code IDs),
+The script stores the five wasms (or reuses governance-passed code IDs),
 instantiates factory + router, then verifies the deploy by reading the
 config back and probing `ConvertNativeToUsd` — you see the live TWAP
 rate before calling it done. Operations (the distribution keeper, the

@@ -1,6 +1,7 @@
 //! Deposit balance-verification reply handler.
 //!
-//! Standard-pool's `reply` entry point dispatches `DEPOSIT_VERIFY_REPLY_ID`
+//! The consuming contract's `reply` entry point dispatches
+//! `DEPOSIT_VERIFY_REPLY_ID`
 //! into [`handle_deposit_verify_reply`]. The verify-aware deposit /
 //! add-to-position paths in `crate::liquidity` snapshot the pool's
 //! pre-balance for every CW20 side and emit the final outgoing message
@@ -9,9 +10,10 @@
 //! amount, and either clear the transient context (success) or return
 //! an `Err` (rolling the entire tx back).
 //!
-//! Errors propagate as `ContractError::Std`. Standard-pool wraps the
-//! reply result in `StdResult<Response>`, so a Err here is converted
-//! back into the chain-level failure that triggers full state rollback.
+//! Errors propagate as `ContractError::Std`. The consuming contract
+//! wraps the reply result in `StdResult<Response>`, so an Err here is
+//! converted back into the chain-level failure that triggers full state
+//! rollback.
 //!
 //! Why a strict equality check (`post + outgoing == pre + actual_in`)
 //! rather than `>=`:

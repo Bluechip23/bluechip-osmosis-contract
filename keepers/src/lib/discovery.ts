@@ -3,14 +3,12 @@ import { log } from "./logger.js";
 // Pool auto-discovery via the factory's paginated `pools` registry
 // query. Replaces the hand-maintained POOL_ADDRESSES list: a keeper
 // pointed at the factory automatically picks up every commit pool,
-// including ones created after the keeper started. Standard pools are
-// excluded — they have no commit phase, so there is never a
-// distribution to flush or a factory notify to retry on them.
+// including ones created after the keeper started. Every registered
+// pool is a commit pool, so the full registry is the watch list.
 
 interface PoolListEntry {
   pool_id: number;
   pool_addr: string;
-  pool_kind: "commit" | "standard";
 }
 
 interface PoolsResponse {
@@ -35,7 +33,7 @@ export async function discoverCommitPools(
       pools: { start_after: startAfter, limit: PAGE_LIMIT },
     });
     for (const p of res.pools) {
-      if (p.pool_kind === "commit") found.push(p.pool_addr);
+      found.push(p.pool_addr);
     }
     if (res.pools.length < PAGE_LIMIT) break;
     startAfter = res.pools[res.pools.length - 1]!.pool_id;

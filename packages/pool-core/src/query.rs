@@ -3,13 +3,13 @@
 //! Every reader of shared state moves here; commit-only queries
 //! (`query_check_threshold_limit`, `query_pool_committers`,
 //! `query_factory_notify_status`) and the top-level `pub fn query`
-//! dispatch stay per-contract in creator-pool / standard-pool.
+//! dispatch stay per-contract in creator-pool.
 //!
 //! `query_analytics` is factored: `query_analytics_core` assembles the
-//! shared-state portion of `PoolAnalyticsResponse`; each contract's
-//! wrapper supplies the commit-adjacent fields (`threshold_status`,
-//! `total_usd_raised`, `total_bluechip_raised`). Creator-pool loads
-//! commit ledger state; standard-pool passes `FullyCommitted` and zero.
+//! shared-state portion of `PoolAnalyticsResponse`; the consuming
+//! contract's wrapper supplies the commit-adjacent fields
+//! (`threshold_status`, `total_usd_raised`, `total_bluechip_raised`).
+//! Creator-pool loads commit ledger state for them.
 
 use crate::asset::TokenInfo;
 use crate::liquidity_helpers::calculate_unclaimed_fees;
@@ -168,8 +168,6 @@ pub fn query_fee_info(deps: Deps) -> StdResult<FeeInfoResponse> {
 
 /// Returns true only after the threshold crossing has fully completed
 /// (IS_THRESHOLD_HIT == true). Gates all post-threshold operations.
-/// Standard pools set IS_THRESHOLD_HIT to true at instantiate, so this
-/// always returns true for them.
 pub fn query_check_commit(deps: Deps) -> StdResult<bool> {
     IS_THRESHOLD_HIT.load(deps.storage)
 }

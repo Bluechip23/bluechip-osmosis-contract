@@ -122,13 +122,13 @@ impl TokenType {
     ///   denom and every subsequent BankMsg reverts inside the bank
     ///   module with an error nobody is watching for. (Cosmos-SDK's
     ///   stricter `^[a-zA-Z][a-zA-Z0-9/:._-]{2,127}$` regex is enforced
-    ///   by the factory's `validate_pool_token_info` for commit pools;
+    ///   by the factory's `validate_pool_token_info`;
     ///   here we only check the lowest bar so this trait method stays
-    ///   meaningful for both standard- and creator-pool entry points.)
+    ///   meaningful for any consuming entry point.)
     /// - `CreatorToken { contract_addr }`: rejects malformed bech32 via
     ///   `api.addr_validate`.
     ///
-    /// Centralized here so every caller (creator-pool and standard-pool
+    /// Centralized here so every caller (e.g. creator-pool
     /// `instantiate`) gets the same guard set without an asymmetric
     /// inline empty-denom check at one call site only.
     pub fn check(&self, api: &dyn Api) -> StdResult<()> {

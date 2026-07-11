@@ -40,12 +40,12 @@ use cw2::set_contract_version;
 use pool_core::balance_verify::handle_deposit_verify_reply;
 
 /// cw2 contract name. Includes the `creator` discriminator so a
-/// migration tool inspecting cw2 names can distinguish a creator-pool
-/// from a `standard-pool` (`bluechip-contracts-standard-pool`).
+/// migration tool inspecting cw2 names can positively identify this
+/// wasm as the creator pool.
 /// Pre-rename pools migrating up will fail any cw2-name check; that's
-/// the desired behaviour — name drift across pool kinds is exactly
-/// the foot-gun this rename closes.
-const CONTRACT_NAME: &str = "bluechip-contracts-creator-pool";
+/// the desired behaviour — cw2-name drift is exactly the foot-gun
+/// this rename closes.
+const CONTRACT_NAME: &str = "bluechip-osmosis-creator-pool";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------------------------------------------------------------------------
@@ -191,12 +191,6 @@ pub fn instantiate(
     // gate on this until `process_threshold_crossing_with_excess` flips
     // it to `true` during the threshold-crossing commit.
     IS_THRESHOLD_HIT.save(deps.storage, &false)?;
-    // Creator pools use the legacy `fee_size_multiplier` dust-griefing
-    // deterrent — small positions accrue with a clipped multiplier whose
-    // clipped slice flows to CREATOR_FEE_POT, claimable by the creator.
-    // Standard pools instantiate with this flag set to `false`; see the
-    // doc-comment on `APPLY_DUST_MULTIPLIER` in pool-core::state.
-    pool_core::state::APPLY_DUST_MULTIPLIER.save(deps.storage, &true)?;
     NEXT_POSITION_ID.save(deps.storage, &0u64)?;
     POOL_INFO.save(deps.storage, &pool_info)?;
     POOL_FEE_STATE.save(deps.storage, &pool_fee_state)?;
@@ -281,8 +275,7 @@ fn check_pool_writable_for_deposit(storage: &dyn Storage) -> Result<(), Contract
 /// LP-exit gate. Permits `Remove*Liquidity` and `CollectFees` while
 /// the pool is open OR while it's in the 24h emergency-withdraw
 /// timelock window (PauseKind::EmergencyPending). Auto-pause and
-/// admin Hard pause still reject — same rationale as standard-pool's
-/// equivalent helper.
+/// admin Hard pause still reject.
 ///
 /// Closes the LP-trap window surfaced: without
 /// this, post-threshold LPs whose pool is emergency-withdrawn cannot
@@ -401,9 +394,9 @@ pub fn execute(
             }
             let sender = info.sender.clone();
             // route every CW20-bearing deposit through the
-            // balance-verify variant. The pre-fix path skipped the
-            // pre/post snapshot under the assumption that the pool's
-            // CW20 is always a vanilla cw20-base freshly minted by the
+            // balance-verify variant. Skipping the pre/post snapshot
+            // would assume the pool's CW20 is always a vanilla
+            // cw20-base freshly minted by the
             // factory — true today, but a single careless future
             // `update_pool_token_address` admin path or factory upgrade
             // permitting third-party CW20s would let reserves drift
@@ -538,10 +531,9 @@ pub fn execute(
         ExecuteMsg::ClaimCreatorExcessLiquidity {
             transaction_deadline,
         } => {
-            // Creator excess exists only when a commit-pool threshold is crossed
+            // Creator excess exists only when the pool's threshold is crossed
             // with more raised-bluechip than `max_bluechip_lock_per_pool`
-            // absorbs. Standard pools have no commit phase and no excess
-            // position, so there's nothing to claim.
+            // absorbs; before that there's nothing to claim.
             check_pool_writable(deps.storage)?;
             execute_claim_creator_excess(deps, env, info, transaction_deadline)
         }
@@ -549,14 +541,12 @@ pub fn execute(
             transaction_deadline,
         } => {
             // The creator fee pot is seeded by the fee_size_multiplier
-            // clip on commit-pool LP fees. Standard pools have no creator
-            // concept, so the pot is always empty and this handler is N/A.
+            // clip on LP fees.
             check_pool_writable(deps.storage)?;
             execute_claim_creator_fees(deps, env, info, transaction_deadline)
         }
         ExecuteMsg::RetryFactoryNotify {} => {
-            // Retries NotifyThresholdCrossed to the factory. Standard
-            // pools never cross a threshold, so there's nothing to retry.
+            // Retries NotifyThresholdCrossed to the factory.
             execute_retry_factory_notify(deps, env, info)
         }
         // distribution-liveness primitives.
@@ -660,8 +650,7 @@ fn execute_update_creator_config_from_factory(
 /// NFT: sends the matching `AcceptOwnership` back to the NFT and flips
 /// `pool_state.nft_ownership_accepted`.
 ///
-/// Mirrors `standard-pool`'s handler of the same name. Pre-this-handler
-/// the commit pool relied on a lazy `AcceptOwnership` emitted by
+/// Pre-this-handler the pool relied on a lazy `AcceptOwnership` emitted by
 /// `trigger_threshold_payout` (the first time threshold crossed), which
 /// left the factory as the NFT contract's actual owner for the entire
 /// pre-threshold window. The synchronous accept at finalize closes
@@ -717,11 +706,12 @@ fn execute_accept_nft_ownership(
 /// Re-sends `NotifyThresholdCrossed` to the factory when the initial
 /// notification (dispatched via `reply_on_error` during threshold-crossing
 /// commit) failed. This entrypoint is callable by ANYONE; the factory's
-/// POOL_THRESHOLD_MINTED idempotency check prevents a successful mint from
-/// firing twice. Reply handling clears PENDING_FACTORY_NOTIFY on success.
+/// POOL_THRESHOLD_CROSSED idempotency check prevents a successful notify
+/// from registering twice. Reply handling clears PENDING_FACTORY_NOTIFY
+/// on success.
 ///
-/// Why permissionless: recovery-path tx. If a factory misconfiguration or
-/// expand-economy stall caused the initial notification to fail, we want
+/// Why permissionless: recovery-path tx. If a factory misconfiguration
+/// caused the initial notification to fail, we want
 /// anyone — a keeper, a committer, Bluechip ops — to be able to nudge the
 /// system back to consistent state once the root cause is fixed. The worst
 /// an abusive caller can do is waste their own gas on a factory reject.
@@ -738,11 +728,9 @@ pub fn execute_retry_factory_notify(
     }
 
     let pool_info = POOL_INFO.load(deps.storage)?;
-    // Re-supply the ORIGINAL threshold-crossing time so the
-    // factory's bluechip-mint decay formula uses the same `s` reference
-    // as it would have at first-attempt. Without this, a retry after a
-    // long delay would receive a smaller mint than the pool was
-    // entitled to at original crossing.
+    // Re-supply the ORIGINAL threshold-crossing time so the factory
+    // records the same crossing time it would have recorded at
+    // first-attempt, regardless of how long the retry took.
     //
     // THRESHOLD_CROSSED_AT is saved alongside IS_THRESHOLD_HIT inside
     // `trigger_threshold_payout`. If PENDING_FACTORY_NOTIFY is true,
@@ -856,9 +844,8 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
             //
             // The dispatch arm is gated on `PENDING_MINT_REPLIES.has(id)`
             // so any id ≥ BASE without a stash entry falls through to the
-            // canonical "unknown reply id" handler below (preserves the
-            // pre-fix invariant and keeps the unknown-id regression test
-            // valid).
+            // canonical "unknown reply id" handler below (keeps the
+            // unknown-id regression test valid).
             let pending = PENDING_MINT_REPLIES
                 .load(deps.storage, msg.id)
                 .map_err(|e| {
@@ -973,12 +960,10 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
         MigrateMsg::UpdateVersion {} => {}
     }
 
-    // Reset the price accumulator on every migrate. Mirrors the equivalent
-    // block in `standard-pool::contract::migrate`; the rationale (clean
+    // Reset the price accumulator on every migrate. Gives a clean
     // unit-scale boundary across a `PRICE_ACCUMULATOR_SCALE` change in
-    // `pool_core::swap::update_price_accumulator`) lives there. Costs at
-    // most one factory oracle TWAP round per upgrade, which the breaker /
-    // snapshot machinery handles cleanly.
+    // `pool_core::swap::update_price_accumulator`. Costs at most one
+    // external-TWAP round per upgrade.
     if let Ok(mut state) = POOL_STATE.load(deps.storage) {
         state.price0_cumulative_last = cosmwasm_std::Uint128::zero();
         state.price1_cumulative_last = cosmwasm_std::Uint128::zero();

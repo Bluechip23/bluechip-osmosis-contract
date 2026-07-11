@@ -1,11 +1,11 @@
-//! Shared wire-format types used by both creator-pool and standard-pool.
+//! Shared wire-format types for consuming pool contract crates.
 //!
 //! Split boundary:
 //! - Shared (this module): CommitFeeInfo, PoolConfigUpdate, Cw20HookMsg,
 //! CommitStatus, and every response struct returned by a query
 //! handler that lives in `pool_core::query`.
-//! - Per-contract (in creator-pool / standard-pool): ExecuteMsg,
-//! QueryMsg, MigrateMsg, PoolInstantiateMsg / CommitPoolInstantiateMsg,
+//! - Per-contract (in creator-pool): ExecuteMsg,
+//! QueryMsg, MigrateMsg, PoolInstantiateMsg,
 //! and commit-only response types (FactoryNotifyStatusResponse,
 //! PoolCommitResponse, CommitterInfo, LastCommittedResponse).
 //!
@@ -32,8 +32,7 @@ pub struct PoolConfigUpdate {
     pub lp_fee: Option<Decimal>,
     pub min_commit_interval: Option<u64>,
     /// Per-pool override for the pre-threshold minimum commit value
-    /// (in USD, 6 decimals). Creator-pool only; ignored by standard
-    /// pools (which have no commit phase). When `Some(_)` the pool
+    /// (in USD, 6 decimals). When `Some(_)` the pool
     /// updates `CommitLimitInfo.min_commit_usd_pre_threshold` to the
     /// new value; `None` leaves it unchanged. Bounds enforced by the
     /// factory at propose time and re-enforced by the pool's wrapper
@@ -52,16 +51,14 @@ pub struct PoolConfigUpdate {
     // `usd_payment_tolerance_bps` removed — see `PoolSpecs` doc-comment
     // in `pool-core::state` for rationale.
     //
-    // `oracle_address` removed. Per-pool oracle rotation is a
-    // documented admin-compromise vector: a malicious oracle can return
+    // There is deliberately no per-pool price-source knob. One would
+    // be an admin-compromise vector: a malicious source can return
     // arbitrary `ConversionResponse.amount`, letting a $5 commit register
     // as a $25k threshold-cross and capturing the full pool seed +
-    // creator/bluechip rewards on a single pool. There is no current
-    // operational need to point an individual pool at a non-factory
-    // oracle. If a future architecture splits the oracle off the
-    // factory, the accepted re-routing path is a coordinated wasm
-    // migration via `UpgradePools` (already 48h-timelocked + batched)
-    // that updates `ORACLE_INFO` directly, not a per-pool config knob.
+    // creator rewards on a single pool. USD pricing is pinned to the
+    // factory (`factory::usd_price`); re-routing, if ever needed, is a
+    // coordinated wasm migration via `UpgradePools` (already
+    // 48h-timelocked + batched), not a per-pool config knob.
 }
 
 #[cw_serde]

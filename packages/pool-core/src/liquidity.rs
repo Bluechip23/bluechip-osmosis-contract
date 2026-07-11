@@ -5,8 +5,8 @@
 //! - [`fees`]    — LP-fee collection with creator-pot clip routing
 //!
 //! Every public handler is re-exported at the `liquidity::` path so
-//! downstream crates (`creator-pool`, `standard-pool`) can continue
-//! to import them as `pool_core::liquidity::execute_*` unchanged.
+//! consuming contract crates can continue to import them as
+//! `pool_core::liquidity::execute_*` unchanged.
 
 pub mod add;
 pub mod deposit;

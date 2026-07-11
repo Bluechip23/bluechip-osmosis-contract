@@ -1,226 +1,158 @@
-# Bluechip Protocol — Security Audit
-
-> **⚠️ Strip-down notice (Osmosis relaunch).** The internal price oracle
-> (bespoke TWAP engine + Pyth), keeper bounties, the expand-economy
-> reservoir, and the bluechip mint-reward machinery have been **removed**
-> from the contracts. Pools now pair against the host chain's main native
-> asset (`bluechip_denom`, e.g. `uosmo`). The commit threshold remains
-> **USD-denominated** (`commit_threshold_limit_usd`), but commits are now
-> valued via Osmosis's chain-native `x/twap` module over a configured
-> native/USDC pool (`factory::usd_price`) — a single stateless chain query
-> with no keepers, no Pyth pusher, and no bespoke oracle to attack.
-> Sections of this document describing the old oracle engine, bounties, or
-> expand-economy are **historical** and no longer reflect the deployed
-> contracts. See **`OSMOSIS_MIGRATION_AUDIT.md`** for the review of the
-> migration itself, the post-migration status of every finding below
-> (F-4/F-5/F-6 are moot — their subsystems were removed; F-7 is
-> partially fixed; F-3/M-1/I-1/L-1 carry forward), and the current test
-> count (464; the "644 tests" below reflects the pre-migration tree).
+# Bluechip Contracts — Security Review
 
 **Scope:** all production CosmWasm contracts — `factory` (including the
-~2,860-line internal price oracle), `creator-pool`, `standard-pool`,
-`expand-economy`, `router`, and the shared `pool-core` /
-`pool-factory-interfaces` libraries. Off-chain `keepers/` and the
-build/release tooling were reviewed at the configuration level.
+x/twap USD-pricing module `usd_price`), `creator-pool`, `router` — and
+the shared `pool-core` / `pool-factory-interfaces` libraries. The off-chain `keepers/` and build/release tooling were
+reviewed at the configuration level.
 
-**Method:** five independent line-by-line passes (one per subsystem), every
-finding re-verified directly against source. The full workspace compiles
-clean; the deterministic test suite is green (644 tests). One stateful-fuzz
-invariant violation was reproduced on the clean tree and is recorded below
-as F-9.
+**Method:** multiple independent review passes — verification of every
+security control with file-level evidence, per-hunk adversarial review
+of the fund-moving paths, a line-by-line deep dive on the x/twap
+pricing route, and a residual-risk / test-coverage pass — with every
+finding re-verified directly against source.
 
-**Threat model:** factory admin / keepers / Pyth publishers are trusted;
-the adversary is any unprivileged caller (committer, trader, LP,
-keeper-caller) and, for standard pools, a hostile CW20 token contract. Pool
+**Evidence baseline:** full workspace suite **377 tests, 0 failures**;
+`cargo clippy --workspace --tests -- -D warnings` clean; release wasm
+builds verified; CI enforces feature-clean production artifacts
+(`ci/check_prod_build.py` + Makefile hard-fail).
+
+**Threat model:** the factory admin is trusted; the adversary is any
+unprivileged caller (committer, trader, LP, keeper-caller). The only
+CW20 inside any pool is the vanilla cw20-base token the factory itself
+mints, so no third-party token code executes in the system. Pool
 creation is permissionless.
 
 ---
 
 ## Headline result
 
-No Critical, and no unprivileged-exploitable High, was found in any on-chain
-contract. The codebase is genuinely hardened: checked / `Uint256` arithmetic
-throughout, checks-effects-interactions ordering on every fund-moving path,
-multiple independent no-double-mint gates on the threshold crossing, and
-conservation invariants that hold under adversarial tracing. The prior
-build-hygiene gap (H-1) is remediated and verified.
+No Critical, and no unprivileged-exploitable High, in any on-chain
+contract. The codebase is hardened where it counts: checked / `Uint256`
+arithmetic throughout, checks-effects-interactions ordering on every
+fund-moving path, four independent gates on the threshold crossing, and
+conservation invariants that hold under adversarial tracing. The open
+items below are Low/Info, consciously accepted economic designs, or
+operational duties.
 
-Two Medium findings reachable by an unprivileged actor — **F-1** (hostile
-CW20 freezing an LP's withdrawals) and **F-2** (router routing to an
-unvalidated pool address) — are **fixed on this branch**. The remainder are
-Low / Informational or by-design economic decisions.
+## Open findings
 
----
+| ID | Sev | Area | Finding |
+|----|-----|------|---------|
+| S-1 | Low | pricing | No on-chain liquidity/depth floor on the pricing pool. `x/twap` never reports "stale": a draining pool keeps returning prices while the cost of manipulating them silently falls. **Mitigation is operational** — alarm on `pricing_pool_id` liquidity and re-point it via the 48h config flow if OSMO/USDC depth ever migrates (see `RUNBOOK.md`). The `RATE_MAX` ceiling bounds the upside of any spike. |
+| S-2 | Info | pricing | Arithmetic (not geometric) TWAP, window floor 300s (default 600s). Arithmetic means upward spikes contribute linearly — the attacker-profitable direction. Consider `GeometricTwapToNow` if hardening further. |
+| S-3 | Med (economic) | creator-pool | The creator's 325k-token allocation is unvested at crossing, and creators may commit to their own pools (self-fundable threshold). Accepted design; consider vesting before mainnet — this is the first question a reviewer will ask. |
+| S-4 | High (ops) | governance | Until the factory admin, contract (migration) admin, and `PROTOCOL_WALLET` are a multisig, a single leaked key controls the protocol, and every in-contract 48h timelock is advisory. **Pre-mainnet requirement** — see `docs/MULTISIG.md`. |
+| S-5 | Low | migrate | Migrate handlers enforce semver downgrade protection but not the cw2 contract-*name*; and the router has **no migrate entry point** (changing it means redeploying and re-pointing integrators). |
+| S-6 | Low | queries | `CumulativePrices` reads live balances (which include fee reserves and pots), so the externally-consumable TWAP tail is donation-manipulable. `Simulation` / `ReverseSimulation` quote tracked reserves and are unaffected; no internal consumer reads the accumulator. Integrators should not price off `CumulativePrices` without depth checks. |
+| S-7 | Low | verification | Coverage gaps: the pricing fixed-point math (`twap_dec_to_rate` / `native_to_usd` / `usd_to_native_at_rate`) is unfuzzed (`fuzz_threshold_check` models it only approximately); there is no stateful property harness over the commit → threshold → swap/liquidity lifecycle; and creator-pool tests pin the USD rate at 1:1, so no scenario varies the rate mid-lifecycle. See `FUZZING.md`. |
+| S-8 | Info | deploy | `PROTOCOL_WALLET` defaults to the deployer and the contract admin moves to the multisig only post-instantiate — a deploy-key-as-admin window. `deploy_osmosis.sh` refuses mainnet deploys without an explicit `PROTOCOL_WALLET`; keep the window short. |
+| S-9 | Info | events | `ContinueDistribution` emits a `bounty_paid` attribute even though no bounty mechanism exists (always `false`); cosmetic, but indexers should not key on it. |
 
-## Findings summary
+## Verified defenses (with the properties that were checked)
 
-| ID | Severity | Area | Status |
-|----|----------|------|--------|
-| F-1 | Medium | pool-core | Hostile CW20 spoofs `cw20_msg.sender` to freeze a victim LP's withdrawals via a shared rate-limit map. **Fixed.** |
-| F-2 | Medium | router | Hop `pool_addr` never validated against the factory registry; malicious-frontend fund loss. **Fixed.** |
-| F-3 | Medium→Info | standard-pool | Balance-verify is read *from the token itself*, so a balance-lying CW20 can drain *its own pool's* paired asset. Pool-isolated; docs overclaim "hostile-CW20 safe." **Open (decision).** |
-| F-4 | Low | factory | `NotifyThresholdCrossed.crossed_at` has no lower bound; first crossing anchors the global mint-decay schedule. **Open.** |
-| F-5 | Low | oracle | `UpdateOraclePrice` 60s cooldown is bypassed during the post-reset buffer (`last_update` stays 0). **Open.** |
-| F-6 | Low | creator-pool | Oracle staleness gate fail-opens when the factory returns `timestamp == 0`. **Open.** |
-| F-7 | Low | pool-core | `Simulation` / `CumulativePrices` queries price against live balances, not tracked reserves. **Open.** |
-| F-8 | Low (ops) | keepers | Default `ORACLE_POLL_INTERVAL_MS=330s` contradicts the on-chain 120s staleness gate. **Fixed** (default lowered to 70s). |
-| F-9 | Low–Med | pool-core | First deposit with a highly asymmetric ratio could leave one reserve below `MINIMUM_LIQUIDITY` (found via the stateful fuzz harness; pre-existing). **Fixed.** |
-| — | Info | various | Dead ungated oracle getters; doc/const mismatches; unbounded never-pruned maps; broken `optimize-pool` Makefile target; stale committed `*.wasm` blobs; "expand-economy" disburses from a pre-funded reservoir (not a literal mint). |
+**Pricing (factory `usd_price`)**
+- Fail-closed end-to-end: any TWAP query error, zero/dust price, or
+  price above the `RATE_MAX` **$10,000-per-native sanity ceiling**
+  reverts the valuation — a commit that cannot be priced correctly
+  cannot be priced at all. The ceiling also catches a wrong-decimals
+  quote denom (an 18-decimal stable inflates the rate ~1e12×).
+- Live probe of the candidate pricing route at **instantiate, propose,
+  and apply** (`validate_factory_config` →
+  `usd_price::probe_native_usd_rate`): a typo'd `pricing_pool_id`, a
+  pool missing a denom, or a pool younger than the window fails
+  instantly instead of as a chain-wide commit outage. Regression tests:
+  `instantiate_rejects_dead_pricing_route`,
+  `propose_rejects_dead_pricing_route`, `apply_reprobes_pricing_route`,
+  `propose_rejects_wrong_decimals_quote_rate`,
+  `rejects_rates_above_sanity_ceiling`.
+- Rounding is floor-directed **against the committer** on both the rate
+  and the valuation; the crossing's inverse conversion reuses the
+  captured rate, so ledger/threshold drift is ≤1 base unit and reverts
+  via checked arithmetic rather than misallocating. No price is cached;
+  there is no update cadence to manipulate.
 
-Carried forward from the prior pre-audit (by-design / accepted, unchanged):
-**M-1** unlocked 325k creator allocation + self-fundable threshold (soft-rug
-economics — consider vesting); **M-2** post-reset TWAP dilution; **M-4**
-pre-anchor flat fallback fee; **I-1** single-EOA migrate+admin key (the
-dominant caveat — every in-contract timelock is advisory until this becomes
-a multisig/governance key); **L-1** missing cw2 contract-name check on
-migrate.
+**Threshold crossing (creator-pool)**
+- One-shot behind four independent gates: the dispatcher's
+  `THRESHOLD_PROCESSING` latch and `IS_THRESHOLD_HIT` routing, fail-fast
+  entry gates in both crossing handlers, the load-bearing
+  `IS_THRESHOLD_HIT` check-then-set in `trigger_threshold_payout`, and
+  the factory-side `POOL_THRESHOLD_CROSSED` idempotency flag (gated on
+  the registered pool as sender).
+- Payout components are pinned to canonical constants and validated on
+  both sides; the CW20 mint cap equals the **exact** payout total
+  (1.2M tokens), so over-mint fails closed at cw20-base. Ledger
+  conservation holds on exact-hit and excess paths.
+- The crossing transaction's excess swap is capped at **3% of
+  reserves** with the remainder **refunded**; a 5% spread guard applies;
+  a 2-block cooldown plus a 100-block per-tx swap-cap ramp
+  (0.5% → 100%) bounds post-crossing MEV.
 
----
+**Commit path**
+- Denom validation is triple-gated (asset-info equality,
+  `bluechip_denom` match, `must_pay` exact amount) — no
+  worthless-denom credit path. One USD rate is captured per transaction
+  and threaded through every conversion. Floors: $5 pre-threshold /
+  $1 post (admin ceiling $1,000). 13s per-wallet rate limit.
 
-## Fixed on this branch
+**LP / liquidity (pool-core)**
+- Fee-growth checkpoint accounting prevents pre-deposit and double
+  claims; `CollectFees` pays without touching the position. Every
+  position op is NFT-ownership-gated.
+- Liquidity operations use a **dedicated cooldown map keyed on the real
+  signer**, so a hostile CW20's `Receive` hook cannot stamp an LP's
+  withdrawal cooldown (regression:
+  `swap_and_liquidity_rate_limits_use_independent_maps`).
+- First deposit requires BOTH credited sides ≥ `MINIMUM_LIQUIDITY` and
+  locks 1000 LP units unwithdrawably (regression:
+  `first_deposit_rejects_subfloor_reserve_side`); reserves are
+  internally tracked, so donations cannot inflate share price; removals
+  below the floor auto-pause the pool.
+- Emergency withdraw is two-phase (config-set delay) with LP shares
+  escrowed for a 1-year claim window; claims hard-close after the sweep
+  so the snapshot ledger cannot go inconsistent. Drains route to the
+  protocol wallet, never the factory.
 
-### F-1 (Medium) — Hostile CW20 freezes a victim LP's withdrawals
-`packages/pool-core/src/swap.rs`, `generic.rs`, `state.rs`,
-`liquidity/{deposit,add,remove}.rs`
+**Router**
+- Every hop's pool address is validated against the factory registry —
+  and its declared (offer, ask) against the pool's real sides — before
+  any funds move (regressions: `route_through_unregistered_pool_rejected`,
+  `route_with_mislabeled_pair_rejected`). `minimum_receive = 0` is
+  rejected (`router_rejects_zero_minimum_receive`); per-hop `max_spread`
+  is pinned to the pools' 5% hard cap so `minimum_receive` is the
+  binding end-to-end slippage control. Simulations quote tracked
+  reserves and error cleanly on zero-reserve pools
+  (`simulation_on_zero_reserves_errors_cleanly_instead_of_panicking`).
 
-The CW20 swap path took the rate-limit identity from `cw20_msg.sender`
-(`swap.rs`), a field the *token contract* constructs in its `Receive` hook.
-For an arbitrary standard-pool CW20 that value is attacker-controlled. It was
-written into the shared `USER_LAST_COMMIT` map, which the liquidity-removal
-paths also read keyed on the real signer. A hostile token could therefore
-stamp a victim's key every <13s and indefinitely block their
-`RemoveLiquidity` with `TooFrequentCommits` — removing their only exit while
-the attacker worked the paired side.
+**Factory governance surface**
+- Every privileged `ExecuteMsg` is admin-gated; the permissionless
+  surface is exactly {`Create` (flat fee +
+  1h/address rate limit), `NotifyThresholdCrossed` (registered-pool
+  sender + idempotent), `PruneRateLimits` (batch-clamped)}. All
+  config / pool-config / upgrade flows are 48h propose→apply with no
+  early-apply, no replay, and no silent overwrite of a pending
+  proposal. Reply-chain IDs are structurally unforgeable; pair
+  uniqueness is enforced at registration.
 
-**Fix:** liquidity operations (deposit / add / remove) now use a dedicated
-`USER_LAST_LIQUIDITY_OP` map keyed only on the real `info.sender`; swaps and
-commits keep `USER_LAST_COMMIT`. No swap, spoofed or not, can ever stamp a
-liquidity-op cooldown. Regression test:
-`pool-core … generic::tests::swap_and_liquidity_rate_limits_use_independent_maps`.
+**Build hygiene**
+- Contract crates ship `default = []`; the deployable factory artifact
+  is the feature-empty `prod` optimizer build, enforced by a Makefile
+  hard-fail and CI's `prod-artifact-guard`; the `integration_short_timing`
+  test feature cannot reach a shipped artifact.
 
-### F-2 (Medium) — Router did not validate hop pool addresses
-`router/src/execution.rs`, `factory/src/query.rs`,
-`packages/pool-factory-interfaces/src/{lib,routing}.rs`
+## Operational requirements
 
-`validate_route` checked only the route's internal shape; execution
-dispatched straight to the caller-supplied `pool_addr`, and the stored
-`factory_addr` was dead code. A malicious frontend could route a user's
-funds to an attacker contract with `minimum_receive` as the only backstop.
+Codified in `RUNBOOK.md`: the once-a-minute `ConvertNativeToUsd` canary
+probe, a liquidity-floor alarm on the pricing pool (S-1), the
+distribution keeper under supervision, and calendared two-step
+execution of every 48h timelock.
 
-**Fix:** added a factory `PoolByAddress` registry query and a router step
-that, for every hop, confirms the address is a registered pool and that the
-declared `(offer, ask)` are that pool's two real sides — before any funds
-move. `factory_addr` is now load-bearing. Regression tests:
-`router … route_through_unregistered_pool_rejected`,
-`route_with_mislabeled_pair_rejected`.
+## Priorities
 
-### F-9 (Low–Medium) — First deposit could leave a reserve below MINIMUM_LIQUIDITY
-`packages/pool-core/src/liquidity_helpers.rs`
-
-`calc_liquidity_for_deposit` floored only the geometric mean
-(`sqrt(amount0·amount1) > MINIMUM_LIQUIDITY`) on the first deposit, so a
-highly asymmetric seed such as `(20, 500_000_000)` passed
-(`sqrt(20·5e8) = 100_000`) yet left `reserve0 = 20` — below the floor the swap
-path and `maybe_auto_pause_on_low_liquidity` both assume every live pool
-upholds, leaving the pool swap-broken on one side. Surfaced by the stateful
-fuzz harness (`minimum_liquidity_breached`); it predated and was not
-introduced by F-1/F-2.
-
-**Fix:** the genuinely-empty first deposit now requires BOTH credited amounts
-`≥ MINIMUM_LIQUIDITY`. Verified by the fuzz harness that found it (now green),
-a 3,000-case stateful run (clean), and a deterministic regression test
-(`standard-pool … first_deposit_rejects_subfloor_reserve_side`).
-
----
-
-## Open findings (recommended next)
-
-### F-3 — "hostile-CW20 safe" is overstated for standard pools
-The deposit/swap balance checks query the token's balance *from the token
-contract*, so a fully hostile, balance-lying CW20 defeats them and can drain
-the paired asset **within its own pool**. This is **pool-isolated** — it
-cannot reach other pools or protocol funds (the swap only touches the one
-pool whose `asset_infos` contain that token), so it is the standard
-permissionless-AMM LP risk, not a Critical. But the README/pre-audit describe
-standard pools as hostile-CW20-safe, which is inaccurate for the
-balance-lying case. **Action:** either add a token allowlist for standard
-pools, or correct the docs and disclose the residual LP risk.
-
-### F-4 — Caller-supplied `crossed_at` anchors the global mint schedule
-`factory/src/.../admin.rs`, `mint_bluechips_pool_creation.rs`. The clamp
-rejects only future timestamps; the first crosser's `crossed_at` becomes
-`FIRST_THRESHOLD_TIMESTAMP`, and larger elapsed time *increases* later pools'
-mint. A buggy/compromised registered pool could push every later pool toward
-the cap (bounded by the daily expansion cap; not unprivileged-reachable
-today). **Action:** anchor to `env.block.time` or add a lower-bound clamp.
-
-### F-5 — Oracle cooldown bypass in the post-reset buffer
-`factory/src/internal_bluechip_price_oracle.rs`. After a reset `last_update`
-is 0; the buffer branches early-return without advancing it, so the 60s
-floor never fires and an attacker can call `UpdateOraclePrice` every block,
-reaching the 12-failure force-accept in ~12 blocks instead of ~12 keeper
-cycles. Bounded by warm-up (strict consumers stay frozen). **Action:** stamp
-a `last_attempt_time` on every entry.
-
-### F-6 — Staleness gate fail-opens on `timestamp == 0`
-`creator-pool/src/swap_helper.rs`. The 120s gate is guarded by
-`timestamp > 0 && …`; a live non-zero rate paired with `timestamp == 0`
-(genesis/misconfig) skips the staleness check. Not unprivileged-reachable.
-**Action:** treat `timestamp == 0` as stale (fail closed).
-
-### F-7 — Query pricing diverges from execution pricing
-`packages/pool-core/src/query.rs`. `Simulation` / `ReverseSimulation` /
-`CumulativePrices` source pool size from live balances, which include
-`fee_reserve + creator_pot + donations`, whereas swaps execute against
-tracked reserves. External integrators (routers/feeds) see biased numbers and
-a donation-manipulable TWAP tail. The protocol's own oracle reads tracked
-reserves and is unaffected. **Action:** use `POOL_STATE.reserve*` in these
-handlers.
-
-### F-8 — Keeper default poll interval contradicts the staleness gate
-`keepers/src/lib/config.ts`. `ORACLE_POLL_INTERVAL_MS` defaulted to 330s
-(sized for the retired 300s on-chain interval), but the pool-side staleness
-gate is 120s. Default-configured keepers left commit valuations stale-blocked
-for most of each cycle. **Action:** lower the default to ≤90s.
-**Resolution:** default lowered to 70s (matching RUNBOOK's 65-75s cadence);
-`.env.example` and README updated to match.
-
----
-
-## Verified clean (high-value confirmations)
-
-- **Commit/threshold conservation:** ledger sum ≤ threshold; four
-  independent no-double-cross gates; distribution ≤ 500k always; CW20 1.2M
-  cap = exact sum of payouts (over-mint fails closed at cw20-base). Bank vs
-  reserves reconcile on both exact-hit and excess paths.
-- **Oracle math:** trapezoidal TWAP; correct price direction (no inversion);
-  `PRICE_PRECISION`/`PRICE_ACCUMULATOR_SCALE` consistent on every
-  multiply/divide; accumulator overflow fails closed; Pyth gate ordering is
-  all-AND with negative/zero/`expo>0` rejected; cache bounded by
-  `publish_time`. Strict-vs-best-effort bifurcation is complete across crates
-  — no stale/warm-up price can leak into commit valuation.
-- **Liquidity:** first-depositor `MINIMUM_LIQUIDITY` lock enforced and
-  unwithdrawable; donations cannot inflate share price (reserves are
-  internally tracked); fee-growth checkpoints prevent claiming pre-deposit or
-  double fees; NFT ownership gates every position op; two-phase emergency
-  withdraw + 1-year claim math cannot over-claim.
-- **Factory:** every privileged `ExecuteMsg` is admin-gated; reply-chain IDs
-  are unforgeable; timelocks have no early-apply/replay; the decay `x` is not
-  attacker-inflatable.
-- **expand-economy:** factory-only disbursement; denom never caller-
-  controlled; correct 24h sliding-window cap; a failed/skipped payout does
-  not burn budget.
-- **Build hygiene (H-1):** remediation holds — empty default features + a
-  `prod` empty-feature optimizer build + a Makefile hard-fail + a CI static
-  guard; the `mock` / `integration_short_timing` features are confined to
-  `factory` and `expand-economy`.
-
----
-
-## Priority
-
-1. **F-3 decision** — allowlist standard-pool tokens *or* correct the
-   "hostile-CW20 safe" docs.
-2. **F-5, F-6, F-8** — cheap fail-closed/hardening changes.
-3. **Pre-mainnet (non-code):** multisig/governance for the migrate+admin key
-   (I-1); a vesting decision on the unlocked creator allocation (M-1).
+1. **S-4** — multisig for admin/migration/treasury before mainnet
+   (`docs/MULTISIG.md`).
+2. **S-3** — an explicit vesting decision on the creator allocation.
+3. **S-1 + S-7** — stand up the pricing-pool liquidity alarm; restore
+   fuzz/property coverage over the pricing math and the
+   commit→threshold→swap/liquidity lifecycle.
+4. **S-5/S-6** — cheap hardening: cw2 name check on migrate, a router
+   migrate entry point, tracked-reserve sourcing for `CumulativePrices`.

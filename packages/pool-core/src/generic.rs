@@ -91,7 +91,7 @@ pub fn update_pool_fee_growth(
 /// Swap / commit rate limit. Keyed in `USER_LAST_COMMIT`.
 ///
 /// On the CW20 swap path `sender` may be attacker-influenced (a hostile
-/// standard-pool token controls `cw20_msg.sender`). That is tolerable here
+/// CW20 token controls `cw20_msg.sender`). That is tolerable here
 /// because this map gates only swaps/commits — never liquidity withdrawals,
 /// which live in the separate `USER_LAST_LIQUIDITY_OP` map. See
 /// `check_liquidity_rate_limit` and the `USER_LAST_LIQUIDITY_OP` doc.
@@ -181,12 +181,12 @@ pub fn get_bank_transfer_to_msg(
     Ok(transfer_bank_cosmos_msg)
 }
 
-/// Canonical "unknown reply id" message format shared by the
-/// creator-pool and standard-pool `reply()` entry points. Including
+/// Canonical "unknown reply id" message format for consuming
+/// contracts' `reply()` entry points. Including
 /// the `pool_kind` discriminator in the message makes off-chain log
 /// scrapers able to filter by pool kind without parsing the
-/// surrounding event context. Use [`crate::state::POOL_KIND_STANDARD`]
-/// or [`crate::state::POOL_KIND_COMMIT`] for `pool_kind`.
+/// surrounding event context. Use [`crate::state::POOL_KIND_COMMIT`]
+/// (or [`crate::state::POOL_KIND_STANDARD`]) for `pool_kind`.
 pub fn unknown_reply_id_msg(pool_kind: &str, reply_id: u64) -> String {
     format!("{}-pool reply: unknown reply id {}", pool_kind, reply_id)
 }

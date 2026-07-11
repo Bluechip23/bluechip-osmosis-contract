@@ -101,28 +101,8 @@ pub enum ExecuteMsg {
         recovery_type: RecoveryType,
     },
 
-    // ---- Standard pools ----
-    //
-    // Permissionless creator-of-its-own-pool entry point for plain xyk
-    // pools around two pre-existing assets. Caller pays the configured
-    // `standard_pool_creation_fee` (a flat amount of the chain's native
-    // asset) which is forwarded to `bluechip_wallet_address`.
-    //
-    // Pair shape constraints (enforced in the handler): no self-pair;
-    // any `Bluechip { denom }` entry must match the canonical
-    // bluechip_denom; any `CreatorToken { contract_addr }` entry must
-    // resolve as a real CW20 (validated via `TokenInfo {}` query at
-    // creation time).
-    //
-    // `label` is the on-chain label string passed to the pool's
-    // wasm instantiate — used by block explorers and operator tooling.
-    CreateStandardPool {
-        pool_token_info: [TokenType; 2],
-        label: String,
-    },
     // permissionless storage hygiene. Iterates the
-    // per-address rate-limit maps (commit-pool create, standard-pool
-    // create) and removes entries older than 10× the cooldown window.
+    // per-address rate-limit map (commit-pool create) and removes entries older than 10× the cooldown window.
     // `batch_size` caps work per call so large maps don't exceed gas
     // limits; defaults to 100, hard-capped at 500. Anyone may call;
     // there is no bounty (the work is cheap and ops/keepers run it as

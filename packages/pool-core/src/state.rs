@@ -353,10 +353,11 @@ pub const REENTRANCY_LOCK: Item<bool> = Item::new("rate_limit_guard");
 /// or errors (causing the entire transaction to roll back).
 ///
 /// Only set / read when `verify_balances == true` is passed into the
-/// shared deposit/add helpers — i.e. by standard-pool, where the CW20
-/// can be any third-party contract. Creator-pool's freshly minted
-/// `cw20-base` is trusted (no transfer fee, no rebase) and never
-/// triggers this path.
+/// shared deposit/add helpers. The creator pool routes its CW20
+/// deposits through this path as defense-in-depth: its factory-minted
+/// `cw20-base` token charges no transfer fee and never rebases, but
+/// verification keeps reserves honest against any future third-party
+/// CW20 integration.
 ///
 /// `cw20_side*_addr == None` for non-CW20 sides; balances on those
 /// sides are not snapshotted (native bank transfers are exact).
@@ -396,7 +397,7 @@ pub const DEPOSIT_VERIFY_CTX: Item<DepositVerifyContext> = Item::new("deposit_ve
 
 /// Reply ID for `DEPOSIT_VERIFY_CTX` — emitted by the
 /// `verify_balances == true` deposit/add path on its final SubMsg, and
-/// dispatched in standard-pool's `reply` entry point to
+/// dispatched in the consuming contract's `reply` entry point to
 /// `pool_core::balance_verify::handle_deposit_verify_reply`. Numeric
 /// value is high enough to not collide with any factory or creator-pool
 /// reply ID conventions.
@@ -421,12 +422,12 @@ pub const USER_LAST_COMMIT: Map<&Addr, u64> = Map::new("user_last_commit");
 /// remove), kept in a SEPARATE map from `USER_LAST_COMMIT` (which gates
 /// swaps and commits).
 ///
-/// The decoupling is load-bearing security, not cosmetic. On standard
-/// pools the CW20 swap path (`pool_core::swap::execute_swap_cw20`) derives
-/// its rate-limit key from `cw20_msg.sender`, a field the *token contract*
-/// constructs in its `Receive` hook. A hostile CW20 (standard pools accept
-/// arbitrary third-party tokens) can therefore set that key to any address.
-/// If swaps and liquidity ops shared one cooldown map, a hostile token
+/// The decoupling is load-bearing security, not cosmetic. The CW20 swap
+/// path (`pool_core::swap::execute_swap_cw20`) derives its rate-limit key
+/// from `cw20_msg.sender`, a field the *token contract* constructs in its
+/// `Receive` hook — so a hostile CW20 could set that key to any address.
+/// The pool's factory-minted CW20 is trusted today, but if swaps and
+/// liquidity ops shared one cooldown map, a hostile token
 /// could stamp a victim LP's key via spoofed swaps and indefinitely block
 /// the victim's `RemoveLiquidity` (their only exit) with
 /// `TooFrequentCommits`. Liquidity ops are always keyed on the real
@@ -435,48 +436,19 @@ pub const USER_LAST_COMMIT: Map<&Addr, u64> = Map::new("user_last_commit");
 /// withdrawal or deposit.
 pub const USER_LAST_LIQUIDITY_OP: Map<&Addr, u64> = Map::new("user_last_liquidity_op");
 
-/// Standard pool writes `true` at instantiate (no threshold gate); creator
-/// pool flips it in the threshold-crossing commit path. Shared handlers
-/// read via `query_check_commit`.
+/// Written `false` at pool instantiate; flipped `true` by the
+/// threshold-crossing commit path. Shared handlers read via
+/// `query_check_commit`.
 pub const IS_THRESHOLD_HIT: Item<bool> = Item::new("threshold_hit");
 
 /// Creator-claimable pot that receives the portion of LP fees "clipped"
-/// away from small positions by `calculate_fee_size_multiplier` on
-/// **creator pools**. On standard pools the multiplier is bypassed
-/// (every position uses `Decimal::one()`) so no clip is ever produced and
-/// this pot stays empty during normal operation — dust-griefing
-/// protection on standard pools is enforced via the
-/// `MIN_STANDARD_POOL_POSITION_LIQUIDITY` deposit/add floor instead. The
-/// `emergency_withdraw_core_drain` sweep still reads this Item
-/// unconditionally as defense-in-depth (handles pre-fix records / future
-/// drift); on a healthy standard pool the swept amount is zero.
+/// away from small positions by `calculate_fee_size_multiplier`. The
+/// `emergency_withdraw_core_drain` sweep reads this Item unconditionally
+/// as defense-in-depth (handles unexpected records / future drift).
 pub const CREATOR_FEE_POT: Item<CreatorFeePot> = Item::new("creator_fee_pot");
 
-/// When `true` (default-on-load via `.unwrap_or(true)` for backwards
-/// compatibility with pre-flag fixtures), the deposit / add / remove
-/// paths route each position's `fee_size_multiplier` through
-/// `calculate_fee_size_multiplier(liquidity)` — the dust-griefing
-/// penalty originally designed for creator pools, whose clipped slice
-/// flows to `CREATOR_FEE_POT` for the creator wallet to claim.
-///
-/// When `false` (set explicitly at standard-pool instantiate), every
-/// position is created with `fee_size_multiplier = Decimal::one()` and
-/// neither add nor remove recomputes it. Standard pools have no creator
-/// wallet, so the multiplier's clipped slice would accumulate in
-/// `CREATOR_FEE_POT` with no normal-operation claim path; bypassing
-/// the multiplier eliminates that value-drain.
-///
-/// Dust-griefing protection on standard pools is preserved by the
-/// `MIN_STANDARD_POOL_POSITION_LIQUIDITY` floor enforced inside the
-/// deposit / add handlers when this flag is `false`.
-///
-/// Always read via `effective_fee_size_multiplier` (in
-/// `liquidity_helpers.rs`) — never `calculate_fee_size_multiplier`
-/// directly — so the flag is honored uniformly.
-pub const APPLY_DUST_MULTIPLIER: Item<bool> = Item::new("apply_dust_multiplier");
-
 /// emergency_withdraw reads `bluechip_wallet_address` for the drain
-/// recipient; standard pool instantiate saves a zero-valued placeholder.
+/// recipient.
 pub const COMMITFEEINFO: Item<CommitFeeInfo> = Item::new("fee_info");
 
 // Block at which post-threshold trading is allowed to resume after a
@@ -489,8 +461,8 @@ pub const COMMITFEEINFO: Item<CommitFeeInfo> = Item::new("fee_info");
 // (3%-of-reserve cap) still executes in the crossing tx itself, since
 // that swap runs before this storage item is read by any other path.
 //
-// Standard pools never cross a threshold; this item is never set on
-// them, and `may_load(...).unwrap_or(0)` makes the gate a no-op.
+// Unset until the pool crosses its threshold;
+// `may_load(...).unwrap_or(0)` makes the gate a no-op before then.
 //
 // Read by: simple_swap, execute_swap_cw20, process_post_threshold_commit.
 // Written by: process_threshold_crossing_with_excess and the
@@ -536,11 +508,10 @@ pub const POST_THRESHOLD_COOLDOWN_BLOCKS: u64 = 2;
 // the cap_bps × reserve product, so any single trade's price impact
 // is limited during the ramp window.
 //
-// Standard pools never set POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK, so the
-// ramp helper short-circuits with `None` for them and standard-pool
-// swap economics are unchanged. Pre-threshold creator pools likewise
-// never reach the helper (swap path is already gated by
-// IS_THRESHOLD_HIT).
+// Pre-threshold pools never reach the helper (the swap path is
+// already gated by IS_THRESHOLD_HIT), and
+// POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK is unset until the cross, so
+// the ramp helper short-circuits with `None` before then.
 // ---------------------------------------------------------------------------
 
 /// Number of blocks over which the per-tx swap cap ramps from
@@ -569,7 +540,7 @@ pub const POST_THRESHOLD_SWAP_CAP_END_BPS: u64 = 10_000;
 ///
 /// Returns `None` when:
 /// - the pool never crossed threshold (POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
-///   is unset — standard pool, or pre-threshold creator pool)
+///   is unset on a pre-threshold pool)
 /// - the current block is still within the cooldown window (the
 ///   separate cooldown gate handles rejection; we don't double-gate)
 /// - the ramp has fully elapsed
@@ -591,8 +562,8 @@ pub fn post_threshold_swap_cap(
         .may_load(storage)?
         .unwrap_or(0);
     if cooldown_until == 0 {
-        // Never crossed threshold — standard pool, or a creator pool
-        // pre-crossing. No cap.
+        // Never crossed threshold — the pool is still pre-crossing.
+        // No cap.
         return Ok(None);
     }
     if current_block < cooldown_until {
@@ -621,11 +592,11 @@ pub fn post_threshold_swap_cap(
 /// deflate same-block spam, loose enough that a human-driven commit
 /// flow never sees the gate.
 ///
-/// Both `creator-pool` and `standard-pool` instantiate `PoolSpecs`
-/// with this value so a future cadence change lands in one place.
+/// Pool instantiate seeds `PoolSpecs` with this value; kept in
+/// pool-core so a future cadence change lands in one place.
 pub const DEFAULT_SWAP_RATE_LIMIT_SECS: u64 = 13;
 
-/// Default LP fee charged on every swap (creator-pool + standard-pool).
+/// Default LP fee charged on every swap.
 /// 30 bps = 0.3%, the canonical Uniswap-V2 default. Tunable per-pool
 /// via the factory's 48h `ProposeConfigUpdate` flow up to [`MAX_LP_FEE`].
 pub const DEFAULT_LP_FEE: Decimal = Decimal::permille(3);
@@ -641,13 +612,9 @@ pub const MAX_LP_FEE: Decimal = Decimal::percent(10);
 pub const MIN_LP_FEE: Decimal = Decimal::permille(1);
 
 /// `pool_kind` attribute value emitted in `instantiate` responses by
-/// the standard-pool wasm. Pinned here so off-chain indexers can pin
-/// against `pool_core::state::POOL_KIND_STANDARD` rather than the raw
-/// string literal.
-pub const POOL_KIND_STANDARD: &str = "standard";
-/// `pool_kind` attribute value emitted in `instantiate` responses by
-/// the creator-pool wasm. Pinned alongside `POOL_KIND_STANDARD` so
-/// future pool kinds get added in one place.
+/// the creator-pool wasm. Pinned here so off-chain indexers can pin
+/// against `pool_core::state::POOL_KIND_COMMIT` rather than the raw
+/// string literal; future pool kinds get added in one place.
 pub const POOL_KIND_COMMIT: &str = "commit";
 
 /// Recovery window between `LAST_THRESHOLD_ATTEMPT` and the moment
@@ -777,9 +744,9 @@ mod post_threshold_swap_cap_tests {
     use super::*;
     use cosmwasm_std::testing::mock_dependencies;
 
-    /// Standard pool (POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK unset) →
+    /// Pre-threshold pool (POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK unset) →
     /// helper returns None regardless of reserve / block. Confirms the
-    /// ramp cap has zero impact on standard pools.
+    /// ramp cap has zero impact before the threshold is crossed.
     #[test]
     fn returns_none_when_cooldown_unset() {
         let deps = mock_dependencies();

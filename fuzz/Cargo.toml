@@ -21,9 +21,9 @@ arbitrary = { version = "1", features = ["derive"] }
 cosmwasm-std = "2.2.0"
 
 # Path deps. Setting `default-features = false` where possible to avoid
-# pulling in unused features. The math we fuzz is in pool-core::swap
-# and factory::mint_bluechips_pool_creation; those are pure functions
-# with no entry-point dependencies.
+# pulling in unused features. The live target fuzzes pool-core::swap
+# pure math; fuzz_threshold_check models the threshold-valuation
+# fixed-point math (see FUZZING.md for current status).
 pool-core = { path = "../packages/pool-core" }
 factory = { path = "../factory", features = ["library"] }
 creator-pool = { path = "../creator-pool", features = ["library"] }

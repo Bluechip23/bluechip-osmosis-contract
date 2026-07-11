@@ -48,11 +48,9 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
     // MockApi-derived address for both satisfies both.
     let api = MockApi::default();
     let token_addr = api.addr_make("creator_token");
-    // Pre-4d this test used is_standard_pool: Some(true) to skip
-    // threshold_payout validation. Now that flag is gone; supply the
-    // fixed threshold_payout shape `validate_pool_threshold_payments`
-    // accepts (creator=325B, bluechip=25B, pool=350B, commit=500B,
-    // total=1.2T).
+    // Supply the fixed threshold_payout shape
+    // `validate_pool_threshold_payments` accepts (creator=325B,
+    // bluechip=25B, pool=350B, commit=500B, total=1.2T).
     let threshold_payout = to_json_binary(&ThresholdPayoutAmounts {
         creator_reward_amount: Uint128::new(325_000_000_000),
         bluechip_reward_amount: Uint128::new(25_000_000_000),
@@ -93,11 +91,7 @@ fn test_pause_unpause() {
     let msg = mock_instantiate_msg();
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     instantiate(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
-    // Simulate post-threshold state: admin tests exercise swap/emergency_
-    // withdraw flows that used to rely on is_standard_pool: Some(true) to
-    // force IS_THRESHOLD_HIT=true at instantiate. With that flag gone in 4d,
-    // creator-pool starts pre-threshold; tests that want post-threshold
-    // behavior seed it explicitly.
+    // Simulate post-threshold state so swap/emergency flows are exercisable.
     crate::state::IS_THRESHOLD_HIT
         .save(&mut deps.storage, &true)
         .unwrap();
@@ -267,11 +261,7 @@ fn test_cancel_emergency_withdraw() {
     let msg = mock_instantiate_msg();
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     instantiate(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
-    // Simulate post-threshold state: admin tests exercise swap/emergency_
-    // withdraw flows that used to rely on is_standard_pool: Some(true) to
-    // force IS_THRESHOLD_HIT=true at instantiate. With that flag gone in 4d,
-    // creator-pool starts pre-threshold; tests that want post-threshold
-    // behavior seed it explicitly.
+    // Simulate post-threshold state so swap/emergency flows are exercisable.
     crate::state::IS_THRESHOLD_HIT
         .save(&mut deps.storage, &true)
         .unwrap();
@@ -324,11 +314,7 @@ fn test_update_config_all() {
     let msg = mock_instantiate_msg();
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     instantiate(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
-    // Simulate post-threshold state: admin tests exercise swap/emergency_
-    // withdraw flows that used to rely on is_standard_pool: Some(true) to
-    // force IS_THRESHOLD_HIT=true at instantiate. With that flag gone in 4d,
-    // creator-pool starts pre-threshold; tests that want post-threshold
-    // behavior seed it explicitly.
+    // Simulate post-threshold state so swap/emergency flows are exercisable.
     crate::state::IS_THRESHOLD_HIT
         .save(&mut deps.storage, &true)
         .unwrap();
@@ -354,11 +340,7 @@ fn test_unauthorized_admin_actions() {
     let msg = mock_instantiate_msg();
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     instantiate(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
-    // Simulate post-threshold state: admin tests exercise swap/emergency_
-    // withdraw flows that used to rely on is_standard_pool: Some(true) to
-    // force IS_THRESHOLD_HIT=true at instantiate. With that flag gone in 4d,
-    // creator-pool starts pre-threshold; tests that want post-threshold
-    // behavior seed it explicitly.
+    // Simulate post-threshold state so swap/emergency flows are exercisable.
     crate::state::IS_THRESHOLD_HIT
         .save(&mut deps.storage, &true)
         .unwrap();
@@ -473,10 +455,8 @@ fn instantiate_rejects_empty_bluechip_denom() {
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     let s = format!("{:?}", err);
-    // The empty-denom guard now lives in `TokenType::check` and emits
-    // the kind-agnostic "Native denom must be non-empty" message
-    // (the standard-pool's Native side isn't always bluechip, so the
-    // shared trait method drops the "Bluechip" prefix).
+    // The empty-denom guard lives in the shared `TokenType::check` and
+    // emits the kind-agnostic "Native denom must be non-empty" message.
     assert!(
         s.contains("Native denom must be non-empty"),
         "expected empty-denom rejection, got: {:?}",
