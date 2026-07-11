@@ -11,7 +11,6 @@
 // ------------------------------ ------------------------------- -------------------------------------------------
 // POOL_CREATION_CONTEXT          "pool_creation_ctx_v3"          v3 schema; v1/v2 predate the unified Temp+State context.
 // POOLS_BY_CONTRACT_ADDRESS      "pools_by_contract_address"     Matches.
-// LAST_STANDARD_POOL_CREATE_AT   "last_std_pool_create_at"       Shorter key (per above).
 //
 // Unlisted Items/Maps follow the convention "key == lowercase(IDENT)";
 // any future addition that diverges should be appended here.
