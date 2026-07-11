@@ -49,7 +49,8 @@ sha256sum artifacts/*.wasm   # hashes go in the gov proposal
 Then run through the whole lifecycle against the testnet factory:
 create a commit pool, commit past a (lowered) threshold, verify the
 crossing seeds the AMM + starts distribution, swap, add/remove
-liquidity, route a 2-hop swap. Drop
+liquidity, route a 2-hop swap — `scripts/run_lifecycle_test.sh` does
+all of this automatically (see `scripts/README.md`). Drop
 `COMMIT_THRESHOLD_LIMIT_USD` to a few hundred dollars in
 `osmo_testnet.env` so a crossing is cheap to trigger. The testnet
 `PRICING_POOL_ID` must point at a real OSMO/USD-stable pool with
