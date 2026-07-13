@@ -1,8 +1,7 @@
 use crate::asset::TokenType;
 use crate::error::ContractError;
 use crate::state::{
-    PoolFeeState, PoolInfo, Position, LIQUIDITY_POSITIONS, MINIMUM_LIQUIDITY, OWNER_POSITIONS,
-    POOL_STATE,
+    PoolFeeState, PoolInfo, PoolState, Position, MINIMUM_LIQUIDITY, OWNER_POSITIONS,
 };
 use cosmwasm_std::Storage;
 use cosmwasm_std::{Addr, CosmosMsg, Decimal, Deps, StdError, StdResult, Uint128};
@@ -352,11 +351,10 @@ pub fn integer_sqrt(value: Uint128) -> Uint128 {
 }
 
 pub fn calc_liquidity_for_deposit(
-    deps: Deps,
+    pool_state: &PoolState,
     amount0: Uint128,
     amount1: Uint128,
 ) -> Result<(Uint128, Uint128, Uint128), ContractError> {
-    let pool_state = POOL_STATE.load(deps.storage)?;
     let current_reserve0 = pool_state.reserve0;
     let current_reserve1 = pool_state.reserve1;
     let total_liquidity = pool_state.total_liquidity;
@@ -499,6 +497,14 @@ pub fn verify_position_ownership(
 /// invariant tight, since `remove_partial_liquidity` saves preserved
 /// fees into `unclaimed_fees_*` without debiting the reserve.
 ///
+/// Writes only the `OWNER_POSITIONS` index entries here. The updated
+/// `position.owner` is carried in the `&mut Position` — every mutating
+/// caller (collect_fees, add_to_position, both removes, the emergency
+/// claim) finishes by saving the same `Position` to
+/// `LIQUIDITY_POSITIONS`, so saving the row here too would be a
+/// guaranteed-overwritten duplicate write. Callers MUST persist the
+/// position on their success path.
+///
 /// Returns `true` if ownership actually changed (caller may want to log
 /// or short-circuit on no-op transfers); `false` otherwise.
 pub fn sync_position_on_transfer(
@@ -517,8 +523,6 @@ pub fn sync_position_on_transfer(
 
     OWNER_POSITIONS.remove(storage, (&old_owner, position_id));
     OWNER_POSITIONS.save(storage, (current_owner, position_id), &true)?;
-
-    LIQUIDITY_POSITIONS.save(storage, position_id, position)?;
 
     Ok(true)
 }

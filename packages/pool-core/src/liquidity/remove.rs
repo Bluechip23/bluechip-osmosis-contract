@@ -36,9 +36,9 @@ pub fn remove_all_liquidity(
     min_amount1: Option<Uint128>,
     max_ratio_deviation_bps: Option<u16>,
 ) -> Result<Response, ContractError> {
-    let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
+    let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
     let pool_info = POOL_INFO.load(deps.storage)?;
-    let mut pool_state = POOL_STATE.load(deps.storage)?;
+    let pool_state = POOL_STATE.load(deps.storage)?;
 
     let mut liquidity_position = LIQUIDITY_POSITIONS.load(deps.storage, &position_id)?;
 
@@ -56,6 +56,46 @@ pub fn remove_all_liquidity(
         &pool_fee_state,
     )?;
 
+    remove_all_liquidity_prepared(
+        deps,
+        env,
+        info,
+        position_id,
+        min_amount0,
+        min_amount1,
+        max_ratio_deviation_bps,
+        pool_info,
+        pool_state,
+        pool_fee_state,
+        liquidity_position,
+    )
+}
+
+/// Core full-removal body operating on already-loaded, already
+/// ownership-verified state. Split from [`remove_all_liquidity`] so the
+/// full-removal short-circuit inside `remove_partial_liquidity` can
+/// delegate here with the items it has just loaded, verified, and
+/// synced — instead of re-reading four storage items and re-running the
+/// CW721 `owner_of` cross-contract query for identical results (nothing
+/// can change them within the same handler execution).
+///
+/// Callers MUST have run `verify_position_ownership` and
+/// `sync_position_on_transfer` for `info.sender` on this position
+/// before calling.
+#[allow(clippy::too_many_arguments)]
+fn remove_all_liquidity_prepared(
+    deps: &mut DepsMut,
+    env: Env,
+    info: MessageInfo,
+    position_id: String,
+    min_amount0: Option<Uint128>,
+    min_amount1: Option<Uint128>,
+    max_ratio_deviation_bps: Option<u16>,
+    pool_info: crate::state::PoolInfo,
+    mut pool_state: crate::state::PoolState,
+    mut pool_fee_state: crate::state::PoolFeeState,
+    mut liquidity_position: crate::state::Position,
+) -> Result<Response, ContractError> {
     let current_reserve0 = pool_state.reserve0;
     let current_reserve1 = pool_state.reserve1;
 
@@ -259,10 +299,12 @@ pub fn remove_partial_liquidity(
         // `execute_remove_*` wrappers already hold the reentrancy lock at
         // this point, so calling `execute_remove_all_liquidity` here would
         // self-reenter and erroneously trip ContractError::ReentrancyGuard.
-        // `remove_all_liquidity` is the same body without the wrapper —
-        // safe to call directly while holding the lock.
+        // The `_prepared` variant takes the state this handler already
+        // loaded, ownership-verified, and synced above — re-loading the
+        // four items and re-running the CW721 owner_of query would return
+        // identical values (nothing can change them mid-handler).
         let _ = transaction_deadline;
-        return remove_all_liquidity(
+        return remove_all_liquidity_prepared(
             deps,
             env,
             info,
@@ -270,6 +312,10 @@ pub fn remove_partial_liquidity(
             min_amount0,
             min_amount1,
             max_ratio_deviation_bps,
+            pool_info,
+            pool_state,
+            pool_fee_state,
+            liquidity_position,
         );
     }
     let current_reserve0 = pool_state.reserve0;

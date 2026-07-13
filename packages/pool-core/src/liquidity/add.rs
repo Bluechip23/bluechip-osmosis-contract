@@ -95,7 +95,9 @@ fn add_to_position_internal(
     };
 
     let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-    let mut pool_state = POOL_STATE.load(deps.storage)?;
+    // Reuse the POOL_STATE copy loaded in `prepare_deposit` — nothing
+    // has written it since (the snapshot step above only queries).
+    let mut pool_state = prep.pool_state.clone();
     verify_position_ownership(
         deps.as_ref(),
         &prep.pool_info.position_nft_address,

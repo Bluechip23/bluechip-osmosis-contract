@@ -28,10 +28,10 @@ use crate::liquidity_helpers::{
     calc_liquidity_for_deposit, calculate_fee_size_multiplier, check_slippage,
 };
 use crate::state::{
-    DepositVerifyContext, PoolInfo, PoolSpecs, Position, TokenMetadata, DEPOSIT_VERIFY_CTX,
-    DEPOSIT_VERIFY_REPLY_ID, LIQUIDITY_POSITIONS, MINIMUM_LIQUIDITY, NEXT_POSITION_ID,
-    OWNER_POSITIONS, POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO,
-    POOL_SPECS, POOL_STATE,
+    DepositVerifyContext, PoolInfo, PoolSpecs, PoolState, Position, TokenMetadata,
+    DEPOSIT_VERIFY_CTX, DEPOSIT_VERIFY_REPLY_ID, LIQUIDITY_POSITIONS, MINIMUM_LIQUIDITY,
+    NEXT_POSITION_ID, OWNER_POSITIONS, POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED,
+    POOL_PAUSED_AUTO, POOL_SPECS, POOL_STATE,
 };
 use crate::swap::update_price_accumulator;
 
@@ -48,6 +48,11 @@ use crate::swap::update_price_accumulator;
 /// pools all produce a correct list.
 pub(crate) struct DepositPrep {
     pub pool_info: PoolInfo,
+    /// POOL_STATE as loaded once for the deposit-amount math. Nothing
+    /// writes POOL_STATE between `prepare_deposit` and the handlers'
+    /// mutation phase (only balance queries run in between), so the
+    /// handlers reuse this copy instead of re-reading the same item.
+    pub pool_state: PoolState,
     pub liquidity: Uint128,
     pub actual_amount0: Uint128,
     pub actual_amount1: Uint128,
@@ -181,8 +186,9 @@ pub(crate) fn prepare_deposit(
         ))));
     }
 
+    let pool_state = POOL_STATE.load(deps.storage)?;
     let (liquidity, actual_amount0, actual_amount1) =
-        calc_liquidity_for_deposit(deps, amount0, amount1)?;
+        calc_liquidity_for_deposit(&pool_state, amount0, amount1)?;
 
     check_slippage(actual_amount0, min_amount0, "asset0")?;
     check_slippage(actual_amount1, min_amount1, "asset1")?;
@@ -205,6 +211,7 @@ pub(crate) fn prepare_deposit(
 
     Ok(DepositPrep {
         pool_info,
+        pool_state,
         liquidity,
         actual_amount0,
         actual_amount1,
@@ -364,7 +371,9 @@ fn execute_deposit_liquidity_inner(
         None
     };
 
-    let mut pool_state = POOL_STATE.load(deps.storage)?;
+    // Reuse the POOL_STATE copy loaded in `prepare_deposit` — nothing
+    // has written it since (the snapshot step above only queries).
+    let mut pool_state = prep.pool_state.clone();
     let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
 
     // First-depositor detection. `total_liquidity == 0` AND both reserves
