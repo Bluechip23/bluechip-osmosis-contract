@@ -379,10 +379,10 @@ fn check_correct_factory(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>
             },
         )
         .unwrap();
-    // Post-consolidation: post-instantiate admin gates read from
-    // POOL_INFO.factory_addr now (one source of truth — see
+    // Post-instantiate admin gates read from
+    // POOL_INFO.factory_addr (one source of truth — see
     // `pool_core::state::ExpectedFactory` doc). Mirror the override
-    // here so tests using `factory_address` as info.sender still pass.
+    // here so tests using `factory_address` as info.sender pass.
     use pool_core::state::POOL_INFO;
     let mut pool_info = POOL_INFO.load(&deps.storage).unwrap();
     pool_info.factory_addr = Addr::unchecked("factory_address");
@@ -574,10 +574,8 @@ fn test_commit_exact_threshold() {
         .save(&mut deps.storage, &false)
         .unwrap();
     // Pre-test USD_RAISED is $5 below the $25k threshold so that a
-    // minimum-size ($5) commit lands exactly at $25k. The $5 minimum
-    // commit (MIN_COMMIT_USD_PRE_THRESHOLD); this test was originally written
-    // with a $1 commit hitting the threshold from $24,999. Updated to respect
-    // the current minimum.
+    // minimum-size ($5, MIN_COMMIT_USD_PRE_THRESHOLD) commit lands
+    // exactly at $25k.
     USD_RAISED_FROM_COMMIT
         .save(&mut deps.storage, &Uint128::new(24_995_000_000))
         .unwrap();
@@ -1807,8 +1805,8 @@ mod native_raised_net_semantics_tests {
     }
 
     /// confirm the structural gate also sets
-    /// IS_THRESHOLD_HIT at the END of a successful trigger run. Pre-fix
-    /// the caller set the flag before calling; now the function itself
+    /// IS_THRESHOLD_HIT at the END of a successful trigger run. The
+    /// caller must not set the flag before calling; the function itself
     /// is the single witness to "mint completed".
     #[test]
     fn trigger_threshold_payout_sets_is_threshold_hit_on_success() {

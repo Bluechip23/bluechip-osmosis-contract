@@ -40,8 +40,8 @@ use pool_core::liquidity_helpers::integer_sqrt;
 /// `threshold_payout` binary fails before the pool is registered.
 ///
 /// Both this validator AND `trigger_threshold_payout` reference the same
-/// `THRESHOLD_PAYOUT_*_BASE_UNITS` constants — previously the values
-/// lived inline in two places and were vulnerable to silent drift.
+/// `THRESHOLD_PAYOUT_*_BASE_UNITS` constants, so the two sites cannot
+/// silently drift apart.
 pub fn validate_pool_threshold_payments(
     params: &ThresholdPayoutAmounts,
 ) -> Result<(), ContractError> {
@@ -261,7 +261,7 @@ pub fn trigger_threshold_payout(
             total_to_distribute: payout.commit_return_amount,
             total_committed_usd: commit_config.commit_amount_for_threshold_usd,
             last_processed_key: None,
-            // Real count, not u32::MAX. Termination is now driven by ledger
+            // Real count, not u32::MAX. Termination is driven by ledger
             // emptiness in process_distribution_batch (the source of truth),
             // and this field is informational/observability data showing
             // how much of the original queue is left.
@@ -279,9 +279,9 @@ pub fn trigger_threshold_payout(
 
     // NATIVE_RAISED_FROM_COMMIT is stored as net-of-fees by every commit
     // handler, so the seed amount is read out directly with no recovery
-    // math. Previously the field stored gross and was recovered via
-    // `gross * (1 - fee_rate)` floor here, which combined with the
-    // per-commit fee floor to leave up to ~2 units stranded per commit.
+    // math. A `gross * (1 - fee_rate)` recovery floor here would combine
+    // with the per-commit fee floor to leave up to ~2 units stranded
+    // per commit.
     let pools_bluechip_seed = crate::state::NATIVE_RAISED_FROM_COMMIT.load(storage)?;
 
     if pools_bluechip_seed > commit_config.max_bluechip_lock_per_pool {
