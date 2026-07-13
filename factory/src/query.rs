@@ -227,12 +227,15 @@ pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) ->
         FactoryQueryMsg::CommitContext { amount } => {
             // Single round-trip for the pool commit path: the USD
             // valuation plus the live bluechip wallet in one response.
-            let conversion = crate::usd_price::convert_native_to_usd(deps, &_env, amount)?;
+            // One config load supplies both the TWAP pricing route and
+            // the wallet (`probe_native_usd_rate` is the explicit-config
+            // variant of the rate query, so the config isn't read twice).
             let cfg = FACTORYINSTANTIATEINFO.load(deps.storage)?;
+            let rate = crate::usd_price::probe_native_usd_rate(deps, &_env, &cfg)?;
             to_json_binary(&pool_factory_interfaces::CommitContextResponse {
-                amount: conversion.amount,
-                rate_used: conversion.rate_used,
-                timestamp: conversion.timestamp,
+                amount: crate::usd_price::native_to_usd(amount, rate)?,
+                rate_used: rate,
+                timestamp: _env.block.time.seconds(),
                 bluechip_wallet: cfg.bluechip_wallet_address,
             })
         }

@@ -144,7 +144,6 @@ fn execute_commit_logic(
 ) -> Result<Response, ContractError> {
     let amount = asset.amount;
     let pool_info = POOL_INFO.load(deps.storage)?;
-    let mut pool_state = POOL_STATE.load(deps.storage)?;
     let commit_config = COMMIT_LIMIT_INFO.load(deps.storage)?;
     let fee_info = COMMITFEEINFO.load(deps.storage)?;
     let sender = info.sender.clone();
@@ -308,13 +307,14 @@ fn execute_commit_logic(
                     }
                     THRESHOLD_PROCESSING.save(deps.storage, &true)?;
 
-                    // These two items are consumed only by the crossing
+                    // These items are consumed only by the crossing
                     // handlers, which run exactly once per pool lifetime
                     // — load them here rather than on every commit so
                     // the hot pre-/post-threshold paths never pay for
                     // reads they don't use.
                     let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
                     let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
+                    let mut pool_state = POOL_STATE.load(deps.storage)?;
 
                     let value_to_threshold = commit_config
                         .commit_amount_for_threshold_usd
@@ -387,16 +387,22 @@ fn execute_commit_logic(
                         // total without re-reading the item.
                         new_total,
                         messages,
-                        &pool_state,
+                        // The pool's own address — identical to
+                        // POOL_STATE.pool_contract_address (both are
+                        // set to env.contract.address at instantiate),
+                        // but already in memory, so the pre-threshold
+                        // path skips the POOL_STATE read entirely.
+                        &pool_info.pool_info.contract_addr,
                         &mut analytics,
                     )?
                 }
             } else {
                 // Loaded here rather than at the top of the dispatcher:
-                // the pre-threshold path never touches fee state, so
-                // only the post-threshold (and crossing) branches pay
-                // for this read.
+                // the pre-threshold path touches neither fee state nor
+                // pool state, so only the post-threshold (and crossing)
+                // branches pay for these reads.
                 let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
+                let mut pool_state = POOL_STATE.load(deps.storage)?;
                 process_post_threshold_commit(
                     deps,
                     env,
