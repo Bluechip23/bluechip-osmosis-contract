@@ -586,7 +586,7 @@ pub fn execute_sweep_unclaimed_emergency_shares(
 
     let fee_info = COMMITFEEINFO.load(deps.storage)?;
     // Live-query the factory's `bluechip_wallet_address` for the same
-    // reason as `execute_emergency_withdraw_core_drain` (fix §3.1) —
+    // reason as `execute_emergency_withdraw_core_drain` —
     // sweep proceeds should route to the current wallet, not the
     // pool-instantiate-time snapshot. Falls back to COMMITFEEINFO if
     // the factory is unreachable so a stale-factory configuration

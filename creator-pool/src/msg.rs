@@ -17,9 +17,7 @@ use crate::state::{CreatorFeePot, RecoveryType};
 // variants. The QueryResponses derive consumes them but rustc still
 // flags them as unused without this allow. Grouping them under one
 // outer allow keeps the schema-suppression scoped (so an unused-import
-// on `TokenInfo` / `RecoveryType` would still get reported), and folds
-// the four prior `#[allow(unused_imports)]` directives into a single
-// block.
+// on `TokenInfo` / `RecoveryType` would still get reported).
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Binary, Decimal, Timestamp, Uint128};
 use cw20::Cw20ReceiveMsg;
@@ -73,8 +71,8 @@ pub enum ExecuteMsg {
         /// collect can only return *more* fees — not a security gate
         /// against value loss, but kept for client-side symmetry so a
         /// frontend can pass the same deadline to every LP action.
-        /// `#[serde(default)]` keeps pre-this-field clients
-        /// wire-compatible (the field deserializes as `None` when absent).
+        /// `#[serde(default)]` keeps clients that omit the field
+        /// wire-compatible (it deserializes as `None` when absent).
         #[serde(default)]
         transaction_deadline: Option<Timestamp>,
     },
@@ -111,15 +109,15 @@ pub enum ExecuteMsg {
     },
     ClaimCreatorExcessLiquidity {
         // Optional deadline protecting the claim from lying in the mempool
-        // indefinitely. Unset preserves the pre-existing behavior for
-        // backwards-compatibility with already-built clients.
+        // indefinitely. Unset means no deadline check — clients that omit
+        // the field stay wire-compatible.
         #[serde(default)]
         transaction_deadline: Option<Timestamp>,
     },
     // Empties the CREATOR_FEE_POT into the creator wallet. The pot
     // accumulates the portion of LP fees that the fee-size multiplier
-    // clipped off small positions — previously orphaned in fee_reserve,
-    // now routed here. Creator-only.
+    // clips off small positions — routed here rather than left
+    // orphaned in fee_reserve. Creator-only.
     ClaimCreatorFees {
         #[serde(default)]
         transaction_deadline: Option<Timestamp>,
@@ -142,7 +140,7 @@ pub enum ExecuteMsg {
     // still mints exactly the post-distribution residual.
     SelfRecoverDistribution {},
 
-    // Withdraw a previously-failed distribution mint. Caller must have a
+    // Withdraw a failed distribution mint. Caller must have a
     // non-zero entry in FAILED_MINTS (the original committer address).
     // Optional `recipient` lets the user route the claim to a fresh
     // wallet — useful when the original recipient is the reason the mint
@@ -194,9 +192,9 @@ pub enum ExecuteMsg {
     // the NFT contract and flips `pool_state.nft_ownership_accepted` so
     // the deposit-side lazy fallback in pool-core becomes a no-op.
     //
-    // Closes the pre-accept window that previously sat between pool
-    // creation and threshold cross — until this handler ran, the
-    // factory remained the NFT contract's actual owner.
+    // Closes the pre-accept window between pool creation and threshold
+    // cross — without this handler the factory would remain the NFT
+    // contract's actual owner for that whole stretch.
     //
     // Authorisation: `info.sender` must equal `pool_info.factory_addr`.
     // Idempotent: returns Ok with no NFT message if the flag is already
@@ -330,8 +328,8 @@ pub struct CreatorExcessEarningsResponse {
     pub token_amount: Uint128,
     pub unlock_time: Timestamp,
     /// True once block time has reached `unlock_time` — i.e.
-    /// `ExecuteMsg::ClaimCreatorExcessLiquidity` would no longer reject
-    /// with `PositionLocked`.
+    /// `ExecuteMsg::ClaimCreatorExcessLiquidity` will not reject with
+    /// `PositionLocked`.
     pub claimable_now: bool,
 }
 

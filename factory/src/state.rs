@@ -9,7 +9,6 @@
 //
 // Const                          Storage key                     Reason
 // ------------------------------ ------------------------------- -------------------------------------------------
-// POOL_CREATION_CONTEXT          "pool_creation_ctx_v3"          v3 schema; v1/v2 predate the unified Temp+State context.
 // POOLS_BY_CONTRACT_ADDRESS      "pools_by_contract_address"     Matches.
 //
 // Unlisted Items/Maps follow the convention "key == lowercase(IDENT)";
@@ -17,20 +16,18 @@
 // ---------------------------------------------------------------------------
 
 use crate::asset::TokenType;
-use crate::pool_struct::{PoolDetails, TempPoolCreation, ThresholdPayoutAmounts};
+use crate::pool_struct::{PoolDetails, ThresholdPayoutAmounts};
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Binary, Decimal, StdResult, Storage, Timestamp, Uint128};
 use cw_storage_plus::{Item, Map};
 use pool_factory_interfaces::PoolStateResponseForFactory;
 
 pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config");
-// Single source of truth for every in-flight pool creation. Combines the
-// formerly-split TEMP_POOL_CREATION (pool inputs + discovered addresses)
-// and lifecycle status into one map so the reply handlers can't leave the
-// two halves out of sync. On any failure the whole tx reverts (every step
-// uses `SubMsg::reply_on_success`), so no retry/cleanup bookkeeping is
-// needed: a failed create leaves no trace in this map.
-pub const POOL_CREATION_CONTEXT: Map<u64, PoolCreationContext> = Map::new("pool_creation_ctx_v3");
+// In-flight pool creations keep no storage state: the creation context
+// (`pool_struct::TempPoolCreation`) rides the SubMsg payload through the
+// reply chain, and on any failure the whole tx reverts (every step uses
+// `SubMsg::reply_on_success`), so a create leaves no trace until the
+// finalize step writes the pool registry.
 pub const PENDING_CONFIG: Item<PendingConfig> = Item::new("pending_config");
 pub const POOL_COUNTER: Item<u64> = Item::new("pool_counter");
 
@@ -226,23 +223,11 @@ pub struct PendingConfig {
     pub effective_after: Timestamp,
 }
 
-#[cw_serde]
-pub struct PoolCreationState {
-    pub pool_id: u64,
-    pub creator: Addr,
-    pub creation_time: Timestamp,
-    pub status: CreationStatus,
-}
-
-/// Unified view of an in-flight pool creation. `temp` carries the original
-/// create msg plus the CW20/CW721 addresses discovered during the reply
-/// chain; `state` carries lifecycle/status for failure-recovery and queries.
-#[cw_serde]
-pub struct PoolCreationContext {
-    pub temp: TempPoolCreation,
-    pub state: PoolCreationState,
-}
-
+/// Lifecycle stages reported by the `PoolCreationStatus` query's wire
+/// shape. Pool creation is atomic within a single tx (the context rides
+/// SubMsg payloads and every step is `reply_on_success`), so no
+/// intermediate stage is ever externally observable — the enum exists
+/// for response-schema compatibility.
 #[cw_serde]
 pub enum CreationStatus {
     Started,
@@ -389,7 +374,7 @@ pub fn register_pool(
 ///
 /// In production a miss in `POOL_ID_BY_ADDRESS` combined with a hit in
 /// `POOLS_BY_CONTRACT_ADDRESS` means a write bypassed `register_pool` —
-/// a real bug — and is surfaced loudly. In tests, legacy fixtures may
+/// a real bug — and is surfaced loudly. In tests, fixtures may
 /// write `POOLS_BY_ID` directly, so a linear-scan fallback keeps them
 /// resolving without rewrites.
 pub(crate) fn lookup_pool_by_addr(

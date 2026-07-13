@@ -1,8 +1,7 @@
 use crate::asset::TokenType;
 use crate::error::ContractError;
 use crate::state::{
-    PoolFeeState, PoolInfo, Position, LIQUIDITY_POSITIONS, MINIMUM_LIQUIDITY, OWNER_POSITIONS,
-    POOL_STATE,
+    PoolFeeState, PoolInfo, PoolState, Position, MINIMUM_LIQUIDITY, OWNER_POSITIONS,
 };
 use cosmwasm_std::Storage;
 use cosmwasm_std::{Addr, CosmosMsg, Decimal, Deps, StdError, StdResult, Uint128};
@@ -87,10 +86,10 @@ pub fn calculate_fees_owed_split(
 /// - `preserved_adj`  : multiplier-applied earned fees on the preserved
 ///   slice, stored as `unclaimed_fees_*` and paid on next collect.
 /// - `preserved_clip` : creator-pot debit from the preserved slice
-///   (`preserved_base - preserved_adj`). Previously this was dropped,
-///   silently orphaning the multiplier-clipped portion in `fee_reserve_*`.
-///   The caller is now responsible for routing both clips into
-///   `CREATOR_FEE_POT` and debiting both from `fee_reserve_*`.
+///   (`preserved_base - preserved_adj`). The caller is responsible for
+///   routing both clips into `CREATOR_FEE_POT` and debiting both from
+///   `fee_reserve_*`, so no multiplier-clipped portion is silently
+///   orphaned in `fee_reserve_*`.
 pub fn calculate_fees_owed_split_pair(
     liquidity_removed: Uint128,
     liquidity_preserved: Uint128,
@@ -202,8 +201,8 @@ pub fn calc_capped_fees_with_clip(
 }
 
 /// Build transfer messages for the two fee amounts, dispatching per-asset
-/// on the pair's actual `TokenType` rather than the old
-/// "asset 0 = native, asset 1 = CW20" assumption. Works for every pair
+/// on the pair's actual `TokenType` rather than assuming
+/// "asset 0 = native, asset 1 = CW20". Works for every pair
 /// shape — native/CW20 (the creator pool), native/native, and
 /// CW20/CW20.
 pub fn build_fee_transfer_msgs(
@@ -352,11 +351,10 @@ pub fn integer_sqrt(value: Uint128) -> Uint128 {
 }
 
 pub fn calc_liquidity_for_deposit(
-    deps: Deps,
+    pool_state: &PoolState,
     amount0: Uint128,
     amount1: Uint128,
 ) -> Result<(Uint128, Uint128, Uint128), ContractError> {
-    let pool_state = POOL_STATE.load(deps.storage)?;
     let current_reserve0 = pool_state.reserve0;
     let current_reserve1 = pool_state.reserve1;
     let total_liquidity = pool_state.total_liquidity;
@@ -414,7 +412,7 @@ pub fn calc_liquidity_for_deposit(
         let raw_liquidity = integer_sqrt(product).max(Uint128::new(1));
 
         // Reject first-deposits too small to absorb the MINIMUM_LIQUIDITY
-        // lock. The lock itself is now applied by `execute_deposit_liquidity`
+        // lock. The lock itself is applied by `execute_deposit_liquidity`
         // via `Position.locked_liquidity = MINIMUM_LIQUIDITY` rather than by
         // subtracting from the returned liquidity here, so the depositor's
         // Position carries the FULL `raw_liquidity` and accrues fees against
@@ -499,6 +497,14 @@ pub fn verify_position_ownership(
 /// invariant tight, since `remove_partial_liquidity` saves preserved
 /// fees into `unclaimed_fees_*` without debiting the reserve.
 ///
+/// Writes only the `OWNER_POSITIONS` index entries here. The updated
+/// `position.owner` is carried in the `&mut Position` — every mutating
+/// caller (collect_fees, add_to_position, both removes, the emergency
+/// claim) finishes by saving the same `Position` to
+/// `LIQUIDITY_POSITIONS`, so saving the row here too would be a
+/// guaranteed-overwritten duplicate write. Callers MUST persist the
+/// position on their success path.
+///
 /// Returns `true` if ownership actually changed (caller may want to log
 /// or short-circuit on no-op transfers); `false` otherwise.
 pub fn sync_position_on_transfer(
@@ -517,8 +523,6 @@ pub fn sync_position_on_transfer(
 
     OWNER_POSITIONS.remove(storage, (&old_owner, position_id));
     OWNER_POSITIONS.save(storage, (current_owner, position_id), &true)?;
-
-    LIQUIDITY_POSITIONS.save(storage, position_id, position)?;
 
     Ok(true)
 }
@@ -661,9 +665,9 @@ mod tests {
     }
 
     /// `calculate_fees_owed_split_pair` returns the preserved-clip slice
-    /// as the 4th tuple element. Previously it was dropped, silently
-    /// orphaning the multiplier-clipped portion of fees on the preserved
-    /// liquidity.
+    /// as the 4th tuple element, so callers can route the multiplier-
+    /// clipped portion of fees on the preserved liquidity instead of
+    /// silently orphaning it.
     #[test]
     fn calculate_fees_owed_split_pair_returns_preserved_clip() {
         // fee_growth_delta = 10%, multiplier = 0.3 → 70% clip on both sides.
@@ -693,8 +697,8 @@ mod tests {
     }
 
     /// At multiplier = 1.0 (no clipping), both `removed_clip` and
-    /// `preserved_clip` must be zero. Confirms the no-clip case is
-    /// unaffected by the preserved-clip routing change.
+    /// `preserved_clip` must be zero. Confirms the no-clip case routes
+    /// nothing to the creator pot.
     #[test]
     fn calculate_fees_owed_split_pair_zero_clip_at_full_multiplier() {
         let (_, removed_clip, _, preserved_clip) = calculate_fees_owed_split_pair(

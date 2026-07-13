@@ -55,8 +55,8 @@ fn test_threshold_with_excess_creates_position() {
     // Override max_bluechip_lock_per_pool to a value below the realistic
     // pools_bluechip_seed that this test will generate. The
     // bluechip_to_threshold is derived arithmetically from the rate
-    // captured at commit entry, rather than via a second mock oracle
-    // query that used to return a flat constant. The realistic seed for
+    // captured at commit entry, rather than via a second oracle
+    // query. The realistic seed for
     // this test's tiny usd_to_threshold ($100) is ~94_000 ubluechip, so
     // the cap must be under that for the excess branch to fire.
     let mut commit_config = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
@@ -78,21 +78,23 @@ fn test_threshold_with_excess_creates_position() {
 
     deps.querier.update_wasm(|query| match query {
         WasmQuery::Smart { msg, .. } => {
-            // Answer the factory's ConvertNativeToUsd at $1 per token;
-            // every other cross-contract query errors (fail-soft callers
-            // fall back to their snapshots).
+            // Answer the factory's commit-path CommitContext query at
+            // $1 per token, with the live wallet matching the
+            // "ubluechip" fee snapshot these tests pin; every other
+            // cross-contract query errors.
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
             )) = from_json(msg)
             {
-                let resp = pool_factory_interfaces::ConversionResponse {
+                let resp = pool_factory_interfaces::CommitContextResponse {
                     amount,
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
+                    bluechip_wallet: Addr::unchecked("ubluechip"),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -314,21 +316,23 @@ fn test_no_excess_when_under_cap() {
 
     deps.querier.update_wasm(move |query| match query {
         WasmQuery::Smart { msg, .. } => {
-            // Answer the factory's ConvertNativeToUsd at $1 per token;
-            // every other cross-contract query errors (fail-soft callers
-            // fall back to their snapshots).
+            // Answer the factory's commit-path CommitContext query at
+            // $1 per token, with the live wallet matching the
+            // "ubluechip" fee snapshot these tests pin; every other
+            // cross-contract query errors.
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
             )) = from_json(msg)
             {
-                let resp = pool_factory_interfaces::ConversionResponse {
+                let resp = pool_factory_interfaces::CommitContextResponse {
                     amount,
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
+                    bluechip_wallet: Addr::unchecked("ubluechip"),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -379,10 +383,10 @@ fn check_correct_factory(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>
             },
         )
         .unwrap();
-    // Post-consolidation: post-instantiate admin gates read from
-    // POOL_INFO.factory_addr now (one source of truth — see
+    // Post-instantiate admin gates read from
+    // POOL_INFO.factory_addr (one source of truth — see
     // `pool_core::state::ExpectedFactory` doc). Mirror the override
-    // here so tests using `factory_address` as info.sender still pass.
+    // here so tests using `factory_address` as info.sender pass.
     use pool_core::state::POOL_INFO;
     let mut pool_info = POOL_INFO.load(&deps.storage).unwrap();
     pool_info.factory_addr = Addr::unchecked("factory_address");
@@ -574,10 +578,8 @@ fn test_commit_exact_threshold() {
         .save(&mut deps.storage, &false)
         .unwrap();
     // Pre-test USD_RAISED is $5 below the $25k threshold so that a
-    // minimum-size ($5) commit lands exactly at $25k. The $5 minimum
-    // commit (MIN_COMMIT_USD_PRE_THRESHOLD); this test was originally written
-    // with a $1 commit hitting the threshold from $24,999. Updated to respect
-    // the current minimum.
+    // minimum-size ($5, MIN_COMMIT_USD_PRE_THRESHOLD) commit lands
+    // exactly at $25k.
     USD_RAISED_FROM_COMMIT
         .save(&mut deps.storage, &Uint128::new(24_995_000_000))
         .unwrap();
@@ -784,8 +786,8 @@ fn test_distribution_timeout_triggers_error() {
         .unwrap();
 
     let mut env = mock_env();
-    // Just past DISTRIBUTION_STALL_TIMEOUT_SECONDS (24h). Raised from the
-    // previous 2h window so a brief keeper outage no longer bricks a pool.
+    // Just past DISTRIBUTION_STALL_TIMEOUT_SECONDS (24h). The window is
+    // generous so a brief keeper outage cannot brick a pool.
     env.block.time = old_time.plus_seconds(crate::state::DISTRIBUTION_STALL_TIMEOUT_SECONDS + 1);
 
     // Permissionless — anyone can call ContinueDistribution
@@ -803,13 +805,14 @@ fn test_distribution_timeout_triggers_error() {
 
     // The on-chain stall signal is the QueryMsg::DistributionState query,
     // not a marker written into DISTRIBUTION_STATE itself. CosmWasm reverts
-    // every staged storage write when a handler returns Err, so attempting
-    // to set `consecutive_failures = 99` immediately before the Err return
-    // would be discarded along with the failed tx (the prior version of
-    // this test relied on MockStorage NOT enforcing that revert, which
-    // masked the dead code on real chains).
+    // every staged storage write when a handler returns Err, so a marker
+    // such as `consecutive_failures = 99` written immediately before the
+    // Err return would be discarded along with the failed tx (and
+    // MockStorage does not enforce that revert, so a test asserting on
+    // such a marker would pass while the marker never lands on a real
+    // chain).
     //
-    // Verify the new observability path: query_distribution_state should
+    // Verify the observability path: query_distribution_state should
     // report `is_stalled = true` and `seconds_since_update` past the
     // 24h timeout, giving admin dashboards the structured signal they
     // need to call RecoverPoolStuckStates::StuckDistribution.
@@ -827,12 +830,12 @@ fn test_distribution_timeout_triggers_error() {
     assert!(response.seconds_since_update > crate::state::DISTRIBUTION_STALL_TIMEOUT_SECONDS);
     assert_eq!(
         response.consecutive_failures, 0,
-        "consecutive_failures must NOT have moved off 0 — the timeout branch's pre-Err save would revert on a real chain, and the new code no longer attempts it at all"
+        "consecutive_failures must NOT have moved off 0 — a save staged before the timeout branch's Err would revert on a real chain, and the handler must not attempt one at all"
     );
 }
 
 /// Regression: just BELOW the timeout, ContinueDistribution must succeed.
-/// Pins the new 24h window so a future "tighten the timeout" change has
+/// Pins the 24h window so a future "tighten the timeout" change has
 /// to also update this test.
 #[test]
 fn test_distribution_just_below_timeout_succeeds() {
@@ -914,8 +917,8 @@ fn test_accumulated_bluechips_respected() {
 
     // Set initial state: $24,000 raised at low price ($0.50 implied),
     // so the contract has 48,000 bluechips of NET-of-fees inflow
-    // accumulated. After the gross→net refactor NATIVE_RAISED_FROM_COMMIT
-    // is interpreted as net (the post-fee total that has actually
+    // accumulated. NATIVE_RAISED_FROM_COMMIT stores the net-of-fee
+    // amount (the post-fee total that has actually
     // entered the pool's bank balance), so we seed the net value
     // directly. The test's exact amount isn't load-bearing — the
     // assertion below is on the `max_bluechip_lock_per_pool` cap, which
@@ -931,21 +934,23 @@ fn test_accumulated_bluechips_respected() {
     // Mock oracle price at /bin/bash.50 (500,000 micros)
     deps.querier.update_wasm(|query| match query {
         WasmQuery::Smart { msg, .. } => {
-            // Answer the factory's ConvertNativeToUsd at $1 per token;
-            // every other cross-contract query errors (fail-soft callers
-            // fall back to their snapshots).
+            // Answer the factory's commit-path CommitContext query at
+            // $1 per token, with the live wallet matching the
+            // "ubluechip" fee snapshot these tests pin; every other
+            // cross-contract query errors.
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
             )) = from_json(msg)
             {
-                let resp = pool_factory_interfaces::ConversionResponse {
+                let resp = pool_factory_interfaces::CommitContextResponse {
                     amount,
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
+                    bluechip_wallet: Addr::unchecked("ubluechip"),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -1023,8 +1028,8 @@ fn test_concurrent_threshold_crossing_race_condition() {
         .save(&mut deps.storage, &Uint128::new(24_995_000_000))
         .unwrap();
     // At $1/bluechip, $24,995 of NET-of-fees bluechip has entered the
-    // pool's bank balance (NATIVE_RAISED_FROM_COMMIT is post-fee after
-    // the gross→net refactor). The test asserts threshold-phase
+    // pool's bank balance (NATIVE_RAISED_FROM_COMMIT stores the
+    // post-fee amount). The test asserts threshold-phase
     // semantics, not seed arithmetic, so the exact amount is just a
     // realistic placeholder.
     crate::state::NATIVE_RAISED_FROM_COMMIT
@@ -1099,8 +1104,8 @@ fn test_concurrent_threshold_crossing_race_condition() {
 #[test]
 fn test_paused_pool_rejects_pre_threshold_commit() {
     // With POOL_PAUSED set, a pre-threshold commit must be rejected at
-    // dispatch before any state is touched. Previously only
-    // process_post_threshold_commit checked POOL_PAUSED, so a paused pool
+    // dispatch before any state is touched. If only
+    // process_post_threshold_commit checked POOL_PAUSED, a paused pool
     // could still accept funding-phase deposits that ended up stuck in the
     // COMMIT_LEDGER.
     let mut deps = mock_dependencies();
@@ -1147,9 +1152,9 @@ fn test_paused_pool_rejects_pre_threshold_commit() {
 
 #[test]
 fn test_paused_pool_rejects_post_threshold_commit() {
-    // Parallel test: post-threshold path was already guarded inside
-    // process_post_threshold_commit, but the new dispatch-level check
-    // should also reject here. This pins the behavior so future refactors
+    // Parallel test: the post-threshold path is guarded both inside
+    // process_post_threshold_commit and by the dispatch-level check,
+    // which should reject here. This pins the behavior so future changes
     // can't remove one of the two checks without also removing the other.
     let mut deps = mock_dependencies();
     setup_pool_with_excess_config(&mut deps);
@@ -1222,21 +1227,23 @@ fn test_unpaused_pool_accepts_commit_after_previously_paused() {
     // Needs oracle query; wire the conversion mock.
     deps.querier.update_wasm(move |query| match query {
         WasmQuery::Smart { msg, .. } => {
-            // Answer the factory's ConvertNativeToUsd at $1 per token;
-            // every other cross-contract query errors (fail-soft callers
-            // fall back to their snapshots).
+            // Answer the factory's commit-path CommitContext query at
+            // $1 per token, with the live wallet matching the
+            // "ubluechip" fee snapshot these tests pin; every other
+            // cross-contract query errors.
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
             )) = from_json(msg)
             {
-                let resp = pool_factory_interfaces::ConversionResponse {
+                let resp = pool_factory_interfaces::CommitContextResponse {
                     amount,
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
+                    bluechip_wallet: Addr::unchecked("ubluechip"),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -1358,10 +1365,10 @@ fn test_commit_rejects_below_post_threshold_floor() {
 }
 
 // ===========================================================================
-// Fix 6: NATIVE_RAISED_FROM_COMMIT stores net-of-fees, not gross
+// NATIVE_RAISED_FROM_COMMIT stores net-of-fees, not gross
 // ===========================================================================
 //
-// Coverage for the gross→net refactor in commit handlers + the matching
+// Coverage for the net-of-fees semantics in commit handlers + the matching
 // no-recovery read in `trigger_threshold_payout`. Each of the three commit
 // branches stores a different "what actually entered the pool's bank
 // balance" value:
@@ -1590,11 +1597,11 @@ mod native_raised_net_semantics_tests {
         );
 
         // Defense-in-depth: explicitly confirm we did NOT add the
-        // pre-refactor gross value.
+        // gross bluechip_to_threshold value.
         let gross_would_be = Uint128::new(24_995_000_000 + 5_000_000);
         assert_ne!(
             total, gross_would_be,
-            "regression guard: NATIVE_RAISED must NOT equal pre-refactor gross"
+            "regression guard: NATIVE_RAISED must NOT equal the gross-based total"
         );
     }
 
@@ -1602,8 +1609,9 @@ mod native_raised_net_semantics_tests {
     /// directly into `pools_bluechip_seed` with NO `(1 - fee_rate)`
     /// recovery multiply. End-to-end: a pre-seeded NATIVE_RAISED of
     /// 1_000_000 (under the max_bluechip_lock_per_pool cap) must produce
-    /// `pool_state.reserve0 = 1_000_000` after threshold-cross — the
-    /// pre-refactor code would have produced `1_000_000 * 0.94 = 940_000`.
+    /// `pool_state.reserve0 = 1_000_000` after threshold-cross — a
+    /// gross-based recovery multiply would produce `1_000_000 * 0.94 =
+    /// 940_000`, which this test asserts we do not.
     #[test]
     fn trigger_threshold_payout_reads_native_raised_directly_no_recovery_multiply() {
         use crate::generic_helpers::trigger_threshold_payout;
@@ -1615,8 +1623,8 @@ mod native_raised_net_semantics_tests {
         setup_pool_storage(&mut deps);
 
         // Seed NATIVE_RAISED with a value below max_bluechip_lock_per_pool
-        // (which is 10_000_000_000 in setup_pool_storage). After the
-        // refactor, this entire amount becomes `pools_bluechip_seed`
+        // (which is 10_000_000_000 in setup_pool_storage). This entire
+        // amount becomes `pools_bluechip_seed`
         // and lands as `pool_state.reserve0` (no excess carve-off).
         let seeded_net = Uint128::new(1_000_000);
         NATIVE_RAISED_FROM_COMMIT
@@ -1650,26 +1658,27 @@ mod native_raised_net_semantics_tests {
 
         // Net invariant: pool_state.reserve0 == NATIVE_RAISED_FROM_COMMIT
         // (provided we're under the cap, which we are: 1M ≪ 10B).
-        // Pre-refactor would have produced 1_000_000 * 0.94 = 940_000.
+        // A gross-based recovery multiply would produce
+        // 1_000_000 * 0.94 = 940_000.
         assert_eq!(
             pool_state.reserve0, seeded_net,
-            "post-refactor: pool_state.reserve0 must equal NATIVE_RAISED directly. \
-             Got reserve0={}, seeded={}. (Pre-refactor would have produced 940_000.)",
+            "pool_state.reserve0 must equal NATIVE_RAISED directly. \
+             Got reserve0={}, seeded={}. (A recovery multiply would produce 940_000.)",
             pool_state.reserve0, seeded_net
         );
 
-        // Defense-in-depth: the pre-refactor `gross * (1 - fee_rate)`
-        // result is explicitly NOT what we got.
-        let pre_refactor_seed = seeded_net.checked_mul_floor(Decimal::percent(94)).unwrap();
+        // Defense-in-depth: the `gross * (1 - fee_rate)`
+        // recovery result is explicitly NOT what we got.
+        let recovery_multiplied_seed = seeded_net.checked_mul_floor(Decimal::percent(94)).unwrap();
         assert_ne!(
-            pool_state.reserve0, pre_refactor_seed,
-            "regression guard: must not produce pre-refactor recovery-multiplied seed"
+            pool_state.reserve0, recovery_multiplied_seed,
+            "regression guard: must not produce a recovery-multiplied seed"
         );
 
         // pool_state.reserve1 lands the full `payout.pool_seed_amount`
         // creator-token allocation (this is independent of the
-        // gross→net refactor, included as a sanity check that the
-        // payout math is otherwise unchanged).
+        // net-of-fees semantics of reserve0, included as a sanity check
+        // that the payout math is correct on the other side too).
         assert_eq!(
             pool_state.reserve1, payout.pool_seed_amount,
             "creator-token side of seed should be the full pool_seed_amount"
@@ -1804,8 +1813,8 @@ mod native_raised_net_semantics_tests {
     }
 
     /// confirm the structural gate also sets
-    /// IS_THRESHOLD_HIT at the END of a successful trigger run. Pre-fix
-    /// the caller set the flag before calling; now the function itself
+    /// IS_THRESHOLD_HIT at the END of a successful trigger run. The
+    /// caller must not set the flag before calling; the function itself
     /// is the single witness to "mint completed".
     #[test]
     fn trigger_threshold_payout_sets_is_threshold_hit_on_success() {

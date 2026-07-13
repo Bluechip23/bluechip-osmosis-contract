@@ -1,10 +1,7 @@
-use crate::state::{
-    CreationStatus, FactoryInstantiate, PoolCreationContext, PoolCreationState, POOLS_BY_ID,
-    POOL_COUNTER, POOL_CREATION_CONTEXT,
-};
+use crate::state::{FactoryInstantiate, POOLS_BY_ID, POOL_COUNTER};
 use cosmwasm_std::{
-    Addr, Binary, Coin, Decimal, Env, Event, OwnedDeps, Reply, SubMsgResponse, SubMsgResult,
-    Uint128,
+    from_json, to_json_binary, Addr, Binary, Coin, Decimal, Env, Event, OwnedDeps, Reply,
+    SubMsgResponse, SubMsgResult, Uint128,
 };
 
 use crate::asset::{TokenInfo, TokenType};
@@ -370,22 +367,30 @@ fn simulate_complete_reply_chain(
     deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQuerier>,
     env: Env,
     pool_id: u64,
+    create_res: &cosmwasm_std::Response,
 ) {
     let token_addr = make_addr(&format!("token_address_{}", pool_id));
-    let token_reply =
-        create_instantiate_reply(encode_reply_id(pool_id, SET_TOKENS), token_addr.as_str());
-    pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
+    let token_reply = create_instantiate_reply(
+        encode_reply_id(pool_id, SET_TOKENS),
+        token_addr.as_str(),
+        creation_payload(create_res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
 
     let nft_addr = make_addr(&format!("nft_address_{}", pool_id));
     let nft_reply = create_instantiate_reply(
         encode_reply_id(pool_id, MINT_CREATE_POOL),
         nft_addr.as_str(),
+        creation_payload(&res),
     );
-    pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
 
     let pool_addr = make_addr(&format!("pool_address_{}", pool_id));
-    let pool_reply =
-        create_instantiate_reply(encode_reply_id(pool_id, FINALIZE_POOL), pool_addr.as_str());
+    let pool_reply = create_instantiate_reply(
+        encode_reply_id(pool_id, FINALIZE_POOL),
+        pool_addr.as_str(),
+        creation_payload(&res),
+    );
     pool_creation_reply(deps.as_mut(), env.clone(), pool_reply).unwrap();
 }
 
@@ -407,8 +412,20 @@ fn test_asset_info() {
     assert!(!bluechip_info.equal(&token_info));
 }
 
+/// The creation context rides SubMsg payloads through the reply chain
+/// (wasmd echoes a SubMsg's `payload` back in its Reply). Tests thread
+/// it the same way: extract the payload from each step's response and
+/// attach it to the next simulated Reply.
+pub fn creation_payload(res: &cosmwasm_std::Response) -> Binary {
+    res.messages
+        .iter()
+        .find(|m| !m.payload.is_empty())
+        .map(|m| m.payload.clone())
+        .expect("response should carry a pool-creation payload on its SubMsg")
+}
+
 #[allow(deprecated)]
-pub fn create_instantiate_reply(id: u64, contract_addr: &str) -> Reply {
+pub fn create_instantiate_reply(id: u64, contract_addr: &str, payload: Binary) -> Reply {
     Reply {
         id,
         result: SubMsgResult::Ok(SubMsgResponse {
@@ -419,7 +436,7 @@ pub fn create_instantiate_reply(id: u64, contract_addr: &str) -> Reply {
             data: None,
         }),
         gas_used: 0,
-        payload: Binary::default(),
+        payload,
     }
 }
 
@@ -456,10 +473,10 @@ fn test_multiple_pool_creation() {
             "Response should contain pool_id attribute"
         );
 
-        // Load the pool context that was just created (use loop index as pool_id)
+        // The creation context rides the create response's SubMsg
+        // payload (use loop index as pool_id)
         let pool_id = i;
-        let ctx = POOL_CREATION_CONTEXT.load(&deps.storage, pool_id).unwrap();
-        let creator = ctx.temp.temp_creator_wallet.clone();
+        let temp: TempPoolCreation = from_json(creation_payload(&res)).unwrap();
 
         // Verify this is a new unique ID
         assert!(
@@ -469,23 +486,18 @@ fn test_multiple_pool_creation() {
         );
         created_pool_ids.push(pool_id);
 
-        // The creation state should already be populated by execute, but verify it
-        assert_eq!(ctx.state.status, CreationStatus::Started);
-        assert_eq!(ctx.state.creator, creator);
+        // The payload should carry the creator and no addresses yet.
+        assert_eq!(temp.pool_id, pool_id);
+        assert_eq!(temp.temp_creator_wallet, admin_addr());
+        assert!(temp.creator_token_addr.is_none());
+        assert!(temp.nft_addr.is_none());
 
         // Simulate complete reply chain with the actual pool_id
-        simulate_complete_reply_chain(&mut deps, env.clone(), pool_id);
+        simulate_complete_reply_chain(&mut deps, env.clone(), pool_id, &res);
 
         assert!(
             POOLS_BY_ID.load(&deps.storage, pool_id).is_ok(),
             "Pool should be stored by ID"
-        );
-
-        // Creation context should be removed on successful completion to
-        // avoid permanent storage bloat per pool.
-        assert!(
-            POOL_CREATION_CONTEXT.load(&deps.storage, pool_id).is_err(),
-            "POOL_CREATION_CONTEXT should be removed after successful creation"
         );
     }
 
@@ -558,24 +570,26 @@ fn test_complete_pool_creation_flow() {
     );
 
     let pool_id = POOL_COUNTER.load(&deps.storage).unwrap();
-    let ctx = POOL_CREATION_CONTEXT.load(&deps.storage, pool_id).unwrap();
+    // The creation context rides the create response's SubMsg payload.
+    let temp: TempPoolCreation = from_json(creation_payload(&res)).unwrap();
 
     assert!(pool_id > 0);
-    assert_eq!(ctx.temp.temp_creator_wallet, admin_addr());
-    assert!(ctx.temp.creator_token_addr.is_none());
-    assert!(ctx.temp.nft_addr.is_none());
+    assert_eq!(temp.temp_creator_wallet, admin_addr());
+    assert!(temp.creator_token_addr.is_none());
+    assert!(temp.nft_addr.is_none());
 
     let token_addr = make_addr("token_address");
-    let token_reply =
-        create_instantiate_reply(encode_reply_id(pool_id, SET_TOKENS), token_addr.as_str());
+    let token_reply = create_instantiate_reply(
+        encode_reply_id(pool_id, SET_TOKENS),
+        token_addr.as_str(),
+        creation_payload(&res),
+    );
     let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
 
-    // Reload context and check token was set. ctx.state.creator_token_address
-    // is no longer written to; ctx.temp is the single source of truth and the
-    // query handler derives the state response from it.
-    let ctx = POOL_CREATION_CONTEXT.load(&deps.storage, pool_id).unwrap();
-    assert_eq!(ctx.temp.creator_token_addr, Some(token_addr.clone()));
-    assert_eq!(ctx.state.status, CreationStatus::TokenCreated);
+    // The outgoing payload is the single source of truth for the creator
+    // token address discovered in this step.
+    let temp: TempPoolCreation = from_json(creation_payload(&res)).unwrap();
+    assert_eq!(temp.creator_token_addr, Some(token_addr.clone()));
     assert_eq!(res.messages.len(), 1);
 
     // Step 2: NFT Creation Reply
@@ -583,33 +597,29 @@ fn test_complete_pool_creation_flow() {
     let nft_reply = create_instantiate_reply(
         encode_reply_id(pool_id, MINT_CREATE_POOL),
         nft_addr.as_str(),
+        creation_payload(&res),
     );
     let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
 
-    let ctx = POOL_CREATION_CONTEXT.load(&deps.storage, pool_id).unwrap();
-    assert_eq!(ctx.temp.nft_addr, Some(nft_addr.clone()));
-    assert_eq!(ctx.state.status, CreationStatus::NftCreated);
-    // ctx.state.mint_new_position_nft_address is no longer written; the
-    // ctx.temp.nft_addr check above is the single source of truth.
+    let temp: TempPoolCreation = from_json(creation_payload(&res)).unwrap();
+    assert_eq!(temp.nft_addr, Some(nft_addr.clone()));
+    assert_eq!(temp.creator_token_addr, Some(token_addr.clone()));
     assert_eq!(res.messages.len(), 1);
 
     // Step 3: Pool Finalization Reply
     let pool_addr = make_addr("pool_address");
-    let pool_reply =
-        create_instantiate_reply(encode_reply_id(pool_id, FINALIZE_POOL), pool_addr.as_str());
+    let pool_reply = create_instantiate_reply(
+        encode_reply_id(pool_id, FINALIZE_POOL),
+        pool_addr.as_str(),
+        creation_payload(&res),
+    );
     let res = pool_creation_reply(deps.as_mut(), env.clone(), pool_reply).unwrap();
 
     let pool_by_id = POOLS_BY_ID.load(&deps.storage, pool_id).unwrap();
     assert_eq!(pool_by_id.pool_id, pool_id);
     assert_eq!(pool_by_id.creator_pool_addr, pool_addr.clone());
 
-    // Creation context is cleared on success to avoid permanent bloat.
-    assert!(
-        POOL_CREATION_CONTEXT.load(&deps.storage, pool_id).is_err(),
-        "POOL_CREATION_CONTEXT should be removed after successful creation"
-    );
-
-    // finalize_pool now emits three messages:
+    // finalize_pool emits three messages:
     // 1. CW20 UpdateMinter (hand the creator-token's minter to the pool)
     // 2. CW721 TransferOwnership (stage the pool as pending_owner)
     // 3. AcceptNftOwnership {} dispatched to the pool itself, mirroring
@@ -718,24 +728,15 @@ fn test_reply_handling() {
         ],
     };
 
-    let ctx = PoolCreationContext {
-        temp: TempPoolCreation {
-            pool_id,
-            temp_creator_wallet: the_admin.clone(),
-            temp_pool_info: pool_msg,
-            creator_token_addr: None,
-            nft_addr: None,
-        },
-        state: PoolCreationState {
-            pool_id,
-            creator: the_admin.clone(),
-            creation_time: env.block.time,
-            status: CreationStatus::Started,
-        },
+    // The creation context arrives in the Reply payload, exactly as the
+    // create handler attaches it to the CW20-instantiate SubMsg.
+    let temp = TempPoolCreation {
+        pool_id,
+        temp_creator_wallet: the_admin.clone(),
+        temp_pool_info: pool_msg,
+        creator_token_addr: None,
+        nft_addr: None,
     };
-    POOL_CREATION_CONTEXT
-        .save(deps.as_mut().storage, pool_id, &ctx)
-        .unwrap();
 
     let contract_addr_obj = make_addr("token_contract_address");
     let contract_addr = contract_addr_obj.as_str();
@@ -751,7 +752,7 @@ fn test_reply_handling() {
             data: None,
         }),
         gas_used: 0,
-        payload: Binary::default(),
+        payload: to_json_binary(&temp).unwrap(),
     };
 
     let res = pool_creation_reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
@@ -761,18 +762,15 @@ fn test_reply_handling() {
     assert_eq!(res.attributes[1], ("token_address", contract_addr));
     assert_eq!(res.attributes[2], ("pool_id", "1"));
 
-    let updated_ctx = POOL_CREATION_CONTEXT
-        .load(deps.as_ref().storage, pool_id)
-        .unwrap();
-    assert_eq!(updated_ctx.state.status, CreationStatus::TokenCreated);
-    // ctx.state.creator_token_address is no longer written; ctx.temp is
-    // the single source of truth.
+    // The outgoing payload (attached to the CW721-instantiate SubMsg) is
+    // the single source of truth for the creator token address.
+    let updated: TempPoolCreation = from_json(creation_payload(&res)).unwrap();
     assert_eq!(
-        updated_ctx.temp.creator_token_addr,
+        updated.creator_token_addr,
         Some(Addr::unchecked(contract_addr))
     );
-    assert_eq!(updated_ctx.temp.pool_id, pool_id);
-    assert_eq!(updated_ctx.temp.temp_creator_wallet, the_admin);
+    assert_eq!(updated.pool_id, pool_id);
+    assert_eq!(updated.temp_creator_wallet, the_admin);
 }
 
 // ---------------------------------------------------------------------------

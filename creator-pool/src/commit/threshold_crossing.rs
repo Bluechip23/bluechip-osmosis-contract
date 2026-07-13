@@ -113,10 +113,10 @@ pub(crate) fn process_threshold_crossing_with_excess(
         Ok(r.checked_add(threshold_portion_after_fees)?)
     })?;
 
-    // IS_THRESHOLD_HIT.save(true) MOVED into trigger_threshold_payout
+    // IS_THRESHOLD_HIT.save(true) happens inside trigger_threshold_payout
     // (called below). That function holds the structural no-double-mint
     // gate: it checks the flag at entry and sets it only after mint +
-    // seed completes. The handler's own entry gate above (line 75)
+    // seed completes. The handler's own entry gate above
     // remains as fail-fast so the COMMIT_LEDGER / USD/NATIVE_RAISED
     // writes don't run on a re-crossing attempt.
 
@@ -155,20 +155,20 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // `update_commit_info` is deferred to a single call at the bottom of
     // this handler so `Committing.last_payment_bluechip` /
     // `last_payment_usd` reflect the WHOLE crossing tx, not just the
-    // excess portion. Previously this handler called update_commit_info
-    // twice — once for the threshold portion, once for the excess —
-    // and the second call's overwrite of `last_payment_*` left a
-    // frontend showing "last commit" the excess-only values. Both
-    // values now accumulate into `total_paid_*` and land in
-    // `last_payment_*` in a single write. See the consolidation at the
-    // bottom of this handler.
+    // excess portion. Calling update_commit_info twice — once for the
+    // threshold portion, once for the excess — would let the second
+    // call's overwrite of `last_payment_*` leave a frontend showing
+    // the excess-only values as "last commit". Both portions
+    // accumulate into `total_paid_*` and land in `last_payment_*` in a
+    // single write. See the consolidation at the bottom of this
+    // handler.
 
     // Process the excess as a swap, capped at 3% of pool reserves to keep
     // the threshold-crosser from capturing a disproportionate share of the
-    // freshly-seeded pool on a single atomic tx. The cap was previously 20%,
-    // which turned every threshold crossing into a guaranteed MEV bonanza
-    // (~20% of all newly-minted creator tokens at seed price, front-run by
-    // anyone with gas). Dropping to 3% removes the structural free trade
+    // freshly-seeded pool on a single atomic tx. A materially larger cap
+    // would turn every threshold crossing into a guaranteed MEV bonanza
+    // (a large slice of the newly-minted creator tokens at seed price,
+    // front-run by anyone with gas). 3% removes the structural free trade
     // while still letting a modest overshoot settle in the same tx rather
     // than requiring a full refund + manual re-swap.
     let mut return_amt = Uint128::zero();
@@ -215,15 +215,14 @@ pub(crate) fn process_threshold_crossing_with_excess(
 
         if !capped_excess.is_zero() {
             // Unconditional slippage protection on the threshold-crossing
-            // excess swap. Previously gated on max_spread.is_some(), which
-            // meant callers who omitted max_spread skipped the check
-            // entirely.
+            // excess swap — the check runs even when the caller omits
+            // max_spread, so nobody trades unprotected by accident.
             //
-            // With the excess cap now at 3% of the freshly-seeded bluechip
+            // With the excess cap at 3% of the freshly-seeded bluechip
             // reserve, the maximum honest x*y=k spread on this swap is
             // ~3% as well. 5% gives a small buffer for rounding / fee
-            // interaction without leaving the previous 25% gaping hole
-            // that let front-runners sandwich the crossing tx.
+            // interaction without leaving a hole wide enough for
+            // front-runners to sandwich the crossing tx.
             //
             // Users who explicitly set a tighter `max_spread` get that
             // stricter bound honored; callers who forgot to specify one
@@ -277,7 +276,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // portion and the excess portion (if any). Sum the bluechip into one
     // value and use `commit_value` (= threshold + excess) so
     // `last_payment_*` reflects the user's full crossing commit rather
-    // than the excess-only snapshot the prior two-call structure left.
+    // than an excess-only snapshot.
     let bluechip_committed =
         bluechip_to_threshold.checked_add(bluechip_excess.checked_sub(refunded_excess)?)?;
     update_commit_info(
@@ -305,8 +304,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
 
     // `pool_state` (outer &mut ref) already reflects the committed on-chain
     // state after trigger_threshold_payout + the optional excess-swap block
-    // above. Previous code reloaded here; the reload was redundant and
-    // cost an extra storage read per threshold-crossing tx.
+    // above, so no reload from storage is needed here.
     let base = commit_base_attributes(
         "threshold_crossing",
         &sender,
@@ -342,10 +340,10 @@ pub(crate) fn process_threshold_crossing_with_excess(
 /// [`process_threshold_crossing_with_excess`] — same payout / NFT-accept /
 /// cooldown / factory-notify pipeline, just no swap branch.
 ///
-/// Extracted from `commit::execute_commit_logic` (was inlined as a 73-line
-/// match-arm body inside an if-else inside a match), so all four phase
-/// handlers (`pre_threshold`, `post_threshold`, `threshold_crossing_*`,
-/// distribution batch) now sit at the same module depth.
+/// Lives here rather than inline in `commit::execute_commit_logic` so
+/// all four phase handlers (`pre_threshold`, `post_threshold`,
+/// `threshold_crossing_*`, distribution batch) sit at the same module
+/// depth.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_threshold_hit_exact(
     deps: &mut DepsMut,
@@ -383,12 +381,12 @@ pub(crate) fn process_threshold_hit_exact(
     let final_raised = new_total.min(commit_config.commit_amount_for_threshold_usd);
     USD_RAISED_FROM_COMMIT.save(deps.storage, &final_raised)?;
     // Store the net-of-fees bluechip that actually enters the contract's
-    // bank balance (; see pre_threshold.rs comment block).
-    // Eliminates the dust-stranding mismatch between per-commit fee
-    // floors and the recovery formula in `trigger_threshold_payout`.
+    // bank balance (see the pre_threshold.rs comment block). Storing net
+    // avoids any dust-stranding mismatch between per-commit fee floors
+    // and a gross-recovery formula in `trigger_threshold_payout`.
     NATIVE_RAISED_FROM_COMMIT
         .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(amount_after_fees)?))?;
-    // IS_THRESHOLD_HIT.save(true) MOVED into trigger_threshold_payout
+    // IS_THRESHOLD_HIT.save(true) happens inside trigger_threshold_payout
     // (called below). See the equivalent comment in
     // `process_threshold_crossing_with_excess` for full rationale.
 

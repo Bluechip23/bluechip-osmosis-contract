@@ -15,8 +15,8 @@ use crate::error::ContractError;
 use crate::msg::{CreatorTokenInfo, TokenInstantiateMsg};
 use crate::pool_struct::{CreatePool, TempPoolCreation};
 use crate::state::{
-    CreationStatus, PoolCreationContext, PoolCreationState, COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS,
-    FACTORYINSTANTIATEINFO, LAST_COMMIT_POOL_CREATE_AT, POOL_COUNTER, POOL_CREATION_CONTEXT,
+    COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS, FACTORYINSTANTIATEINFO, LAST_COMMIT_POOL_CREATE_AT,
+    POOL_COUNTER,
 };
 
 use super::super::{encode_reply_id, SET_TOKENS};
@@ -322,29 +322,26 @@ pub(crate) fn execute_create_creator_pool(
         admin: Some(env.contract.address.to_string()),
         label: token_info.name,
     };
-    POOL_CREATION_CONTEXT.save(
-        deps.storage,
+    // The creation context rides the SubMsg payload through the whole
+    // reply chain (set_tokens → mint_create_pool → finalize_pool)
+    // instead of being round-tripped through storage at every step.
+    // The chain is atomic — every step uses `reply_on_success`, so a
+    // failure anywhere reverts the entire tx — which means the context
+    // never needs to survive the tx and never needs to be observable
+    // outside it. Each reply handler deserializes the payload, extends
+    // it with the address it just learned, and attaches it to the next
+    // SubMsg.
+    let creation_payload = cosmwasm_std::to_json_binary(&TempPoolCreation {
+        temp_pool_info: pool_msg,
+        temp_creator_wallet: info.sender,
         pool_id,
-        &PoolCreationContext {
-            temp: TempPoolCreation {
-                temp_pool_info: pool_msg,
-                temp_creator_wallet: info.sender.clone(),
-                pool_id,
-                creator_token_addr: None,
-                nft_addr: None,
-            },
-            state: PoolCreationState {
-                pool_id,
-                creator: info.sender,
-                creation_time: env.block.time,
-                status: CreationStatus::Started,
-            },
-        },
-    )?;
-    let sub_msg = vec![SubMsg::reply_on_success(
-        msg,
-        encode_reply_id(pool_id, SET_TOKENS),
-    )];
+        creator_token_addr: None,
+        nft_addr: None,
+    })?;
+    let sub_msg = vec![
+        SubMsg::reply_on_success(msg, encode_reply_id(pool_id, SET_TOKENS))
+            .with_payload(creation_payload),
+    ];
 
     Ok(Response::new()
         .add_messages(fee_messages)

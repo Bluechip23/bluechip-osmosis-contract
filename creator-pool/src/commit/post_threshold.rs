@@ -72,7 +72,7 @@ pub(super) fn process_post_threshold_commit(
     // commits and simple swaps face the same per-tx cap during the
     // ramp window.
     if let Some(cap) =
-        pool_core::state::post_threshold_swap_cap(deps.storage, env.block.height, offer_pool)?
+        pool_core::state::post_threshold_swap_cap(cooldown_until, env.block.height, offer_pool)
     {
         if swap_amount > cap {
             return Err(ContractError::PostThresholdSwapCapExceeded {
@@ -108,10 +108,10 @@ pub(super) fn process_post_threshold_commit(
     // `assert_max_spread` measures `expected_return - return_amount` against
     // `max_spread`. Pass the gross-of-commission return so the spread check
     // matches the convention used by `pool_core::swap::execute_simple_swap`
-    // and `process_threshold_crossing_with_excess`. The previous net-of-
-    // commission argument made this path stricter than the equivalent
+    // and `process_threshold_crossing_with_excess`. A net-of-commission
+    // argument would make this path stricter than the equivalent
     // SimpleSwap, causing identical-params commits to revert where swaps
-    // succeeded.
+    // succeed.
     assert_max_spread(
         belief_price,
         max_spread,

@@ -113,8 +113,20 @@ fn register_test_pool_addr(
         .unwrap();
 }
 
+/// Extract the pool-creation payload from a create / reply-step
+/// response. The creation context rides SubMsg payloads through the
+/// reply chain (wasmd echoes them back in each Reply), so tests thread
+/// it from each response into the next simulated Reply.
+fn creation_payload(res: &cosmwasm_std::Response) -> Binary {
+    res.messages
+        .iter()
+        .find(|m| !m.payload.is_empty())
+        .map(|m| m.payload.clone())
+        .expect("response should carry a pool-creation payload on its SubMsg")
+}
+
 #[allow(deprecated)]
-fn create_instantiate_reply(id: u64, contract_addr: &str) -> Reply {
+fn create_instantiate_reply(id: u64, contract_addr: &str, payload: Binary) -> Reply {
     Reply {
         id,
         result: SubMsgResult::Ok(SubMsgResponse {
@@ -125,7 +137,7 @@ fn create_instantiate_reply(id: u64, contract_addr: &str) -> Reply {
             data: None,
         }),
         gas_used: 0,
-        payload: Binary::default(),
+        payload,
     }
 }
 
@@ -184,7 +196,7 @@ fn test_notify_threshold_crossed_double_call_prevention() {
     );
 }
 
-/// Success path: NotifyThresholdCrossed is now a pure registry recording.
+/// Success path: NotifyThresholdCrossed is a pure registry recording.
 /// The response carries NO messages (no mint, no ordinal allocation) and
 /// the attrs action=threshold_crossed / pool_id / crossed_at.
 #[test]
@@ -539,21 +551,31 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
         },
     };
 
-    execute(deps.as_mut(), env.clone(), admin_info.clone(), create_msg_1).unwrap();
+    let create_res = execute(deps.as_mut(), env.clone(), admin_info.clone(), create_msg_1).unwrap();
     let pool_id_1 = POOL_COUNTER.load(&deps.storage).unwrap();
 
-    // Complete the reply chain for pool 1
+    // Complete the reply chain for pool 1, threading the creation
+    // payload from each step's response into the next Reply.
     let token_1 = make_addr("token_addr_1");
-    let token_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_1, SET_TOKENS), token_1.as_str());
-    pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
+    let token_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_1, SET_TOKENS),
+        token_1.as_str(),
+        creation_payload(&create_res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
     let nft_1 = make_addr("nft_addr_1");
-    let nft_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_1, MINT_CREATE_POOL), nft_1.as_str());
-    pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
+    let nft_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_1, MINT_CREATE_POOL),
+        nft_1.as_str(),
+        creation_payload(&res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
     let pool_1 = make_addr("pool_addr_1");
-    let pool_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_1, FINALIZE_POOL), pool_1.as_str());
+    let pool_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_1, FINALIZE_POOL),
+        pool_1.as_str(),
+        creation_payload(&res),
+    );
     pool_creation_reply(deps.as_mut(), env.clone(), pool_reply).unwrap();
 
     // Verify pool 1 registry info
@@ -590,7 +612,7 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
         .time
         .plus_seconds(crate::state::COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS + 1);
 
-    execute(
+    let create_res = execute(
         deps.as_mut(),
         env_after_cooldown.clone(),
         admin_info,
@@ -602,16 +624,25 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
 
     // Complete the reply chain for pool 2
     let token_2 = make_addr("token_addr_2");
-    let token_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_2, SET_TOKENS), token_2.as_str());
-    pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), token_reply).unwrap();
+    let token_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_2, SET_TOKENS),
+        token_2.as_str(),
+        creation_payload(&create_res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), token_reply).unwrap();
     let nft_2 = make_addr("nft_addr_2");
-    let nft_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_2, MINT_CREATE_POOL), nft_2.as_str());
-    pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), nft_reply).unwrap();
+    let nft_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_2, MINT_CREATE_POOL),
+        nft_2.as_str(),
+        creation_payload(&res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), nft_reply).unwrap();
     let pool_2 = make_addr("pool_addr_2");
-    let pool_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_2, FINALIZE_POOL), pool_2.as_str());
+    let pool_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_2, FINALIZE_POOL),
+        pool_2.as_str(),
+        creation_payload(&res),
+    );
     pool_creation_reply(deps.as_mut(), env_after_cooldown, pool_reply).unwrap();
 
     // Verify pool 2 registry info
@@ -619,8 +650,9 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
     assert_eq!(pool_2_details.creator_pool_addr, pool_2.clone());
     assert_eq!(pool_2_details.pool_id, pool_id_2);
 
-    // KEY ASSERTION: Pool 1's registry entry should still be intact
-    // (This would fail with the old creator-address key, as pool 2 would overwrite pool 1)
+    // KEY ASSERTION: Pool 1's registry entry should still be intact.
+    // (Keying the registry by creator address would fail here, as pool 2
+    // would overwrite pool 1; the pool_id key keeps both entries.)
     let pool_1_details_after = POOLS_BY_ID.load(&deps.storage, pool_id_1).unwrap();
     assert_eq!(
         pool_1_details_after.pool_id, pool_id_1,
@@ -914,13 +946,13 @@ fn test_create_commit_pool_disabled_fee_rejects_attached_funds() {
 
 // ---------------------------------------------------------------------------
 // `ProposePoolUpgrade` must dedup `pool_ids` and reject IDs that don't
-// exist in the registry. Pre-fix the admin-supplied list flowed straight
-// through to apply, where duplicates produced two `Migrate` messages to
-// the same pool and invalid IDs aborted the entire batch after a 48h
+// exist in the registry. If the admin-supplied list flowed straight
+// through to apply, duplicates would produce two `Migrate` messages to
+// the same pool and invalid IDs would abort the entire batch after a 48h
 // timelock.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_m1_propose_upgrade_rejects_unregistered_pool_id() {
+fn test_propose_upgrade_rejects_unregistered_pool_id() {
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
 
@@ -946,7 +978,7 @@ fn test_m1_propose_upgrade_rejects_unregistered_pool_id() {
 }
 
 #[test]
-fn test_m1_propose_upgrade_dedups_pool_ids() {
+fn test_propose_upgrade_dedups_pool_ids() {
     use crate::state::PENDING_POOL_UPGRADE;
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
@@ -977,14 +1009,14 @@ fn test_m1_propose_upgrade_dedups_pool_ids() {
 }
 
 // ---------------------------------------------------------------------------
-// C2: the CW20 address minted by the factory (via the SET_TOKENS reply)
+// The CW20 address minted by the factory (via the SET_TOKENS reply)
 // must be persisted into POOLS_BY_ID — leaving every commit pool's
 // registry entry with the placeholder string would break downstream
-// consumers. This test pins the post-fix invariant: registry's
+// consumers. This test pins the invariant: registry's
 // CreatorToken address matches the SubMsg-instantiated CW20.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_c2_pool_details_persists_real_creator_token_address() {
+fn test_pool_details_persists_real_creator_token_address() {
     use crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL;
 
     let mut deps = mock_deps_with_querier(&[]);
@@ -1013,29 +1045,35 @@ fn test_c2_pool_details_persists_real_creator_token_address() {
         },
     };
 
-    execute(deps.as_mut(), env.clone(), admin_info, create_msg).unwrap();
+    let create_res = execute(deps.as_mut(), env.clone(), admin_info, create_msg).unwrap();
     let pool_id = POOL_COUNTER.load(&deps.storage).unwrap();
 
-    // Walk the reply chain. The address fed into SET_TOKENS is the one
+    // Walk the reply chain, threading the creation payload from each
+    // step's response. The address fed into SET_TOKENS is the one
     // we expect to find in POOLS_BY_ID at the end.
     let real_token_addr = make_addr("freshly_instantiated_cw20");
     let token_reply = create_instantiate_reply(
         encode_reply_id(pool_id, SET_TOKENS),
         real_token_addr.as_str(),
+        creation_payload(&create_res),
     );
-    pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
     let nft_addr = make_addr("freshly_instantiated_cw721");
     let nft_reply = create_instantiate_reply(
         encode_reply_id(pool_id, MINT_CREATE_POOL),
         nft_addr.as_str(),
+        creation_payload(&res),
     );
-    pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
     let pool_addr = make_addr("freshly_instantiated_pool");
-    let pool_reply =
-        create_instantiate_reply(encode_reply_id(pool_id, FINALIZE_POOL), pool_addr.as_str());
+    let pool_reply = create_instantiate_reply(
+        encode_reply_id(pool_id, FINALIZE_POOL),
+        pool_addr.as_str(),
+        creation_payload(&res),
+    );
     pool_creation_reply(deps.as_mut(), env, pool_reply).unwrap();
 
-    // The fix: PoolDetails.pool_token_info[1] must be the REAL CW20,
+    // Invariant: PoolDetails.pool_token_info[1] must be the REAL CW20,
     // not the sentinel placeholder.
     let details = POOLS_BY_ID.load(&deps.storage, pool_id).unwrap();
     let creator_token_addr = match &details.pool_token_info[1] {
@@ -1080,7 +1118,7 @@ fn test_c2_pool_details_persists_real_creator_token_address() {
 // `validate_creator_token_info` rejects all-numeric symbols.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_l7_create_rejects_all_numeric_symbol() {
+fn test_create_rejects_all_numeric_symbol() {
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
 
@@ -1118,12 +1156,12 @@ fn test_l7_create_rejects_all_numeric_symbol() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-address rate limit on commit-pool creation. Pre-fix, anyone could
-// spam consecutive Create calls. Now the same address must wait
+// Per-address rate limit on commit-pool creation. Without it, anyone
+// could spam consecutive Create calls. The same address must wait
 // `COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS` between successful creates.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_i6_commit_pool_create_rate_limit_per_address() {
+fn test_commit_pool_create_rate_limit_per_address() {
     use crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL;
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
@@ -1616,8 +1654,9 @@ mod pair_uniqueness_tests {
             },
         ];
 
-        // Two legacy duplicate pools at the same pair (this is exactly
-        // the pre-fix sybil-attack outcome we're back-filling around).
+        // Two legacy duplicate pools at the same pair — the sybil-attack
+        // shape that deployed chain state may already contain and that
+        // the back-fill must grandfather rather than clobber.
         POOLS_BY_ID
             .save(deps.as_mut().storage, 5, &pool_details_for(pair.clone(), 5))
             .unwrap();

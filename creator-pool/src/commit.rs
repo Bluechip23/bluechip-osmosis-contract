@@ -39,18 +39,18 @@ use crate::generic_helpers::{
 };
 use crate::msg::CommitFeeInfo;
 use crate::state::{
-    COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT, POOL_ANALYTICS,
-    POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS,
-    THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
+    POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
+    THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
 
-use crate::swap_helper::get_usd_conversion;
+use crate::swap_helper::get_commit_context;
 
 use post_threshold::process_post_threshold_commit;
 use pre_threshold::process_pre_threshold_commit;
 use threshold_crossing::{process_threshold_crossing_with_excess, process_threshold_hit_exact};
 
-// Minimum commit-value floors moved to per-pool state. Defaults are
+// Minimum commit-value floors are per-pool state. Defaults are
 // `crate::state::DEFAULT_MIN_COMMIT_USD_{PRE,POST}_THRESHOLD` and the
 // active values are stored on `CommitLimitInfo.min_commit_usd_pre_threshold`
 // / `min_commit_usd_post_threshold`. The floor still limits pre-threshold
@@ -105,11 +105,11 @@ pub fn commit(
     // this check, a paused pool would continue to bank pre-threshold
     // funds and to cross the threshold while admin investigates —
     // a fire-alarm-with-foot-still-on-the-gas failure mode. The
-    // existing redundant check in `process_post_threshold_commit`
-    // is kept as defense-in-depth. Reuses the existing
-    // `PoolPausedLowLiquidity` error variant for consistency with
-    // the swap and post-threshold callers; the name is a residual
-    // from when the only pause path was the auto-low-liquidity one.
+    // redundant check in `process_post_threshold_commit` is
+    // defense-in-depth. Reuses the `PoolPausedLowLiquidity` error
+    // variant for consistency with the swap and post-threshold
+    // callers; the variant name calls out only the auto-low-liquidity
+    // pause path but is shared by all of them.
     if POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::PoolPausedLowLiquidity {});
     }
@@ -119,7 +119,17 @@ pub fn commit(
         let pool_specs = POOL_SPECS.load(deps.storage)?;
         let sender = info.sender.clone();
         check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
-        execute_commit_logic(&mut deps, env, info, asset, belief_price, max_spread)
+        // Hand the already-loaded POOL_SPECS to the dispatcher so it
+        // doesn't re-read the same item.
+        execute_commit_logic(
+            &mut deps,
+            env,
+            info,
+            asset,
+            belief_price,
+            max_spread,
+            pool_specs,
+        )
     })
 }
 
@@ -130,45 +140,23 @@ fn execute_commit_logic(
     asset: TokenInfo,
     belief_price: Option<Decimal>,
     max_spread: Option<Decimal>,
+    pool_specs: PoolSpecs,
 ) -> Result<Response, ContractError> {
     let amount = asset.amount;
     let pool_info = POOL_INFO.load(deps.storage)?;
-    let mut pool_state = POOL_STATE.load(deps.storage)?;
-    let pool_specs = POOL_SPECS.load(deps.storage)?;
     let commit_config = COMMIT_LIMIT_INFO.load(deps.storage)?;
-    let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-    let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
     let fee_info = COMMITFEEINFO.load(deps.storage)?;
     let sender = info.sender.clone();
-
-    // Resolve the LIVE bluechip protocol-wallet for both the per-commit
-    // fee transfer and the threshold-cross bluechip-reward mint. The
-    // pool's `COMMITFEEINFO.bluechip_wallet_address` is snapshotted at
-    // create time; the factory's address is admin-tunable via the
-    // standard 48h `ProposeConfigUpdate` flow. Querying live here keeps
-    // both fund flows in lockstep with a key-compromise-driven wallet
-    // rotation — without it, every existing pool would keep paying the
-    // protocol fee and the 25k-token threshold-cross reward to the old
-    // (potentially compromised) wallet indefinitely. Mirrors the live-
-    // query pattern already in use on the emergency-drain recipient
-    // (pool-core::admin). Fail-soft fallback to the snapshot keeps
-    // commits live if the factory is unreachable.
-    let live_bluechip_wallet = crate::generic_helpers::resolve_live_bluechip_wallet(
-        deps.as_ref(),
-        &pool_info.factory_addr,
-        &fee_info.bluechip_wallet_address,
-    );
 
     // commits flow only in the bluechip direction.
     // `validate_pool_token_info` pins `asset_infos[0]` to the canonical
     // bluechip Native denom and `asset_infos[1]` to the creator-token
-    // CW20, so accepting the creator-token side here was dead-code —
-    // the inner `match` below only handles bluechip Native and returns
-    // `AssetMismatch` for everything else. Tighten the outer check to
+    // CW20, and the inner `match` below only handles bluechip Native,
+    // returning `AssetMismatch` for everything else. The outer check is
     // bluechip-only so a caller passing the creator-token side surfaces
     // the clearer error earlier and skips the USD-conversion +
     // min-commit + analytics work that would otherwise run before the
-    // inner reject. The inner `_ => AssetMismatch` arm is preserved as
+    // inner reject. The inner `_ => AssetMismatch` arm remains as
     // defense-in-depth against config corruption.
     if !asset.info.equal(&pool_info.pool_info.asset_infos[0]) {
         return Err(ContractError::AssetMismatch {});
@@ -179,19 +167,32 @@ fn execute_commit_logic(
 
     // Value the GROSS (pre-fee) commit in USD once at entry and thread
     // the same rate through every conversion in this handler. The rate
-    // comes from the factory's ConvertNativeToUsd query, backed by the
+    // comes from the factory's CommitContext query, backed by the
     // chain-native x/twap of the configured native/USD-stable pool —
     // one query per commit, no keeper, and no mid-tx drift because the
     // threshold split below reuses `usd_rate` rather than re-querying.
-    let conversion = get_usd_conversion(deps.as_ref(), asset.amount)?;
-    let commit_value = conversion.amount;
-    let usd_rate = conversion.rate_used;
+    //
+    // The same response carries the factory's LIVE bluechip
+    // protocol-wallet, used for both the per-commit fee transfer and the
+    // threshold-cross bluechip-reward mint. The pool's
+    // `COMMITFEEINFO.bluechip_wallet_address` is snapshotted at create
+    // time; the factory's address is admin-tunable via the standard 48h
+    // `ProposeConfigUpdate` flow. Taking the live value keeps both fund
+    // flows in lockstep with a key-compromise-driven wallet rotation —
+    // a snapshot would keep every existing pool paying the protocol fee
+    // and the 25k-token threshold-cross reward to the old (potentially
+    // compromised) wallet indefinitely. Mirrors the live-query pattern
+    // on the emergency-drain recipient (pool-core::admin).
+    let commit_ctx = get_commit_context(deps.as_ref(), &pool_info.factory_addr, asset.amount)?;
+    let commit_value = commit_ctx.amount;
+    let usd_rate = commit_ctx.rate_used;
+    let live_bluechip_wallet = commit_ctx.bluechip_wallet;
     if usd_rate.is_zero() || commit_value.is_zero() {
         return Err(ContractError::InvalidOraclePrice {});
     }
     // Load IS_THRESHOLD_HIT once and thread it through both the minimum-
     // commit check here and the main branching below (used later as
-    // `threshold_already_hit`). Previously the load was duplicated.
+    // `threshold_already_hit`).
     let threshold_already_hit = IS_THRESHOLD_HIT.load(deps.storage)?;
     let min_commit = if threshold_already_hit {
         commit_config.min_commit_usd_post_threshold
@@ -294,10 +295,10 @@ fn execute_commit_logic(
                     // clearing the flag (would also indicate a bug).
                     // Rather than silently downgrading the user's intended
                     // threshold-crossing commit into a pre/post-threshold
-                    // commit (the prior fallback behavior, which violated
-                    // user intent and hid the underlying corruption),
-                    // surface the stuck state with an explicit error
-                    // pointing operators at the recovery path.
+                    // commit (which would violate user intent and hide
+                    // the underlying corruption), surface the stuck
+                    // state with an explicit error pointing operators at
+                    // the recovery path.
                     if THRESHOLD_PROCESSING
                         .may_load(deps.storage)?
                         .unwrap_or(false)
@@ -305,6 +306,15 @@ fn execute_commit_logic(
                         return Err(ContractError::StuckThresholdProcessing);
                     }
                     THRESHOLD_PROCESSING.save(deps.storage, &true)?;
+
+                    // These items are consumed only by the crossing
+                    // handlers, which run exactly once per pool lifetime
+                    // — load them here rather than on every commit so
+                    // the hot pre-/post-threshold paths never pay for
+                    // reads they don't use.
+                    let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
+                    let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
+                    let mut pool_state = POOL_STATE.load(deps.storage)?;
 
                     let value_to_threshold = commit_config
                         .commit_amount_for_threshold_usd
@@ -337,9 +347,9 @@ fn execute_commit_logic(
                             &mut analytics,
                         )?
                     } else {
-                        // Threshold hit exactly — extracted to
+                        // Threshold hit exactly — handled by
                         // `commit::threshold_crossing::process_threshold_hit_exact`
-                        // so all four phase handlers sit at the same module
+                        // so all the phase handlers sit at the same module
                         // depth (pre / post / threshold-with-excess /
                         // threshold-hit-exact / distribution batch).
                         process_threshold_hit_exact(
@@ -372,12 +382,27 @@ fn execute_commit_logic(
                         // contract bank balance from this commit
                         // (see pre_threshold.rs).
                         amount_after_fees,
+                        // Already-computed USD_RAISED_FROM_COMMIT +
+                        // commit_value, so the handler saves the new
+                        // total without re-reading the item.
+                        new_total,
                         messages,
-                        &pool_state,
+                        // The pool's own address — identical to
+                        // POOL_STATE.pool_contract_address (both are
+                        // set to env.contract.address at instantiate),
+                        // but already in memory, so the pre-threshold
+                        // path skips the POOL_STATE read entirely.
+                        &pool_info.pool_info.contract_addr,
                         &mut analytics,
                     )?
                 }
             } else {
+                // Loaded here rather than at the top of the dispatcher:
+                // the pre-threshold path touches neither fee state nor
+                // pool state, so only the post-threshold (and crossing)
+                // branches pay for these reads.
+                let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
+                let mut pool_state = POOL_STATE.load(deps.storage)?;
                 process_post_threshold_commit(
                     deps,
                     env,
@@ -429,11 +454,11 @@ fn calculate_commit_fees(
 
 /// Build bank-send messages for the two fee recipients.
 ///
-/// `bluechip_wallet` is resolved at the caller via
-/// `generic_helpers::resolve_live_bluechip_wallet` so the protocol-fee
-/// destination tracks the LIVE factory config rather than the snapshot
-/// pinned in `fee_info.bluechip_wallet_address` at pool create. This
-/// keeps an admin wallet rotation (e.g., after a key compromise) actually
+/// `bluechip_wallet` is the live factory value returned by the
+/// `CommitContext` query at the caller, so the protocol-fee destination
+/// tracks the LIVE factory config rather than the snapshot pinned in
+/// `fee_info.bluechip_wallet_address` at pool create. This keeps an
+/// admin wallet rotation (e.g., after a key compromise) actually
 /// effective for every pre-existing pool's commit-fee stream.
 ///
 /// `fee_info.creator_wallet_address` stays as-is — the creator wallet is

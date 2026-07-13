@@ -471,7 +471,7 @@ fn route_through_unregistered_pool_rejected() {
     // is NOT a registered pool — the shape a malicious frontend would use
     // to steer funds to a contract it controls. Without registry
     // validation the router would forward the user's bluechip to it; the
-    // fix must refuse before any funds move.
+    // registry check must refuse before any funds move.
     let rogue_pool = world.creator_a.clone();
     let route = vec![op(&rogue_pool, bluechip, creator_a)];
 
@@ -1274,7 +1274,7 @@ fn router_forwards_hard_cap_max_spread_per_hop() {
     assert_eq!(forwarded, Some(cosmwasm_std::Decimal::percent(5)));
 }
 
-/// Simulation now mirrors execution's registry validation: a route
+/// Simulation mirrors execution's registry validation: a route
 /// through an address the factory doesn't know is rejected up front
 /// instead of producing garbage (or a confusing pool-side error).
 #[test]

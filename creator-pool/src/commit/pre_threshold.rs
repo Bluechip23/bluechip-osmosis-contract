@@ -13,7 +13,7 @@ use crate::asset::TokenInfo;
 use crate::error::ContractError;
 use crate::generic_helpers::update_commit_info;
 use crate::state::{
-    PoolAnalytics, PoolState, COMMIT_LEDGER, NATIVE_RAISED_FROM_COMMIT, USD_RAISED_FROM_COMMIT,
+    PoolAnalytics, COMMIT_LEDGER, NATIVE_RAISED_FROM_COMMIT, USD_RAISED_FROM_COMMIT,
 };
 
 use super::commit_base_attributes;
@@ -26,34 +26,37 @@ pub(super) fn process_pre_threshold_commit(
     asset: &TokenInfo,
     commit_value: Uint128,
     net_bluechip: Uint128,
+    new_usd_total: Uint128,
     messages: Vec<CosmosMsg>,
-    pool_state: &PoolState,
+    pool_contract_addr: &Addr,
     analytics: &mut PoolAnalytics,
 ) -> Result<Response, ContractError> {
     COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
         Ok(v.unwrap_or_default().checked_add(commit_value)?)
     })?;
-    // Capture the update return values so we don't re-read USD_RAISED /
-    // NATIVE_RAISED after the writes. `Item::update` returns the new value.
+    // `new_usd_total` is the dispatcher's already-computed
+    // `USD_RAISED_FROM_COMMIT + commit_value` (overflow-checked there,
+    // and the routing into this handler depends on it), so save it
+    // directly instead of re-reading the item for an identical add.
     //
-    // `NATIVE_RAISED_FROM_COMMIT` now stores the *net* bluechip that
-    // entered the contract's bank balance from this commit.
-    // Previously it stored the gross `asset.amount`, and
-    // `trigger_threshold_payout` recovered the net via
-    // `gross * (1 - fee_rate)` floor. The two flooring directions
-    // (per-commit fee floor + recovery floor) didn't match exactly,
-    // leaving up to ~2 units per commit stranded in the contract
-    // forever. Storing net directly eliminates the second floor and
-    // makes the seed math exact: `pools_bluechip_seed = NATIVE_RAISED`.
-    let total_raised = USD_RAISED_FROM_COMMIT
-        .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(commit_value)?))?;
+    // `NATIVE_RAISED_FROM_COMMIT` stores the *net* bluechip that
+    // entered the contract's bank balance from this commit. Storing
+    // net directly — rather than the gross `asset.amount` with
+    // `trigger_threshold_payout` recovering the net via a
+    // `gross * (1 - fee_rate)` floor — avoids a second flooring step
+    // whose rounding wouldn't exactly match the per-commit fee floor
+    // (stranding up to ~2 units per commit in the contract forever)
+    // and makes the seed math exact:
+    // `pools_bluechip_seed = NATIVE_RAISED`.
+    USD_RAISED_FROM_COMMIT.save(deps.storage, &new_usd_total)?;
+    let total_raised = new_usd_total;
     let total_bluechip_raised = NATIVE_RAISED_FROM_COMMIT
         .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(net_bluechip)?))?;
 
     update_commit_info(
         deps.storage,
         &sender,
-        &pool_state.pool_contract_address,
+        pool_contract_addr,
         asset.amount,
         commit_value,
         env.block.time,
@@ -65,7 +68,7 @@ pub(super) fn process_pre_threshold_commit(
     let base = commit_base_attributes(
         "funding",
         &sender,
-        &pool_state.pool_contract_address,
+        pool_contract_addr,
         analytics.total_commit_count,
         &env,
     );

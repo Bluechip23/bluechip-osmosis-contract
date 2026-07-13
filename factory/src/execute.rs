@@ -25,7 +25,7 @@ pub mod upgrades;
 
 // Explicit re-exports keep the public surface of `crate::execute::*`
 // traceable from this file rather than implicitly extending whenever a
-// submodule adds a new `pub fn`. Adding a handler now requires touching
+// submodule adds a new `pub fn`. Adding a handler requires touching
 // the dispatcher in this file, which keeps the two in step.
 pub use config::{
     execute_apply_pool_config_update, execute_cancel_factory_config_update,
@@ -218,9 +218,9 @@ fn execute_prune_rate_limits(
 /// by timestamp, the first entry whose timestamp is younger than the
 /// stale threshold guarantees every later entry is also fresh — we
 /// break out immediately. Worst-case work is therefore O(stale_count)
-/// regardless of overall map size, instead of the previous O(N) walk
-/// over the alphabetic primary which could visit every entry before
-/// finding the first stale one.
+/// regardless of overall map size; an O(N) walk over the alphabetic
+/// primary could visit every entry before finding the first stale
+/// one.
 fn prune_rate_limit_map(
     storage: &mut dyn cosmwasm_std::Storage,
     primary: cw_storage_plus::Map<cosmwasm_std::Addr, cosmwasm_std::Timestamp>,

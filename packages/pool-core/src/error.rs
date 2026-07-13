@@ -129,9 +129,10 @@ pub enum ContractError {
     LockedLiquidity { locked: Uint128 },
 
     // ---------------------------------------------------------------------
-    // Domain-specific variants used by creator-pool. Replace earlier
-    // `Std(StdError::generic_err(...))` sites so off-chain consumers can
-    // match structurally rather than regex an English message.
+    // Domain-specific variants used by creator-pool. Structured variants
+    // (rather than `Std(StdError::generic_err(...))`) so off-chain
+    // consumers can match structurally rather than regex an English
+    // message.
     // ---------------------------------------------------------------------
     #[error("lp_fee {got} is outside the allowed range [{min}, {max}] (set via UpdateFees)")]
     LpFeeOutOfRange {

@@ -1,6 +1,6 @@
 use crate::asset::TokenType;
 use crate::msg::FactoryInstantiateResponse;
-use crate::state::{CreationStatus, FACTORYINSTANTIATEINFO, POOLS_BY_ID, POOL_CREATION_CONTEXT};
+use crate::state::{CreationStatus, FACTORYINSTANTIATEINFO, POOLS_BY_ID};
 use cosmwasm_schema::{cw_serde, QueryResponses};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -156,32 +156,18 @@ pub fn query_pool_by_address(
 }
 
 pub fn query_pool_creation_status(
-    deps: Deps,
-    pool_id: u64,
+    _deps: Deps,
+    _pool_id: u64,
 ) -> StdResult<Option<PoolCreationStatusResponse>> {
-    let ctx = match POOL_CREATION_CONTEXT.may_load(deps.storage, pool_id)? {
-        Some(c) => c,
-        None => return Ok(None),
-    };
-    let crate::state::PoolCreationContext { temp, state } = ctx;
-    Ok(Some(PoolCreationStatusResponse {
-        pool_id: state.pool_id,
-        creator: state.creator,
-        // `ctx.temp` is now the single source of truth for these
-        // addresses. The `state` mirrors that previously held them
-        // were never written by current code paths and have been
-        // removed; the wire-format response retains
-        // `creator_token_address` / `mint_new_position_nft_address`
-        // / `pool_address` slots so downstream consumers continue
-        // to deserialize cleanly. `pool_address` is unset by the
-        // current reply chain (no field on `temp` holds it yet);
-        // populate when wiring becomes worthwhile.
-        creator_token_address: temp.creator_token_addr,
-        mint_new_position_nft_address: temp.nft_addr,
-        pool_address: None,
-        creation_time: state.creation_time,
-        status: state.status,
-    }))
+    // Pool creation is atomic within a single tx: the creation context
+    // rides the SubMsg payloads through the reply chain, every step is
+    // `reply_on_success`, and a failure anywhere reverts the whole tx.
+    // There is therefore never an externally observable "in-flight"
+    // creation — a pool either exists in the registry (query
+    // `PoolDetails` / `PoolByAddress`) or was never created. The query
+    // and its response shape are retained for wire compatibility and
+    // always report no in-flight creation.
+    Ok(None)
 }
 
 pub fn query_creator_token_info(deps: Deps, pool_id: u64) -> StdResult<CreatorTokenInfoResponse> {
@@ -236,6 +222,21 @@ pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) ->
             let cfg = FACTORYINSTANTIATEINFO.load(deps.storage)?;
             to_json_binary(&pool_factory_interfaces::BluechipWalletResponse {
                 address: cfg.bluechip_wallet_address,
+            })
+        }
+        FactoryQueryMsg::CommitContext { amount } => {
+            // Single round-trip for the pool commit path: the USD
+            // valuation plus the live bluechip wallet in one response.
+            // One config load supplies both the TWAP pricing route and
+            // the wallet (`probe_native_usd_rate` is the explicit-config
+            // variant of the rate query, so the config isn't read twice).
+            let cfg = FACTORYINSTANTIATEINFO.load(deps.storage)?;
+            let rate = crate::usd_price::probe_native_usd_rate(deps, &_env, &cfg)?;
+            to_json_binary(&pool_factory_interfaces::CommitContextResponse {
+                amount: crate::usd_price::native_to_usd(amount, rate)?,
+                rate_used: rate,
+                timestamp: _env.block.time.seconds(),
+                bluechip_wallet: cfg.bluechip_wallet_address,
             })
         }
     }

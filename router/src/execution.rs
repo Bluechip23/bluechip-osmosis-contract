@@ -484,7 +484,7 @@ pub fn validate_route(operations: &[SwapOperation]) -> Result<(), RouterError> {
 
 /// Per-hop `max_spread` forwarded to every underlying pool call. A
 /// `None` here would NOT disable the gate — pools substitute their
-/// 0.5% `DEFAULT_SLIPPAGE`, which silently failed every thin-pool
+/// 0.5% `DEFAULT_SLIPPAGE`, which would silently fail every thin-pool
 /// route regardless of the caller's `minimum_receive`. Pinning the
 /// pools' 5% hard cap (the widest value accepted without
 /// `allow_high_max_spread`) neutralizes the per-hop gate so

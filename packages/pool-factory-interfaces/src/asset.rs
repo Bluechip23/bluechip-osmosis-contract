@@ -31,12 +31,10 @@ pub enum TokenType {
     },
     /// Any native bank denom on the chain — bluechip itself (`ubluechip`),
     /// IBC-wrapped remote assets (e.g. `ibc/...` for ATOM), tokenfactory
-    /// denoms, etc. Name was formerly `Bluechip`, which was semantically
-    /// misleading because a `Native { denom: "ibc/..." }` entry represents
-    /// an IBC asset, not bluechip. The wire tag stays `"bluechip"` via
-    /// `#[serde(rename = ...)]` so on-chain serialized state, deploy
-    /// scripts, and frontend integrations continue to round-trip without
-    /// a coordinated migration.
+    /// denoms, etc. The wire tag is `"bluechip"` via `#[serde(rename = ...)]`:
+    /// on-chain serialized state, deploy scripts, and frontend integrations
+    /// all encode this variant under that key, so the rename attribute must
+    /// stay for them to round-trip without a coordinated migration.
     #[serde(rename = "bluechip")]
     Native {
         denom: String,

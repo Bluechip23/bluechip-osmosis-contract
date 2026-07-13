@@ -41,7 +41,7 @@ pub enum QueryMsg {
     PoolByAddress { pool_addr: String },
 }
 
-/// addr (bech32 string the router passes through) -> (canonical pair, kind).
+/// addr (bech32 string the router passes through) -> canonical pair.
 const POOLS: Map<&str, [TokenType; 2]> = Map::new("pools");
 
 #[entry_point]

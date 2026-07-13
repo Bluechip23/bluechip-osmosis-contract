@@ -103,8 +103,7 @@ pub const THRESHOLD_CROSSED_AT: Item<Timestamp> = Item::new("threshold_crossed_a
 pub const PENDING_FACTORY_NOTIFY: Item<bool> = Item::new("pending_factory_notify");
 
 /// Reply IDs for SubMsg dispatches. Kept sparse so future features can
-/// slot in without renumbering. The pool has only one caller of `reply()`
-/// today (factory-notify), so this is mostly forward-looking.
+/// slot in without renumbering.
 pub const REPLY_ID_FACTORY_NOTIFY_INITIAL: u64 = 1;
 pub const REPLY_ID_FACTORY_NOTIFY_RETRY: u64 = 2;
 
@@ -194,9 +193,10 @@ pub const MAX_DISTRIBUTIONS_PER_TX: u32 = 40;
 /// Maximum wall-clock time between successful distribution batches before
 /// the pool declares the distribution stalled and requires admin recovery
 /// via `RecoverPoolStuckStates`. Sized for the worst case where the
-/// distribution keeper is offline: at the default 30-min poll interval the
-/// previous 2h window left almost no margin and risked bricking a pool on
-/// a brief keeper outage. 24h gives operators a full day to react.
+/// distribution keeper is offline: a window of only a couple of hours
+/// would leave almost no margin at the default 30-min poll interval and
+/// risk bricking a pool on a brief keeper outage. 24h gives operators a
+/// full day to react.
 pub const DISTRIBUTION_STALL_TIMEOUT_SECONDS: u64 = 86_400;
 
 /// Per-keeper rate limit on `ContinueDistribution`. Prevents a single
@@ -256,11 +256,11 @@ pub struct DistributionState {
     /// `total_to_distribute`; the difference is the per-user
     /// floor-division dust, which is then minted to the creator wallet
     /// in a single deterministic settlement so no minted-supply slot
-    /// is left uncirculated. `#[serde(default)]` keeps records written
-    /// before this field existed deserializing as zero, which is the
-    /// correct value for an in-progress legacy distribution (no
-    /// retroactive settlement; new distributions started post-upgrade
-    /// settle deterministically).
+    /// is left uncirculated. `#[serde(default)]` lets a stored record
+    /// that lacks this field deserialize as zero; such an in-progress
+    /// distribution completes with no retroactive dust settlement (the
+    /// settlement gate in `process_distribution_batch` requires
+    /// `distributed_so_far > 0`).
     #[serde(default)]
     pub distributed_so_far: Uint128,
 }
@@ -365,9 +365,9 @@ pub struct CommitLimitInfo {
     /// Per-pool minimum pre-threshold commit value in USD (6 decimals).
     /// Initialised to `DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD` at
     /// instantiate; tunable through `PoolConfigUpdate.min_commit_usd_pre_threshold`.
-    /// `#[serde(default = ...)]` keeps records written before this field
-    /// existed deserializing as the launch default — v1 has no
-    /// pre-this-field chain state, but the default is defensive.
+    /// `#[serde(default = ...)]` lets a stored record that lacks this
+    /// field deserialize as the launch default — purely defensive,
+    /// since v1 chain state always includes it.
     #[serde(default = "default_min_commit_usd_pre_threshold")]
     pub min_commit_usd_pre_threshold: Uint128,
     /// Per-pool minimum post-threshold commit value in USD (6 decimals).

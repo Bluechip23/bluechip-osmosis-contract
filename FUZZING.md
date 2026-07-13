@@ -8,7 +8,7 @@ cargo +nightly fuzz run fuzz_swap_math       # xyk swap math invariants
 cargo +nightly fuzz run fuzz_threshold_check # threshold accounting invariants
 ```
 
-Coverage status (tracked as finding S-7 in `SECURITY_AUDIT.md`):
+Coverage status:
 
 - `fuzz_swap_math` exercises the live `pool_core::swap::compute_swap`
   math directly.

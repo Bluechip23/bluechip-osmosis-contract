@@ -1,17 +1,15 @@
 //! Swap-math re-exports plus the commit-phase USD-valuation client.
 //!
-//! The pure AMM math that used to live in this file (`compute_swap`,
-//! `compute_offer_amount`, `assert_max_spread`, `update_price_accumulator`,
-//! `DEFAULT_SLIPPAGE`) lives in `pool_core::swap` and is re-exported below
-//! so existing imports like `use crate::swap_helper::compute_swap;` keep
-//! resolving.
+//! The pure AMM math (`compute_swap`, `compute_offer_amount`,
+//! `assert_max_spread`, `update_price_accumulator`, `DEFAULT_SLIPPAGE`)
+//! lives in `pool_core::swap` and is re-exported below so imports like
+//! `use crate::swap_helper::compute_swap;` resolve here.
 pub use pool_core::swap::*;
 
-use crate::state::POOL_INFO;
-use cosmwasm_std::{Deps, StdError, StdResult, Uint128};
-use pool_factory_interfaces::{ConversionResponse, FactoryQueryEnvelope, FactoryQueryMsg};
+use cosmwasm_std::{Addr, Deps, StdError, StdResult, Uint128};
+use pool_factory_interfaces::{CommitContextResponse, FactoryQueryEnvelope, FactoryQueryMsg};
 
-/// Fixed-point scale of `ConversionResponse.rate_used`: micro-USD per
+/// Fixed-point scale of `CommitContextResponse.rate_used`: micro-USD per
 /// micro-native. Must match `factory::usd_price::RATE_PRECISION`.
 /// Duplicated rather than imported — the pool intentionally has no
 /// compile-time factory dependency; the two communicate only over wasm
@@ -20,19 +18,27 @@ pub const RATE_PRECISION: u128 = 1_000_000;
 
 /// Values `native_amount` in USD via the factory, which computes the
 /// price from Osmosis's chain-native x/twap over the configured
-/// native/USD-stable pool. Returns the full `ConversionResponse` so the
-/// caller can reuse `rate_used` for the inverse conversion inside the
-/// same commit — one query per commit, no mid-tx rate drift.
+/// native/USD-stable pool, and returns the factory's live
+/// `bluechip_wallet_address` in the same response — the two pieces of
+/// factory state every commit needs, fetched in a single cross-contract
+/// round-trip. The caller reuses `rate_used` for the inverse conversion
+/// inside the same commit, so there is no mid-tx rate drift, and routes
+/// the protocol fee / threshold-cross reward to `bluechip_wallet`, so an
+/// admin wallet rotation takes effect for every existing pool without a
+/// separate query.
 ///
 /// Fail-closed: any error (factory unreachable, TWAP query failure)
 /// propagates and reverts the commit rather than mispricing it. There is
 /// no staleness window to check — the TWAP is computed against current
 /// chain state at query time.
-pub fn get_usd_conversion(deps: Deps, native_amount: Uint128) -> StdResult<ConversionResponse> {
-    let factory_addr = POOL_INFO.load(deps.storage)?.factory_addr;
+pub fn get_commit_context(
+    deps: Deps,
+    factory_addr: &Addr,
+    native_amount: Uint128,
+) -> StdResult<CommitContextResponse> {
     deps.querier.query_wasm_smart(
-        factory_addr,
-        &FactoryQueryEnvelope::PoolFactoryQuery(FactoryQueryMsg::ConvertNativeToUsd {
+        factory_addr.to_string(),
+        &FactoryQueryEnvelope::PoolFactoryQuery(FactoryQueryMsg::CommitContext {
             amount: native_amount,
         }),
     )

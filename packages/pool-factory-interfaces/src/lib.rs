@@ -10,11 +10,10 @@ use crate::asset::TokenType;
 #[cw_serde]
 pub enum PoolQueryMsg {
     /// Returns this pool's `PoolStateResponseForFactory` (its own state — the
-    /// pool is the implicit subject of the query). Previously took a
-    /// `pool_contract_address: String` argument that was never read by any
-    /// implementor; the dispatch always replied with the queried pool's own
-    /// state. Removed to prevent future readers from assuming the parameter
-    /// changed which pool's state was returned.
+    /// pool is the implicit subject of the query). Takes no arguments by
+    /// design: the dispatch always replies with the queried pool's own state,
+    /// so a pool-address parameter would be dead weight and would invite
+    /// readers to assume it selects which pool's state is returned.
     GetPoolState {},
     GetAllPools {},
     IsPaused {},
@@ -76,6 +75,18 @@ pub enum FactoryQueryMsg {
     /// away from.
     #[returns(BluechipWalletResponse)]
     BluechipWalletAddress {},
+
+    /// Everything a pool needs to process one commit, in a single
+    /// query: the `ConvertNativeToUsd` valuation of `amount` plus the
+    /// factory's current `bluechip_wallet_address`. Commits need both —
+    /// the USD value for the threshold accounting and the live wallet
+    /// for the protocol-fee transfer (and threshold-cross reward mint) —
+    /// so bundling them halves the cross-contract round-trips on the
+    /// hottest user path. Fails closed like `ConvertNativeToUsd`: a
+    /// commit cannot proceed without a valuation, and the wallet rides
+    /// on the same response so it needs no separate fail-soft fallback.
+    #[returns(CommitContextResponse)]
+    CommitContext { amount: Uint128 },
 }
 
 /// Top-level envelope matching the factory's
@@ -87,13 +98,14 @@ pub enum FactoryQueryMsg {
 /// Lives here (not in the factory crate) because pools intentionally
 /// have no compile-time factory dependency; the two communicate only
 /// over wasm message boundaries. Every pool-side factory query goes
-/// through this one type so an unwrapped call can't slip in again —
-/// exactly that happened pre-launch: `EmergencyWithdrawDelaySeconds`
-/// was sent bare from `pool-core::execute_emergency_withdraw_initiate`
-/// (hard-failing every emergency initiate on-chain), and the three
-/// fail-soft `BluechipWalletAddress` callers silently fell back to
-/// their instantiate-time snapshots forever, defeating live wallet
-/// rotation.
+/// through this one type so an unwrapped call can't slip in — a bare
+/// `FactoryQueryMsg` fails the factory's deserialization, which would
+/// hard-fail every emergency initiate on-chain (the
+/// `EmergencyWithdrawDelaySeconds` caller in
+/// `pool-core::execute_emergency_withdraw_initiate`), and would make
+/// the three fail-soft `BluechipWalletAddress` callers silently fall
+/// back to their instantiate-time snapshots forever, defeating live
+/// wallet rotation.
 #[cw_serde]
 pub enum FactoryQueryEnvelope {
     PoolFactoryQuery(FactoryQueryMsg),
@@ -107,6 +119,17 @@ pub struct EmergencyWithdrawDelayResponse {
 #[cw_serde]
 pub struct BluechipWalletResponse {
     pub address: Addr,
+}
+
+/// Response to `CommitContext`: the `ConvertNativeToUsd` valuation
+/// fields (see [`ConversionResponse`] for their semantics) plus the
+/// factory's live `bluechip_wallet_address`.
+#[cw_serde]
+pub struct CommitContextResponse {
+    pub amount: Uint128,
+    pub rate_used: Uint128,
+    pub timestamp: u64,
+    pub bluechip_wallet: Addr,
 }
 
 /// Result of a native→USD valuation. `rate_used` is the price in
@@ -151,11 +174,10 @@ pub enum FactoryExecuteMsg {
     // registry reflects when the pool ACTUALLY crossed — not when
     // the (possibly retried-after-failure) notification finally lands.
     //
-    // `#[serde(default)]` keeps the wire format backward-compatible:
-    // legacy callers (no field) deserialize with `crossed_at = None`,
-    // and the factory falls back to `env.block.time` (the prior
-    // behaviour). Production callers in this workspace always supply
-    // the field.
+    // `#[serde(default)]` keeps the wire format tolerant: callers that
+    // omit the field deserialize with `crossed_at = None`, and the
+    // factory falls back to `env.block.time`. Production callers in
+    // this workspace always supply the field.
     NotifyThresholdCrossed {
         pool_id: u64,
         #[serde(default)]
