@@ -667,7 +667,7 @@ fn test_query_creator_earnings_pot_and_locked_excess() {
     );
 
     // At unlock_time exactly, the claim handler's `block.time <
-    // unlock_time` gate no longer rejects — claimable_now must agree.
+    // unlock_time` gate does not reject — claimable_now must agree.
     let mut late_env = mock_env();
     late_env.block.time = unlock;
     let res = query(deps.as_ref(), late_env, QueryMsg::CreatorEarnings {}).unwrap();
@@ -693,10 +693,10 @@ fn last_commited_query_accepts_both_spellings() {
 
 #[test]
 fn simulation_prices_against_accounting_reserves_not_balances() {
-    // Regression: simulations used to derive reserves from the
-    // contract's bank/cw20 BALANCES, which on commit pools also hold
-    // LP fee reserves, the creator fee pot, and commit proceeds —
-    // inflating quoted depth so execution undershoots the quote. The
+    // Regression: if simulations derived reserves from the contract's
+    // bank/cw20 BALANCES — which on commit pools also hold LP fee
+    // reserves, the creator fee pot, and commit proceeds — quoted depth
+    // would be inflated and execution would undershoot the quote. The
     // quote must come from POOL_STATE, the reserves execution trades
     // against.
     let mut deps = setup_pool_with_querier();

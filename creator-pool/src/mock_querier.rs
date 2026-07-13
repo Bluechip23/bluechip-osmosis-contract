@@ -125,14 +125,14 @@ impl WasmMockQuerier {
                         }
                         // Answer the two admin-path queries at the same wire
                         // shape production uses (the pool_factory_query
-                        // envelope). The emergency-initiate regression that
-                        // shipped these queries UNWRAPPED survived the test
-                        // suite precisely because this mock only understood
-                        // ConvertNativeToUsd — an unrecognized query fell
-                        // through to a generic error, which the fail-soft
-                        // BluechipWalletAddress callers masked with their
-                        // snapshot fallback. Answering here keeps every
-                        // envelope-wrapped call site covered by unit tests.
+                        // envelope). If this mock only understood
+                        // ConvertNativeToUsd, an unrecognized query would fall
+                        // through to a generic error, and the fail-soft
+                        // BluechipWalletAddress callers would mask it with
+                        // their snapshot fallback — a call site sending these
+                        // queries at the wrong wire shape would go undetected.
+                        // Answering here keeps every envelope-wrapped call
+                        // site covered by unit tests.
                         pool_factory_interfaces::FactoryQueryMsg::EmergencyWithdrawDelaySeconds {} => {
                             let resp = pool_factory_interfaces::EmergencyWithdrawDelayResponse {
                                 delay_seconds: 86_400,

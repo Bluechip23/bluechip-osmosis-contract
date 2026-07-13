@@ -9,9 +9,9 @@
 //! and commit-only response types (FactoryNotifyStatusResponse,
 //! PoolCommitResponse, CommitterInfo, LastCommittedResponse).
 //!
-//! Wire format is preserved — every struct moves with its `#[cw_serde]`
-//! attribute intact, so JSON shapes (field names, nested layouts) are
-//! byte-for-byte identical to the creator-pool pre-split build.
+//! Wire format is load-bearing — every struct keeps its `#[cw_serde]`
+//! attribute, and JSON shapes (field names, nested layouts) must stay
+//! byte-for-byte compatible with what deployed pools and clients emit.
 
 use crate::asset::TokenInfo;
 use crate::state::PoolAnalytics;
@@ -48,9 +48,6 @@ pub struct PoolConfigUpdate {
     /// `min_commit_usd_pre_threshold` above.
     #[serde(default)]
     pub min_commit_usd_post_threshold: Option<Uint128>,
-    // `usd_payment_tolerance_bps` removed — see `PoolSpecs` doc-comment
-    // in `pool-core::state` for rationale.
-    //
     // There is deliberately no per-pool price-source knob. One would
     // be an admin-compromise vector: a malicious source can return
     // arbitrary `ConversionResponse.amount`, letting a $5 commit register

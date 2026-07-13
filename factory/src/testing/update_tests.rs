@@ -150,8 +150,8 @@ fn test_propose_and_execute_update_config() {
 
 // The pricing route (pricing_pool_id / usd_quote_denom / window) is
 // live-probed with a real x/twap query at instantiate, propose, AND
-// apply. A typo'd pool id used to pass all syntactic validation and
-// surface only as a chain-wide commit outage 48h later.
+// apply. Without the probe, a typo'd pool id would pass all syntactic
+// validation and surface only as a chain-wide commit outage 48h later.
 #[test]
 fn instantiate_rejects_dead_pricing_route() {
     let mut deps = mock_dependencies_2(&[]);
@@ -425,7 +425,7 @@ fn test_update_specific_pool_from_registry() {
 #[test]
 fn test_migration_with_large_pool_count() {
     // Custom querier so IsPaused resolves to default=false. Plain
-    // MockQuerier would now fail-closed.
+    // MockQuerier would fail-closed.
     let mut deps = mock_dependencies_2(&[]);
     setup_factory_custom(&mut deps);
 
@@ -466,8 +466,8 @@ fn test_migration_with_large_pool_count() {
     )
     .unwrap();
 
-    // 10 migrate messages only — the self-dispatched ContinuePoolUpgrade
-    // has been removed to prevent gas-limit blowouts on large fleets.
+    // 10 migrate messages only — Execute never self-dispatches
+    // ContinuePoolUpgrade, preventing gas-limit blowouts on large fleets.
     assert_eq!(res.messages.len(), 10);
     for m in &res.messages {
         assert!(
@@ -714,8 +714,8 @@ fn test_upgrade_retry_path_migrates_unpaused_pool() {
     assert_eq!(mid.upgraded_count, 3);
 
     // Admin unpauses pool_2 (test-side: drop from paused set), calls
-    // Continue. Without fix, this required Cancel + re-Propose
-    // + wait 48h.
+    // Continue. Without the retry path, this would require Cancel +
+    // re-Propose + wait 48h.
     deps.querier.paused_pools.remove("pool_2");
 
     let res = execute(
@@ -936,9 +936,9 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
 
 /// Regression: when the retry batch (first 10 entries of `pending_retry`)
 /// all remain paused, the queue rotates so later entries get their turn on
-/// subsequent retry calls. Pre-fix the head 10 stayed at positions 0-9
-/// forever and tail entries never got processed without an admin
-/// Cancel + re-Propose.
+/// subsequent retry calls. Without rotation the head 10 would stay at
+/// positions 0-9 forever and tail entries would never be processed
+/// without an admin Cancel + re-Propose.
 #[test]
 fn test_upgrade_retry_queue_rotates_when_head_stays_paused() {
     let mut deps = mock_dependencies_2(&[]);
@@ -999,9 +999,9 @@ fn test_upgrade_retry_queue_rotates_when_head_stays_paused() {
     );
 
     // Retry call: batch = [1..10], all still paused, no migrations.
-    // Pre-fix: pending_retry unchanged → [1..11].
-    // Post-fix: rotation moves the 10 skipped entries to the back,
-    //           giving [11, 1, 2, ..., 10].
+    // Rotation moves the 10 skipped entries to the back, giving
+    // [11, 1, 2, ..., 10]; a non-rotating queue would leave
+    // pending_retry unchanged at [1..11].
     execute(
         deps.as_mut(),
         later_env,

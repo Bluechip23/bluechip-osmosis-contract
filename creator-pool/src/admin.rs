@@ -49,9 +49,9 @@ use cosmwasm_std::{
 /// - DISTRIBUTION_STATE halt on Phase 2 so future
 /// ContinueDistribution calls reject cleanly.
 ///
-/// Phase 1/2 dispatch matches pre-split behavior: if
-/// `PENDING_EMERGENCY_WITHDRAW` is unset we run Phase 1 (pause + set
-/// timelock); otherwise Phase 2 (drain after the timelock has elapsed).
+/// Phase 1/2 dispatch: if `PENDING_EMERGENCY_WITHDRAW` is unset we run
+/// Phase 1 (pause + set timelock); otherwise Phase 2 (drain after the
+/// timelock has elapsed).
 pub fn execute_emergency_withdraw(
     deps: DepsMut,
     env: Env,
@@ -60,7 +60,7 @@ pub fn execute_emergency_withdraw(
     // Duplicate auth + drained checks here so the pre-threshold error
     // below doesn't mask unauthorized access. Pool-core's initiate /
     // core_drain do their own checks too — cheap loads, worth it to
-    // preserve the pre-split error ordering.
+    // guarantee auth errors always take precedence.
     let pool_info = POOL_INFO.load(deps.storage)?;
     if info.sender != pool_info.factory_addr {
         return Err(ContractError::Unauthorized {});
@@ -81,11 +81,10 @@ pub fn execute_emergency_withdraw(
     }
 
     // Phase 1 (no timelock armed yet) is a pure pause + arm — no
-    // commit-only bookkeeping should run yet. The original wrapper
-    // returned early here before sweeping `CREATOR_EXCESS_POSITION` /
-    // halting `DISTRIBUTION_STATE`; preserve that ordering so the
-    // Phase 1 transaction does not delete user-owned state during
-    // the timelock window.
+    // commit-only bookkeeping should run yet. Sweeping
+    // `CREATOR_EXCESS_POSITION` / halting `DISTRIBUTION_STATE` is
+    // deferred to Phase 2 so the Phase 1 transaction does not delete
+    // user-owned state during the timelock window.
     let pending_armed = PENDING_EMERGENCY_WITHDRAW.may_load(deps.storage)?.is_some();
 
     // Phase 2 bookkeeping: capture creator excess + halt distribution
@@ -131,9 +130,9 @@ pub fn execute_recover_stuck_states(
     // Canonical auth source post-instantiate is `POOL_INFO.factory_addr`
     // (matches every other admin-gated handler in pool-core and the
     // creator-pool wrappers — see `creator-pool::admin::execute_emergency_withdraw`
-    // and `pool-core::admin::*`). Earlier revisions of this handler
-    // read `EXPECTED_FACTORY` which is set at instantiate from the same
-    // source; consolidating eliminates the two-source-of-truth drift.
+    // and `pool-core::admin::*`). `EXPECTED_FACTORY` is set at
+    // instantiate from the same value; auth reads only POOL_INFO so
+    // there is a single source of truth.
     let pool_info = POOL_INFO.load(deps.storage)?;
     if info.sender != pool_info.factory_addr {
         return Err(ContractError::Unauthorized {});
@@ -279,7 +278,6 @@ fn recover_reentrancy_guard(
 // distribution liveness primitives
 // ---------------------------------------------------------------------------
 //
-// `SkipDistributionUser`        — factory-only escape hatch.
 // `SelfRecoverDistribution`     — permissionless restart after 7d stall.
 // `ClaimFailedDistribution`     — committer-side claim of an isolated
 // mint failure (lives in commit module
@@ -287,10 +285,9 @@ fn recover_reentrancy_guard(
 // builder; see commit/distribution.rs).
 //
 // Together these make distribution live-or-die independent of any
-// single committer (per-mint reply isolation does the heavy lifting),
-// independent of admin availability (7-day permissionless recovery),
-// and independent of unforeseen ledger-row corruption (admin can
-// surgically remove a single poison row without resetting the cursor).
+// single committer (per-mint reply isolation does the heavy lifting)
+// and independent of admin availability (7-day permissionless
+// recovery).
 // ---------------------------------------------------------------------------
 
 // There is deliberately no "skip one distribution row" recovery hook:
@@ -308,12 +305,12 @@ fn recover_reentrancy_guard(
 /// Permissionless: restart a stalled distribution after a 7-day stall
 /// window. Mirrors `recover_distribution`'s cursor-reset semantics but
 /// gates on the longer `PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS`
-/// rather than admin auth, so distribution liveness is no longer a
-/// hard dependency on the factory admin.
+/// rather than admin auth, so distribution liveness is not a hard
+/// dependency on the factory admin.
 ///
 /// This handler does NOT skip any rows — if the stall is caused by a
-/// poison committer, the per-mint reply isolation fix already absorbs
-/// the failure on the next batch attempt. Self-recover is the
+/// poison committer, per-mint reply isolation already absorbs the
+/// failure on the next batch attempt. Self-recover is the
 /// liveness backstop for the case where keepers are entirely offline
 /// (no batch attempts at all for a week), so a fresh keeper can
 /// resume work without going through the factory.

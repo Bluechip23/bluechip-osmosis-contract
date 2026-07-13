@@ -456,13 +456,13 @@ fn test_remove_all_liquidity() {
     )
     .unwrap();
     assert!(res.messages.len() >= 2);
-    // standard exits now keep the LIQUIDITY_POSITIONS
+    // Standard exits keep the LIQUIDITY_POSITIONS
     // row alive at `liquidity == 0` so the user's CW721 NFT remains
     // rehydrate-able rather than becoming a tombstone (NFT exists on
-    // CW721 but every pool-side handler errors with "not found"). Pre-fix
-    // this test asserted the row was deleted; post-fix the row persists
-    // with zero liquidity, no unclaimed fees, and the snapshot's
-    // fee_growth_inside_*_last set to current globals.
+    // CW721 but every pool-side handler errors with "not found").
+    // The row must persist after full removal, with zero liquidity,
+    // no unclaimed fees, and the snapshot's fee_growth_inside_*_last
+    // set to current globals.
     let pos = LIQUIDITY_POSITIONS
         .load(&deps.storage, "1")
         .expect("position row must persist after full removal");

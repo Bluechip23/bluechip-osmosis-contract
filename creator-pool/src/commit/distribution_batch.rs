@@ -9,8 +9,8 @@
 //! `distributions_remaining`. The counter is informational; the ground
 //! truth is whether `COMMIT_LEDGER` has any entries past the cursor.
 //! This means a single tx can both process the final committer AND
-//! remove `DISTRIBUTION_STATE`, eliminating the previous "one extra
-//! empty cleanup call" pattern.
+//! remove `DISTRIBUTION_STATE`, so no extra empty "cleanup call" is
+//! ever needed.
 //!
 //! See also `commit/distribution.rs` for the
 //! `execute_continue_distribution` entry point that routes incoming
@@ -107,8 +107,8 @@ pub(crate) fn build_distribution_mint_submsg(
 /// `build_distribution_mint_submsg`). A failing mint is captured by the
 /// contract's reply handler and folded into `FAILED_MINTS`, leaving the
 /// rest of the batch's storage writes (cursor advance, ledger removal,
-/// other successful mints) intact. Pre-isolation,
-/// any single failing recipient would have reverted the entire batch.
+/// other successful mints) intact. Without this isolation, any single
+/// failing recipient would revert the entire batch.
 pub fn process_distribution_batch(
     storage: &mut dyn Storage,
     pool_info: &PoolInfo,
@@ -209,13 +209,14 @@ pub fn process_distribution_batch(
                 // committer rewards unsettled, and they cannot manipulate
                 // the residual without manipulating the per-user floors
                 // in a way that already harms their committers (and is
-                // therefore self-defeating). On legacy in-progress
-                // distributions started before `distributed_so_far`
-                // existed (`#[serde(default)]` → zero) the residual would
-                // equal the full `total_to_distribute`, which would
-                // double-mint; gate the settlement on `distributed_so_far
-                // > 0` so legacy distributions complete with the
-                // pre-upgrade dust-burn behavior intact.
+                // therefore self-defeating). A stored `DistributionState`
+                // that lacks the `distributed_so_far` field deserializes
+                // to zero (`#[serde(default)]`); for such an in-progress
+                // distribution the residual would equal the full
+                // `total_to_distribute` and double-mint, so the
+                // settlement is gated on `distributed_so_far > 0` —
+                // those distributions complete with the dust simply
+                // left unminted.
                 if !new_distributed_so_far.is_zero()
                     && new_distributed_so_far < dist_state.total_to_distribute
                 {
@@ -257,15 +258,13 @@ pub fn process_distribution_batch(
                 // Ledger has more entries but our `take(N)` returned zero.
                 // Anomalous — accumulate the failure counter so an
                 // operator monitoring `DistributionState` sees the count
-                // rise across retries. We CANNOT both save the "give up"
-                // state AND return Err: CosmWasm reverts every storage
-                // write in a handler that returns Err, so the previous
-                // `save(is_distributing = false) + return Err(...)`
-                // pattern never actually persisted the give-up state
-                // (the parallel `Err(e)` branch below was already cleaned
-                // up for the same reason). Surface the failure as a typed
-                // error after each anomalous round and let the recovery
-                // paths (`RecoverPoolStuckStates::StuckDistribution` after
+                // rise across retries. We CANNOT both save a "give up"
+                // state (e.g. `is_distributing = false`) AND return Err:
+                // CosmWasm reverts every storage write in a handler that
+                // returns Err, so such a save would never persist.
+                // Surface the failure as a typed error after each
+                // anomalous round and let the recovery paths
+                // (`RecoverPoolStuckStates::StuckDistribution` after
                 // 1h, `SelfRecoverDistribution` after 7d) reset the cursor.
                 dist_state.consecutive_failures += 1;
                 if dist_state.consecutive_failures >= MAX_CONSECUTIVE_DISTRIBUTION_FAILURES {
@@ -281,20 +280,17 @@ pub fn process_distribution_batch(
         }
         Err(e) => {
             // Genuine `COMMIT_LEDGER.range(...)` failure — only reachable
-            // on storage corruption (deserialization error). The previous
-            // code path bumped `consecutive_failures` and tried to
-            // persist the new state before returning Err, but CosmWasm
-            // reverts every storage write in a handler that returns
-            // `Err`, so neither save persisted — the documented
-            // "stop after MAX_CONSECUTIVE_DISTRIBUTION_FAILURES"
-            // never fired through this branch in practice. Removed the
-            // dead increment + save and surface the corruption as a
-            // typed error so operators investigate root cause directly
-            // rather than relying on a give-up gate that wouldn't
-            // accumulate. The "ledger has more entries but range
-            // returned zero rows" branch above (line ~263) is the only
-            // path where the failure counter actually accumulates,
-            // because that path returns Ok and its save survives.
+            // on storage corruption (deserialization error). There is
+            // deliberately no `consecutive_failures` bump + save here:
+            // CosmWasm reverts every storage write in a handler that
+            // returns `Err`, so the counter could never accumulate on
+            // this path. Instead the corruption surfaces as a typed
+            // error so operators investigate root cause directly rather
+            // than relying on a give-up gate that cannot fire. The
+            // "ledger has more entries but range returned zero rows"
+            // branch above is the only path where the failure counter
+            // actually accumulates, because that path returns Ok and
+            // its save survives.
             return Err(ContractError::DistributionBatchFailed {
                 attempt: 0,
                 reason: format!(

@@ -30,7 +30,7 @@ use crate::state::{
     POOL_STATE, REPLY_ID_DISTRIBUTION_MINT_BASE, REPLY_ID_FACTORY_NOTIFY_INITIAL,
     REPLY_ID_FACTORY_NOTIFY_RETRY, THRESHOLD_PAYOUT_AMOUNTS, USD_RAISED_FROM_COMMIT,
 };
-// Swap orchestration moved to pool_core::swap; re-exported via swap_helper.
+// Swap orchestration lives in pool_core::swap; re-exported via swap_helper.
 use crate::swap_helper::{execute_swap_cw20, simple_swap};
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, CosmosMsg, Decimal, DepsMut, Env, MessageInfo,
@@ -42,9 +42,9 @@ use pool_core::balance_verify::handle_deposit_verify_reply;
 /// cw2 contract name. Includes the `creator` discriminator so a
 /// migration tool inspecting cw2 names can positively identify this
 /// wasm as the creator pool.
-/// Pre-rename pools migrating up will fail any cw2-name check; that's
-/// the desired behaviour — cw2-name drift is exactly the foot-gun
-/// this rename closes.
+/// A pool whose stored cw2 name doesn't match fails any cw2-name
+/// check at migration time; that's the desired behaviour — cw2-name
+/// drift is exactly the foot-gun the discriminator closes.
 const CONTRACT_NAME: &str = "bluechip-osmosis-creator-pool";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -214,8 +214,7 @@ pub fn instantiate(
 
 /// Pause-only gate. Used by `Commit` (pre-threshold path) where the pool
 /// has no reserves yet, so the drain check from `check_pool_writable`
-/// doesn't apply. Identical inlined check was repeated 9× across the
-/// dispatch arms before this extraction.
+/// doesn't apply.
 fn check_pool_not_paused(storage: &dyn Storage) -> Result<(), ContractError> {
     if POOL_PAUSED.may_load(storage)?.unwrap_or(false) {
         return Err(ContractError::PoolPausedLowLiquidity {});
@@ -277,10 +276,9 @@ fn check_pool_writable_for_deposit(storage: &dyn Storage) -> Result<(), Contract
 /// timelock window (PauseKind::EmergencyPending). Auto-pause and
 /// admin Hard pause still reject.
 ///
-/// Closes the LP-trap window surfaced: without
-/// this, post-threshold LPs whose pool is emergency-withdrawn cannot
-/// exit during the timelock and lose their entire principal on the
-/// Phase-2 drain.
+/// Closes the LP-trap window: without this, post-threshold LPs whose
+/// pool is emergency-withdrawn cannot exit during the timelock and
+/// lose their entire principal on the Phase-2 drain.
 fn check_pool_writable_for_remove(storage: &dyn Storage) -> Result<(), ContractError> {
     use crate::state::{pause_kind, PauseKind};
     ensure_not_drained(storage)?;
@@ -322,9 +320,10 @@ pub fn execute(
             max_spread,
         } => {
             // Block ALL commits while paused — pre-threshold AND post-threshold.
-            // Previously only process_post_threshold_commit checked POOL_PAUSED,
-            // so admin pauses failed to stop pre-threshold deposits, letting
-            // users trap funds in the COMMIT_LEDGER of a paused pool.
+            // Gating at dispatch (in addition to the check inside
+            // process_post_threshold_commit) ensures an admin pause also stops
+            // pre-threshold deposits, which would otherwise let users trap
+            // funds in the COMMIT_LEDGER of a paused pool.
             check_pool_not_paused(deps.storage)?;
             commit(
                 deps,
@@ -371,13 +370,13 @@ pub fn execute(
         ExecuteMsg::Receive(cw20_msg) => execute_swap_cw20(deps, env, info, cw20_msg),
 
         // --- Liquidity ---
-        // Pause checks are now applied to EVERY liquidity-touching path.
-        // Previously only CollectFees honored POOL_PAUSED; deposits and
-        // removes could run unchecked while the pool was paused (e.g. mid
-        // emergency-withdraw window), which could either funnel fresh LP
-        // capital into a pending drain or let LPs race the drain. The
-        // drain-initiated path already flips POOL_PAUSED on, so a single
-        // check blocks both admin-pause and emergency-pending states.
+        // Pause checks are applied to EVERY liquidity-touching path. If
+        // deposits and removes ran unchecked while the pool was paused
+        // (e.g. mid emergency-withdraw window), they could either funnel
+        // fresh LP capital into a pending drain or pull against
+        // already-frozen reserves. The drain-initiated path already flips
+        // POOL_PAUSED on, so a single check blocks both admin-pause and
+        // emergency-pending states.
         ExecuteMsg::DepositLiquidity {
             amount0,
             amount1,
@@ -452,8 +451,7 @@ pub fn execute(
             transaction_deadline,
         } => {
             // Permitted during EmergencyPending so an LP about to remove
-            // can sweep their share of fee_reserve before the drain
-            //.
+            // can sweep their share of fee_reserve before the drain.
             check_pool_writable_for_remove(deps.storage)?;
             execute_collect_fees(deps, env, info, position_id, transaction_deadline)
         }
@@ -473,8 +471,8 @@ pub fn execute(
             // an explicit check here keeps users from pulling against
             // already-swept reserves with arbitrary math.
             //
-            // EmergencyPending is permitted so LPs can race the 24h drain
-            //. Hard / auto-pause / drained still reject.
+            // EmergencyPending is permitted so LPs can race the 24h drain.
+            // Hard / auto-pause / drained still reject.
             check_pool_writable_for_remove(deps.storage)?;
             execute_remove_partial_liquidity(
                 deps,
@@ -650,11 +648,9 @@ fn execute_update_creator_config_from_factory(
 /// NFT: sends the matching `AcceptOwnership` back to the NFT and flips
 /// `pool_state.nft_ownership_accepted`.
 ///
-/// Pre-this-handler the pool relied on a lazy `AcceptOwnership` emitted by
-/// `trigger_threshold_payout` (the first time threshold crossed), which
-/// left the factory as the NFT contract's actual owner for the entire
-/// pre-threshold window. The synchronous accept at finalize closes
-/// that window.
+/// Accepting synchronously at finalize (rather than lazily on the first
+/// threshold-crossing payout) ensures the factory is never left as the
+/// NFT contract's actual owner for the entire pre-threshold window.
 ///
 /// Authorisation: `info.sender` must equal `pool_info.factory_addr`.
 /// Idempotent: a second call (or a call after the deposit-side lazy
@@ -736,8 +732,9 @@ pub fn execute_retry_factory_notify(
     // `trigger_threshold_payout`. If PENDING_FACTORY_NOTIFY is true,
     // the crossing succeeded on the pool side — so the snapshot is
     // present. We `load` (not `may_load`) deliberately so a missing
-    // snapshot surfaces loudly rather than silently regressing to the
-    // `None` path (which would equal current-time, defeating the fix).
+    // snapshot surfaces loudly rather than silently falling back to the
+    // `None` path (which would record current-time instead of the
+    // original crossing time).
     let crossed_at = crate::state::THRESHOLD_CROSSED_AT.load(deps.storage)?;
     let notify = SubMsg::reply_always(
         CosmosMsg::Wasm(WasmMsg::Execute {
@@ -835,12 +832,12 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
             //
             // - Mint failed: clear the stash and accumulate the amount
             // under `user` in FAILED_MINTS. This is the load-bearing
-            // liveness invariant: a single rejecting recipient no
-            // longer reverts the entire batch tx; their amount is
+            // liveness invariant: a single rejecting recipient must
+            // not revert the entire batch tx; their amount is
             // held for `ClaimFailedDistribution` to retrieve later.
             // We always return Ok(...) from this branch — bubbling
-            // the error would re-introduce the very stall this fix
-            // was designed to eliminate.
+            // the error would let one bad recipient stall the whole
+            // distribution.
             //
             // The dispatch arm is gated on `PENDING_MINT_REPLIES.has(id)`
             // so any id ≥ BASE without a stash entry falls through to the

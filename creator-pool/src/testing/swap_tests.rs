@@ -213,14 +213,14 @@ fn test_race_condition_commits_crossing_threshold() {
         belief_price: None,
         max_spread: Some(Decimal::percent(10)),
     };
-    // After the H-cooldown change, a follower commit landing in the same
-    // block as the threshold-crossing tx is rejected outright with
+    // A follower commit landing in the same block as the
+    // threshold-crossing tx is rejected outright with
     // `PostThresholdCooldownActive`. This is the same-block-sandwich
-    // defense: Bob's commit cannot atomically swap against Alice's
-    // freshly-seeded pool. Pre-cooldown, this test asserted that Bob's
-    // tx fell through to `process_post_threshold_commit` (silently
-    // succeeding); now we assert that Bob's tx errors with the cooldown
-    // and produces zero state side-effects.
+    // defense: Bob's commit must not atomically swap against Alice's
+    // freshly-seeded pool — if it fell through to
+    // `process_post_threshold_commit` it would silently succeed. Assert
+    // that Bob's tx errors with the cooldown and produces zero state
+    // side-effects.
     let err2 = execute(deps.as_mut(), env.clone(), info2, msg2).unwrap_err();
     match err2 {
         ContractError::PostThresholdCooldownActive { until_block } => {
@@ -764,7 +764,7 @@ fn test_batch_size_with_consecutive_failures() {
     )
     .unwrap();
 
-    // Up to 5 mints (gas estimate cap); no factory bounty msg anymore.
+    // Up to 5 mints (gas estimate cap); the pool emits no factory bounty msg.
     assert!(
         res.messages.len() <= 5,
         "Should process at most 5 committers, got {}",
@@ -1789,7 +1789,7 @@ fn test_race_condition_not_manually_set() {
         max_spread: Some(Decimal::percent(10)),
     };
 
-    // Same-block follower commit is now blocked by the post-threshold
+    // A same-block follower commit is blocked by the post-threshold
     // cooldown (eliminates the atomic same-block sandwich on the
     // freshly-seeded pool). Pool reserves must remain at the seeded
     // values from Alice's crossing.
@@ -1917,7 +1917,7 @@ fn test_concurrent_commits_both_recorded() {
         // `Commit` doesn't expose `allow_high_max_spread`; the
         // post-threshold AMM swap path passes None to assert_max_spread,
         // so the hard cap on Bob's max_spread is 5% (the default-cap
-        // ceiling). 10% is now rejected.
+        // ceiling) and a 10% request would be rejected.
         max_spread: Some(Decimal::percent(5)),
     };
 
@@ -2088,8 +2088,8 @@ fn test_swap_fails_when_reserves_below_pause_threshold() {
 
     // Setup pool with reserves just below pause threshold
     setup_pool_with_reserves(&mut deps, Uint128::new(9), Uint128::new(100_000));
-    // execute_simple_swap now gates on IS_THRESHOLD_HIT as defense-in-depth
-    //. The setup helper seeds the flag as false (pre-
+    // execute_simple_swap gates on IS_THRESHOLD_HIT as defense-in-depth.
+    // The setup helper seeds the flag as false (pre-
     // threshold default); these direct-handler-call tests exercise
     // post-threshold AMM mechanics, so flip it on explicitly.
     IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
@@ -2114,7 +2114,7 @@ fn test_swap_fails_when_reserves_below_pause_threshold() {
     );
 
     // Swap must be rejected when a side is below MINIMUM_LIQUIDITY. The drain
-    // guard no longer tries to persist POOL_PAUSED on this path — a Wasm Err
+    // guard must not try to persist POOL_PAUSED on this path — a Wasm Err
     // return would revert the save — so the pool is "soft-paused" solely by
     // the reserve pre-check firing on every subsequent swap attempt.
     assert!(matches!(
@@ -2205,17 +2205,16 @@ fn test_swap_prevented_if_would_deplete_below_minimum() {
         None,
     );
 
-    // This test originally asserted `InsufficientReserves` on a swap that
-    // would deplete reserves below `MINIMUM_LIQUIDITY`. The 10%-with-override
-    // hard cap on realised slippage now fires first for any swap large enough
-    // to deplete reserves to that floor — the pre-cap arithmetic that surfaced
-    // the InsufficientReserves error is structurally unreachable. Re-purpose
-    // this regression test to confirm the slippage gate IS the now-binding
-    // guard for depletion-bordering swaps. The MIN-reserve guard is still
-    // exercised from `liquidity_tests` via direct AMM math.
+    // A swap large enough to deplete reserves below `MINIMUM_LIQUIDITY` is
+    // stopped by the 10%-with-override hard cap on realised slippage, which
+    // fires before the reserve arithmetic that would surface
+    // `InsufficientReserves` — that error is structurally unreachable on this
+    // path. Confirm the slippage gate IS the binding guard for
+    // depletion-bordering swaps. The MIN-reserve guard is still exercised
+    // from `liquidity_tests` via direct AMM math.
     assert!(
         matches!(result, Err(ContractError::MaxSpreadAssertion {})),
-        "Expected MaxSpreadAssertion (audit's pre-MIN-floor slippage cap), got: {:?}",
+        "Expected MaxSpreadAssertion (slippage cap fires before the MIN-reserve check), got: {:?}",
         result
     );
 }
@@ -2395,10 +2394,10 @@ fn test_both_reserves_checked() {
     ));
 
     // Test with low reserve1. Use a different sender than the first call —
-    // execute_simple_swap now runs the rate-limit check (hoisted from
-    // simple_swap so it can share the PoolCtx POOL_SPECS load), which would
-    // otherwise reject the same-sender second call with TooFrequentCommits
-    // before reaching the reserve guard this test exercises.
+    // execute_simple_swap runs the rate-limit check (shared with the PoolCtx
+    // POOL_SPECS load), which would otherwise reject the same-sender second
+    // call with TooFrequentCommits before reaching the reserve guard this
+    // test exercises.
     setup_pool_with_reserves(&mut deps, Uint128::new(10), Uint128::new(9999));
     // setup_pool_with_reserves resets IS_THRESHOLD_HIT
     // to false, so re-flip it for this second post-threshold scenario.
@@ -2491,12 +2490,10 @@ fn test_pause_state_persistence() {
 #[test]
 fn test_swap_lopsided_pool_after_threshold() {
     // A swap whose realised spread exceeds 10% is rejected even with
-    // `allow_high_max_spread = Some(true)`. This test previously validated
-    // that a 50%-of-reserve swap (extreme spread) *succeeded*; under the
-    // hard cap it must instead be rejected with `MaxSpreadAssertion`.
-    // Re-purposed as a regression test for the 10% slippage cap, preserving
-    // the lopsided-pool setup so the cap's behaviour is exercised in the
-    // same scenario.
+    // `allow_high_max_spread = Some(true)`. A 50%-of-reserve swap
+    // (extreme spread) must not succeed; under the hard cap it must be
+    // rejected with `MaxSpreadAssertion`. The lopsided-pool setup
+    // exercises the 10% slippage cap in the worst-case scenario.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
@@ -2533,7 +2530,7 @@ fn test_swap_lopsided_pool_after_threshold() {
     let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
     assert!(
         matches!(err, ContractError::MaxSpreadAssertion {}),
-        "lopsided 50%-of-reserve swap must be rejected by the post-audit \
+        "lopsided 50%-of-reserve swap must be rejected by the \
          10% hard cap on realised slippage; got {:?}",
         err
     );
@@ -2582,10 +2579,10 @@ fn test_swap_slippage_lopsided() {
 }
 
 /// Regression: `process_post_threshold_commit` must reject when reserves
-/// are already below `MINIMUM_LIQUIDITY`. Pre-fix, the post-threshold
-/// commit path lacked the MIN check that `simple_swap` enforces, so a
-/// commit on a drained pool would execute against near-zero reserves
-/// and continue draining. Fix mirrors the swap path's pre-state check.
+/// are already below `MINIMUM_LIQUIDITY`. If the post-threshold commit
+/// path lacked the MIN check that `simple_swap` enforces, a commit on a
+/// drained pool would execute against near-zero reserves and continue
+/// draining. The commit path mirrors the swap path's pre-state check.
 #[test]
 fn post_threshold_commit_rejects_when_pre_state_reserve_below_min() {
     use pool_core::state::MINIMUM_LIQUIDITY;

@@ -4,7 +4,7 @@ use pool_factory_interfaces::cw721_msgs::{Action, Cw721ExecuteMsg};
 
 use crate::error::ContractError;
 
-/// Protobuf type URL for `MsgInstantiateContractResponse`. Hoisted to
+/// Protobuf type URL for `MsgInstantiateContractResponse`. Kept at
 /// module scope so a future wasmd version bump (or a new caller that
 /// also needs to inspect SubMsg responses) has one place to update.
 const INSTANTIATE_RESPONSE_TYPE: &str = "/cosmwasm.wasm.v1.MsgInstantiateContractResponse";

@@ -570,9 +570,9 @@ fn test_complete_pool_creation_flow() {
         create_instantiate_reply(encode_reply_id(pool_id, SET_TOKENS), token_addr.as_str());
     let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
 
-    // Reload context and check token was set. ctx.state.creator_token_address
-    // is no longer written to; ctx.temp is the single source of truth and the
-    // query handler derives the state response from it.
+    // Reload context and check token was set. ctx.temp is the single source
+    // of truth for the creator token address; the query handler derives the
+    // state response from it.
     let ctx = POOL_CREATION_CONTEXT.load(&deps.storage, pool_id).unwrap();
     assert_eq!(ctx.temp.creator_token_addr, Some(token_addr.clone()));
     assert_eq!(ctx.state.status, CreationStatus::TokenCreated);
@@ -589,8 +589,8 @@ fn test_complete_pool_creation_flow() {
     let ctx = POOL_CREATION_CONTEXT.load(&deps.storage, pool_id).unwrap();
     assert_eq!(ctx.temp.nft_addr, Some(nft_addr.clone()));
     assert_eq!(ctx.state.status, CreationStatus::NftCreated);
-    // ctx.state.mint_new_position_nft_address is no longer written; the
-    // ctx.temp.nft_addr check above is the single source of truth.
+    // ctx.temp.nft_addr is the single source of truth for the NFT address;
+    // the check above covers it.
     assert_eq!(res.messages.len(), 1);
 
     // Step 3: Pool Finalization Reply
@@ -609,7 +609,7 @@ fn test_complete_pool_creation_flow() {
         "POOL_CREATION_CONTEXT should be removed after successful creation"
     );
 
-    // finalize_pool now emits three messages:
+    // finalize_pool emits three messages:
     // 1. CW20 UpdateMinter (hand the creator-token's minter to the pool)
     // 2. CW721 TransferOwnership (stage the pool as pending_owner)
     // 3. AcceptNftOwnership {} dispatched to the pool itself, mirroring
@@ -765,8 +765,8 @@ fn test_reply_handling() {
         .load(deps.as_ref().storage, pool_id)
         .unwrap();
     assert_eq!(updated_ctx.state.status, CreationStatus::TokenCreated);
-    // ctx.state.creator_token_address is no longer written; ctx.temp is
-    // the single source of truth.
+    // ctx.temp is the single source of truth for the creator token
+    // address.
     assert_eq!(
         updated_ctx.temp.creator_token_addr,
         Some(Addr::unchecked(contract_addr))

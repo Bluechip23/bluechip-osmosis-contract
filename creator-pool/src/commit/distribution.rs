@@ -70,7 +70,7 @@ pub fn execute_continue_distribution(
 
     // process_distribution_batch returns a `Vec<SubMsg>` — each per-user
     // mint is wrapped in `reply_always` so a single failing recipient
-    // can no longer revert the batch. Failures land in `FAILED_MINTS`
+    // cannot revert the batch. Failures land in `FAILED_MINTS`
     // via the contract's reply handler and are claimable later through
     // `ClaimFailedDistribution`.
     let (mint_submsgs, processed_count): (Vec<SubMsg>, u32) =

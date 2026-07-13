@@ -143,10 +143,10 @@ pub struct EmergencyDrainSnapshot {
 /// sweep the unclaimed residual to the bluechip wallet. 1 year =
 /// `365 * 86_400` seconds. Sized to give passive LPs (set-and-forget,
 /// vacationers, custodians on quarterly review cycles, etc.) a real
-/// chance to surface and claim. Tuned narrower would reintroduce the
-/// "24h timelock isn't a fair window for non-active LPs" issue this
-/// pattern was added to address; tuned wider provides no further LP
-/// benefit but indefinitely defers cleanup of provably-abandoned funds.
+/// chance to surface and claim. Tuned narrower, the window would be as
+/// unfair to non-active LPs as the 24h drain timelock alone; tuned
+/// wider provides no further LP benefit but indefinitely defers
+/// cleanup of provably-abandoned funds.
 pub const EMERGENCY_CLAIM_DORMANCY_SECONDS: u64 = 365 * 86_400;
 
 #[cw_serde]
@@ -335,13 +335,11 @@ pub const EMERGENCY_DRAIN_SNAPSHOT: Item<EmergencyDrainSnapshot> =
 pub const EXPECTED_FACTORY: Item<ExpectedFactory> = Item::new("expected_factory");
 
 // Reentrancy lock acquired by `commit` and `simple_swap` to reject
-// re-entry within the same tx (e.g. via a malicious cw20 hook). Storage
-// key is `"rate_limit_guard"` for backward compatibility with already-
-// deployed pools — the Rust binding was renamed from `REENTRANCY_GUARD`
-// because its previous name had nothing to do with rate limiting (which
-// is handled separately by USER_LAST_COMMIT) and confused liquidity-op
-// authors into adding spurious "reset on error" calls that paired with
-// no acquisition.
+// re-entry within the same tx (e.g. via a malicious cw20 hook). The
+// storage key string must remain `"rate_limit_guard"` because already-
+// deployed pools persist the lock under that key. Despite the key's
+// name, this item is a reentrancy guard, not a rate limiter — rate
+// limiting is handled separately by USER_LAST_COMMIT.
 pub const REENTRANCY_LOCK: Item<bool> = Item::new("rate_limit_guard");
 
 /// Transient context for SubMsg-based CW20 balance verification on
@@ -475,14 +473,14 @@ pub const POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK: Item<u64> =
 /// Uniswap-V2-style minimum-liquidity floor permanently locked on the
 /// first deposit, and the per-reserve floor used by auto-pause checks.
 pub const MINIMUM_LIQUIDITY: Uint128 = Uint128::new(1000);
-// `EMERGENCY_WITHDRAW_DELAY_SECONDS` was deleted — the delay is now
-// admin-tunable on the factory side
+// The emergency-withdraw delay is admin-tunable on the factory side
 // (`FactoryInstantiate.emergency_withdraw_delay_seconds`) and queried at
 // runtime by `execute_emergency_withdraw_initiate` via
-// `FactoryQueryMsg::EmergencyWithdrawDelaySeconds`. Range-validation lives
-// in factory's `validate_factory_config` (60s ≤ delay ≤ 7 days). The
-// previous hardcoded 24h is now the field's `#[serde(default)]`, so
-// pre-this-field deployments deserialize unchanged.
+// `FactoryQueryMsg::EmergencyWithdrawDelaySeconds`; there is deliberately
+// no pool-side constant. Range-validation lives in factory's
+// `validate_factory_config` (60s ≤ delay ≤ 7 days). The field's
+// `#[serde(default)]` is 24h, so deployments that predate the field
+// deserialize unchanged.
 
 /// Blocks of trading freeze applied immediately after a commit pool's
 /// threshold crosses. With ~6s block time on typical Cosmos chains, 2
@@ -651,9 +649,8 @@ pub const POOL_COMMITS_QUERY_MAX_LIMIT: u32 = 100;
 /// Threshold-payout split components (bluechip base units). Total is
 /// `THRESHOLD_PAYOUT_TOTAL_BASE_UNITS`. Both
 /// `validate_pool_threshold_payments` (instantiate) and
-/// `trigger_threshold_payout` (runtime) reference these constants —
-/// previously the values lived inline in two locations and were
-/// vulnerable to silent drift.
+/// `trigger_threshold_payout` (runtime) reference these constants so
+/// the two call sites cannot silently drift apart.
 pub const THRESHOLD_PAYOUT_CREATOR_BASE_UNITS: u128 = 325_000_000_000;
 pub const THRESHOLD_PAYOUT_BLUECHIP_BASE_UNITS: u128 = 25_000_000_000;
 pub const THRESHOLD_PAYOUT_POOL_BASE_UNITS: u128 = 350_000_000_000;

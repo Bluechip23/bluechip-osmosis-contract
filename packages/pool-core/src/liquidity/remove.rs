@@ -122,18 +122,18 @@ pub fn remove_all_liquidity(
     // reserves above MIN auto-clears both flags.
     let auto_paused_now = maybe_auto_pause_on_low_liquidity(deps.storage, &pool_state)?;
 
-    // both exit cases keep the LIQUIDITY_POSITIONS
-    // row alive. The prior behaviour deleted the row on a standard exit
-    // (locked_liquidity == 0), leaving the user's CW721 NFT as a
-    // tombstone — it still existed on-chain (no BurnNft is ever
-    // dispatched) but every pool-side handler that loaded
-    // LIQUIDITY_POSITIONS would fail with a "not found" error. The NFT
-    // was tradeable on secondary markets despite being functionally
-    // inert; a buyer thinking they were acquiring an LP position would
-    // get a token id that AddToPosition / CollectFees / RemoveLiquidity
-    // all reject. Mirrors Uniswap V3's empty-position model: the NFT
-    // and its position row stay alive at zero, ready to be rehydrated
-    // by a future AddToPosition call.
+    // Both exit cases keep the LIQUIDITY_POSITIONS
+    // row alive. Deleting the row on a standard exit
+    // (locked_liquidity == 0) would leave the user's CW721 NFT as a
+    // tombstone — it would still exist on-chain (no BurnNft is ever
+    // dispatched) but every pool-side handler that loads
+    // LIQUIDITY_POSITIONS would fail with a "not found" error, and the
+    // NFT would stay tradeable on secondary markets despite being
+    // functionally inert: a buyer thinking they were acquiring an LP
+    // position would get a token id that AddToPosition / CollectFees /
+    // RemoveLiquidity all reject. Mirrors Uniswap V3's empty-position
+    // model: the NFT and its position row stay alive at zero, ready to
+    // be rehydrated by a future AddToPosition call.
     //
     // Difference between the two branches: first-depositor positions
     // (locked_liquidity > 0) drop to exactly the locked floor
@@ -279,9 +279,9 @@ pub fn remove_partial_liquidity(
     // in a single helper call per token. The clipped slice of the
     // removed portion is routed to the creator pot below;
     // the clipped slice of the preserved portion is also routed to the
-    // pot (was previously dropped — multiplier-clipped fees on the
-    // preserved liquidity silently orphaned in `fee_reserve_*` with no
-    // payout path until emergency drain).
+    // pot, so multiplier-clipped fees on the preserved liquidity are
+    // never silently orphaned in `fee_reserve_*` with no payout path
+    // until emergency drain.
     let remaining_liquidity = liquidity_position
         .liquidity
         .checked_sub(liquidity_to_remove)?;
@@ -368,11 +368,10 @@ pub fn remove_partial_liquidity(
         .checked_sub(clipped_1)?
         .checked_sub(preserved_clip_1)?;
 
-    // Route BOTH clip slices to the creator pot. The removed slice's
-    // clip mirrors the prior behaviour. The preserved slice's clip —
-    // previously orphaned in fee_reserve — now flows to the creator
-    // wallet via ClaimCreatorFees (creator-pool) or to bluechip_wallet
-    // at emergency drain (both paths).
+    // Route BOTH clip slices to the creator pot. From there they flow
+    // to the creator wallet via ClaimCreatorFees (creator-pool) or to
+    // bluechip_wallet at emergency drain (both paths), rather than
+    // sitting orphaned in fee_reserve.
     let mut pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
     pot.amount_0 = pot
         .amount_0
@@ -555,7 +554,7 @@ pub fn execute_remove_partial_liquidity_by_percent(
     // the full position. This keeps `remove_by_percent(50)` followed by
     // `remove_by_percent(50)` ending at 25% of the original removable
     // share — the natural expectation. For a position with no lock
-    // (locked_liquidity == 0), this is identical to the previous behavior.
+    // (locked_liquidity == 0), the removable slice IS the full position.
     let removable = liquidity_position
         .liquidity
         .checked_sub(liquidity_position.locked_liquidity)?;

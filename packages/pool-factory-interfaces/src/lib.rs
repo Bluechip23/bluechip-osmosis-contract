@@ -10,11 +10,10 @@ use crate::asset::TokenType;
 #[cw_serde]
 pub enum PoolQueryMsg {
     /// Returns this pool's `PoolStateResponseForFactory` (its own state — the
-    /// pool is the implicit subject of the query). Previously took a
-    /// `pool_contract_address: String` argument that was never read by any
-    /// implementor; the dispatch always replied with the queried pool's own
-    /// state. Removed to prevent future readers from assuming the parameter
-    /// changed which pool's state was returned.
+    /// pool is the implicit subject of the query). Takes no arguments by
+    /// design: the dispatch always replies with the queried pool's own state,
+    /// so a pool-address parameter would be dead weight and would invite
+    /// readers to assume it selects which pool's state is returned.
     GetPoolState {},
     GetAllPools {},
     IsPaused {},
@@ -87,13 +86,14 @@ pub enum FactoryQueryMsg {
 /// Lives here (not in the factory crate) because pools intentionally
 /// have no compile-time factory dependency; the two communicate only
 /// over wasm message boundaries. Every pool-side factory query goes
-/// through this one type so an unwrapped call can't slip in again —
-/// exactly that happened pre-launch: `EmergencyWithdrawDelaySeconds`
-/// was sent bare from `pool-core::execute_emergency_withdraw_initiate`
-/// (hard-failing every emergency initiate on-chain), and the three
-/// fail-soft `BluechipWalletAddress` callers silently fell back to
-/// their instantiate-time snapshots forever, defeating live wallet
-/// rotation.
+/// through this one type so an unwrapped call can't slip in — a bare
+/// `FactoryQueryMsg` fails the factory's deserialization, which would
+/// hard-fail every emergency initiate on-chain (the
+/// `EmergencyWithdrawDelaySeconds` caller in
+/// `pool-core::execute_emergency_withdraw_initiate`), and would make
+/// the three fail-soft `BluechipWalletAddress` callers silently fall
+/// back to their instantiate-time snapshots forever, defeating live
+/// wallet rotation.
 #[cw_serde]
 pub enum FactoryQueryEnvelope {
     PoolFactoryQuery(FactoryQueryMsg),
@@ -151,11 +151,10 @@ pub enum FactoryExecuteMsg {
     // registry reflects when the pool ACTUALLY crossed — not when
     // the (possibly retried-after-failure) notification finally lands.
     //
-    // `#[serde(default)]` keeps the wire format backward-compatible:
-    // legacy callers (no field) deserialize with `crossed_at = None`,
-    // and the factory falls back to `env.block.time` (the prior
-    // behaviour). Production callers in this workspace always supply
-    // the field.
+    // `#[serde(default)]` keeps the wire format tolerant: callers that
+    // omit the field deserialize with `crossed_at = None`, and the
+    // factory falls back to `env.block.time`. Production callers in
+    // this workspace always supply the field.
     NotifyThresholdCrossed {
         pool_id: u64,
         #[serde(default)]

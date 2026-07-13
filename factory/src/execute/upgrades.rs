@@ -315,10 +315,10 @@ pub fn execute_continue_pool_upgrade(
     env: Env,
     info: MessageInfo,
 ) -> Result<Response, ContractError> {
-    // Admin-only now. Previously this was self-called from
-    // execute_apply_pool_upgrade, which worked only until the pool list grew
+    // Admin-only. Chaining continuation messages from
+    // execute_apply_pool_upgrade would work only until the pool list grew
     // large enough that the chained execute messages exceeded block gas
-    // limits in a single tx. Making this admin-only forces batches to be
+    // limits in a single tx. Keeping this admin-only forces batches to be
     // submitted as separate transactions, each with its own gas budget.
     ensure_admin(deps.as_ref(), &info)?;
 
@@ -410,14 +410,14 @@ pub fn execute_continue_pool_upgrade(
         //    later retry calls don't burn gas re-attempting the same
         //    head pools while later entries never get a turn.
         //
-        // Pre-fix: skipped entries stayed in their original head
-        // positions, so `pending_retry.take(batch_size)` repeatedly
-        // returned the same head set. If the head pools never unpaused,
-        // tail entries (potentially already unpaused) waited indefinitely
-        // unless the admin canceled + re-proposed.
+        // Without the rotation, skipped entries would stay in their head
+        // positions, so `pending_retry.take(batch_size)` would repeatedly
+        // return the same head set: if the head pools never unpaused,
+        // tail entries (potentially already unpaused) would wait
+        // indefinitely unless the admin canceled + re-proposed.
         //
-        // Post-fix: the queue rotates one batch_size per retry call.
-        // After ≤ ceil(N / batch_size) calls every entry has been
+        // With it, the queue rotates one batch_size per retry call.
+        // After <= ceil(N / batch_size) calls every entry has been
         // attempted at least once even on the pathological all-paused-head
         // case; persistently-paused pools cycle through the queue rather
         // than wedging it.

@@ -20,9 +20,7 @@ use cw_storage_plus::Map;
 /// Run `body` under the contract-wide `REENTRANCY_LOCK`.
 ///
 /// Centralizes the load → check → save(true) → run → save(false)
-/// pattern previously open-coded in multiple call sites. Hoisted from
-/// `creator-pool::generic_helpers` into the shared `pool-core::generic`
-/// module so the swap path in `pool_core::swap` and any future
+/// pattern so the swap path in `pool_core::swap` and any
 /// liquidity / admin caller in either pool crate share a single
 /// implementation.
 ///
@@ -246,11 +244,11 @@ mod tests {
 
     #[test]
     fn swap_and_liquidity_rate_limits_use_independent_maps() {
-        // The hostile-CW20 withdrawal-freeze fix relies on swaps/commits
-        // (`USER_LAST_COMMIT`) and liquidity ops (`USER_LAST_LIQUIDITY_OP`)
-        // keying *separate* cooldown maps, so a swap — whose CW20 path can
-        // be made to stamp an arbitrary address — can never block a
-        // withdrawal. This pins that independence.
+        // Swaps/commits (`USER_LAST_COMMIT`) and liquidity ops
+        // (`USER_LAST_LIQUIDITY_OP`) key *separate* cooldown maps, so a
+        // swap — whose CW20 path can be made to stamp an arbitrary
+        // address — can never block a withdrawal. This pins that
+        // independence.
         use crate::state::PoolSpecs;
         use cosmwasm_std::testing::{mock_dependencies, mock_env};
         use cosmwasm_std::{Addr, Decimal};
@@ -271,8 +269,8 @@ mod tests {
             Err(ContractError::TooFrequentCommits { .. })
         ));
         // ...but a liquidity op in the SAME block is NOT blocked: it reads
-        // the separate liquidity map, which the swap never touched. Before
-        // the fix this shared one map and would have tripped here.
+        // the separate liquidity map, which the swap never touched. A
+        // single shared map would have tripped here.
         check_liquidity_rate_limit(&mut deps.as_mut(), &env, &specs, &user).unwrap();
         // The liquidity map enforces its own cooldown independently.
         assert!(matches!(

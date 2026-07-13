@@ -50,7 +50,7 @@ use post_threshold::process_post_threshold_commit;
 use pre_threshold::process_pre_threshold_commit;
 use threshold_crossing::{process_threshold_crossing_with_excess, process_threshold_hit_exact};
 
-// Minimum commit-value floors moved to per-pool state. Defaults are
+// Minimum commit-value floors are per-pool state. Defaults are
 // `crate::state::DEFAULT_MIN_COMMIT_USD_{PRE,POST}_THRESHOLD` and the
 // active values are stored on `CommitLimitInfo.min_commit_usd_pre_threshold`
 // / `min_commit_usd_post_threshold`. The floor still limits pre-threshold
@@ -105,11 +105,11 @@ pub fn commit(
     // this check, a paused pool would continue to bank pre-threshold
     // funds and to cross the threshold while admin investigates —
     // a fire-alarm-with-foot-still-on-the-gas failure mode. The
-    // existing redundant check in `process_post_threshold_commit`
-    // is kept as defense-in-depth. Reuses the existing
-    // `PoolPausedLowLiquidity` error variant for consistency with
-    // the swap and post-threshold callers; the name is a residual
-    // from when the only pause path was the auto-low-liquidity one.
+    // redundant check in `process_post_threshold_commit` is
+    // defense-in-depth. Reuses the `PoolPausedLowLiquidity` error
+    // variant for consistency with the swap and post-threshold
+    // callers; the variant name calls out only the auto-low-liquidity
+    // pause path but is shared by all of them.
     if POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::PoolPausedLowLiquidity {});
     }
@@ -162,13 +162,12 @@ fn execute_commit_logic(
     // commits flow only in the bluechip direction.
     // `validate_pool_token_info` pins `asset_infos[0]` to the canonical
     // bluechip Native denom and `asset_infos[1]` to the creator-token
-    // CW20, so accepting the creator-token side here was dead-code —
-    // the inner `match` below only handles bluechip Native and returns
-    // `AssetMismatch` for everything else. Tighten the outer check to
+    // CW20, and the inner `match` below only handles bluechip Native,
+    // returning `AssetMismatch` for everything else. The outer check is
     // bluechip-only so a caller passing the creator-token side surfaces
     // the clearer error earlier and skips the USD-conversion +
     // min-commit + analytics work that would otherwise run before the
-    // inner reject. The inner `_ => AssetMismatch` arm is preserved as
+    // inner reject. The inner `_ => AssetMismatch` arm remains as
     // defense-in-depth against config corruption.
     if !asset.info.equal(&pool_info.pool_info.asset_infos[0]) {
         return Err(ContractError::AssetMismatch {});
@@ -191,7 +190,7 @@ fn execute_commit_logic(
     }
     // Load IS_THRESHOLD_HIT once and thread it through both the minimum-
     // commit check here and the main branching below (used later as
-    // `threshold_already_hit`). Previously the load was duplicated.
+    // `threshold_already_hit`).
     let threshold_already_hit = IS_THRESHOLD_HIT.load(deps.storage)?;
     let min_commit = if threshold_already_hit {
         commit_config.min_commit_usd_post_threshold
@@ -294,10 +293,10 @@ fn execute_commit_logic(
                     // clearing the flag (would also indicate a bug).
                     // Rather than silently downgrading the user's intended
                     // threshold-crossing commit into a pre/post-threshold
-                    // commit (the prior fallback behavior, which violated
-                    // user intent and hid the underlying corruption),
-                    // surface the stuck state with an explicit error
-                    // pointing operators at the recovery path.
+                    // commit (which would violate user intent and hide
+                    // the underlying corruption), surface the stuck
+                    // state with an explicit error pointing operators at
+                    // the recovery path.
                     if THRESHOLD_PROCESSING
                         .may_load(deps.storage)?
                         .unwrap_or(false)
@@ -337,9 +336,9 @@ fn execute_commit_logic(
                             &mut analytics,
                         )?
                     } else {
-                        // Threshold hit exactly — extracted to
+                        // Threshold hit exactly — handled by
                         // `commit::threshold_crossing::process_threshold_hit_exact`
-                        // so all four phase handlers sit at the same module
+                        // so all the phase handlers sit at the same module
                         // depth (pre / post / threshold-with-excess /
                         // threshold-hit-exact / distribution batch).
                         process_threshold_hit_exact(

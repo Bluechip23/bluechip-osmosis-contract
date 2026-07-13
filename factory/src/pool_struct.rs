@@ -225,11 +225,11 @@ impl ThresholdPayoutAmounts {
     /// equals `THRESHOLD_PAYOUT_TOTAL_BASE_UNITS`.
     ///
     /// Mirrors the pool-side `validate_pool_threshold_payments` in
-    /// `creator-pool::commit::threshold_payout`. Previously this
-    /// validator only checked "every component non-zero + no overflow"
-    /// — which let `ProposeConfigUpdate` install non-canonical splits
-    /// that the pool-side validator would then silently reject at the
-    /// next commit-pool instantiate, burning a 48h timelock cycle on a
+    /// `creator-pool::commit::threshold_payout`. A looser check (e.g.
+    /// "every component non-zero + no overflow") would let
+    /// `ProposeConfigUpdate` install non-canonical splits that the
+    /// pool-side validator would then silently reject at the next
+    /// commit-pool instantiate, burning a 48h timelock cycle on a
     /// misconfig the factory should have caught at propose time. The
     /// strict-canonical gate keeps the two sides in lockstep.
     ///
@@ -382,9 +382,8 @@ mod threshold_payout_validate_tests {
         );
     }
 
-    /// All-zero payload — the old non-zero check accepted this if every
-    /// component happened to be zero, but now rejects on the first
-    /// per-component equality. A misconfig that sets every component to
+    /// All-zero payload — rejected on the first per-component equality
+    /// check. A misconfig that sets every component to
     /// zero (e.g., a silent serde default at the wrong layer) is caught
     /// at propose time rather than landing as a no-op mint at
     /// threshold-cross.

@@ -212,7 +212,7 @@ fn test_emergency_withdraw() {
     assert_eq!(action.value, "emergency_withdraw");
 
     // LP-owned funds (reserve0=1000, reserve1=2000) are
-    // now escrowed for per-position claims via ClaimEmergencyShare rather
+    // escrowed for per-position claims via ClaimEmergencyShare rather
     // than swept to the bluechip wallet. The response's `amount0/amount1`
     // attributes report ONLY the funds actually swept (CREATOR_FEE_POT +
     // creator-excess-position). Both are empty in this test setup, so
@@ -224,7 +224,7 @@ fn test_emergency_withdraw() {
         .unwrap();
     assert_eq!(
         amount0.value, "0",
-        "post-fix: LP funds escrow, only non-LP buckets sweep — both empty here"
+        "LP funds escrow, only non-LP buckets sweep — both empty here"
     );
 
     let amount1 = exec_res
@@ -241,7 +241,7 @@ fn test_emergency_withdraw() {
     // No transfer messages — sweep was zero on both sides.
     assert_eq!(exec_res.messages.len(), 0);
 
-    // The LP-owned funds are now captured in EMERGENCY_DRAIN_SNAPSHOT
+    // The LP-owned funds are captured in EMERGENCY_DRAIN_SNAPSHOT
     // for per-position claims. Verify the snapshot recorded the
     // pre-drain reserves correctly so positions can claim against
     // them.

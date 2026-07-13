@@ -167,10 +167,9 @@ pub fn query_pool_creation_status(
     Ok(Some(PoolCreationStatusResponse {
         pool_id: state.pool_id,
         creator: state.creator,
-        // `ctx.temp` is now the single source of truth for these
-        // addresses. The `state` mirrors that previously held them
-        // were never written by current code paths and have been
-        // removed; the wire-format response retains
+        // `ctx.temp` is the single source of truth for these
+        // addresses; `state` carries no mirrors of them. The
+        // wire-format response retains
         // `creator_token_address` / `mint_new_position_nft_address`
         // / `pool_address` slots so downstream consumers continue
         // to deserialize cleanly. `pool_address` is unset by the

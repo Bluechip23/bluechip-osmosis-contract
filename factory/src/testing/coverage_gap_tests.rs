@@ -1,5 +1,5 @@
-//! Coverage-gap tests for factory paths that had no Rust regression cover
-//! prior to this file:
+//! Coverage tests for factory paths not exercised elsewhere in the
+//! Rust test suite:
 //!
 //! - `must_pay` surplus refund on commit-pool `Create`.
 

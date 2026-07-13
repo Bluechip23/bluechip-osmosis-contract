@@ -184,7 +184,7 @@ fn test_notify_threshold_crossed_double_call_prevention() {
     );
 }
 
-/// Success path: NotifyThresholdCrossed is now a pure registry recording.
+/// Success path: NotifyThresholdCrossed is a pure registry recording.
 /// The response carries NO messages (no mint, no ordinal allocation) and
 /// the attrs action=threshold_crossed / pool_id / crossed_at.
 #[test]
@@ -619,8 +619,9 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
     assert_eq!(pool_2_details.creator_pool_addr, pool_2.clone());
     assert_eq!(pool_2_details.pool_id, pool_id_2);
 
-    // KEY ASSERTION: Pool 1's registry entry should still be intact
-    // (This would fail with the old creator-address key, as pool 2 would overwrite pool 1)
+    // KEY ASSERTION: Pool 1's registry entry should still be intact.
+    // (Keying the registry by creator address would fail here, as pool 2
+    // would overwrite pool 1; the pool_id key keeps both entries.)
     let pool_1_details_after = POOLS_BY_ID.load(&deps.storage, pool_id_1).unwrap();
     assert_eq!(
         pool_1_details_after.pool_id, pool_id_1,
@@ -914,9 +915,9 @@ fn test_create_commit_pool_disabled_fee_rejects_attached_funds() {
 
 // ---------------------------------------------------------------------------
 // `ProposePoolUpgrade` must dedup `pool_ids` and reject IDs that don't
-// exist in the registry. Pre-fix the admin-supplied list flowed straight
-// through to apply, where duplicates produced two `Migrate` messages to
-// the same pool and invalid IDs aborted the entire batch after a 48h
+// exist in the registry. If the admin-supplied list flowed straight
+// through to apply, duplicates would produce two `Migrate` messages to
+// the same pool and invalid IDs would abort the entire batch after a 48h
 // timelock.
 // ---------------------------------------------------------------------------
 #[test]
@@ -977,10 +978,10 @@ fn test_m1_propose_upgrade_dedups_pool_ids() {
 }
 
 // ---------------------------------------------------------------------------
-// C2: the CW20 address minted by the factory (via the SET_TOKENS reply)
+// The CW20 address minted by the factory (via the SET_TOKENS reply)
 // must be persisted into POOLS_BY_ID — leaving every commit pool's
 // registry entry with the placeholder string would break downstream
-// consumers. This test pins the post-fix invariant: registry's
+// consumers. This test pins the invariant: registry's
 // CreatorToken address matches the SubMsg-instantiated CW20.
 // ---------------------------------------------------------------------------
 #[test]
@@ -1035,7 +1036,7 @@ fn test_c2_pool_details_persists_real_creator_token_address() {
         create_instantiate_reply(encode_reply_id(pool_id, FINALIZE_POOL), pool_addr.as_str());
     pool_creation_reply(deps.as_mut(), env, pool_reply).unwrap();
 
-    // The fix: PoolDetails.pool_token_info[1] must be the REAL CW20,
+    // Invariant: PoolDetails.pool_token_info[1] must be the REAL CW20,
     // not the sentinel placeholder.
     let details = POOLS_BY_ID.load(&deps.storage, pool_id).unwrap();
     let creator_token_addr = match &details.pool_token_info[1] {
@@ -1118,8 +1119,8 @@ fn test_l7_create_rejects_all_numeric_symbol() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-address rate limit on commit-pool creation. Pre-fix, anyone could
-// spam consecutive Create calls. Now the same address must wait
+// Per-address rate limit on commit-pool creation. Without it, anyone
+// could spam consecutive Create calls. The same address must wait
 // `COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS` between successful creates.
 // ---------------------------------------------------------------------------
 #[test]
@@ -1616,8 +1617,9 @@ mod pair_uniqueness_tests {
             },
         ];
 
-        // Two legacy duplicate pools at the same pair (this is exactly
-        // the pre-fix sybil-attack outcome we're back-filling around).
+        // Two legacy duplicate pools at the same pair — the sybil-attack
+        // shape that deployed chain state may already contain and that
+        // the back-fill must grandfather rather than clobber.
         POOLS_BY_ID
             .save(deps.as_mut().storage, 5, &pool_details_for(pair.clone(), 5))
             .unwrap();

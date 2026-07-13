@@ -101,7 +101,7 @@ pub fn compute_swap(
 /// downstream. Multiplying the numerator by `1_000_000` before the divide
 /// preserves 6 decimal places of precision in the accumulator — the same
 /// 1e6 fixed-point scale as `factory::usd_price::RATE_PRECISION`, so
-/// consumers no longer need to re-multiply when computing per-pool TWAPs.
+/// consumers can compute per-pool TWAPs without re-multiplying.
 ///
 /// Any change here MUST be propagated to `RATE_PRECISION` AND to a
 /// coordinated migration that resets `price{0,1}_cumulative_last` on
@@ -297,21 +297,17 @@ pub fn execute_swap_cw20(
             transaction_deadline,
         }) => {
             // Enforce the transaction deadline BEFORE the cross-contract
-            // balance query. Previously the deadline was first checked
-            // inside `simple_swap` (called at the very end of this
-            // function), so an expired Receive-hook tx still paid for a
-            // `query_token_balance_strict` round-trip before reverting.
-            // Checking here saves one cross-contract query on the
-            // rejected path; `simple_swap` re-checks the deadline as
-            // defense-in-depth so any future entry point that bypasses
-            // this gate still rejects.
+            // balance query so an expired Receive-hook tx fails fast
+            // instead of paying for a `query_token_balance_strict`
+            // round-trip before reverting. `simple_swap` re-checks the
+            // deadline as defense-in-depth so any future entry point
+            // that bypasses this gate still rejects.
             enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
             let pool_info: PoolInfo = POOL_INFO.load(deps.storage)?;
-            // Authorisation + offer-side lookup in one pass. Folded
-            // together (vs. the prior `.any()` boolean) so the balance
-            // verify step below can use the same index without re-scanning
-            // the pair.
+            // Authorisation + offer-side lookup in one pass, so the
+            // balance-verify step below can use the same index without
+            // re-scanning the pair.
             let offer_index = pool_info
                 .pool_info
                 .asset_infos
@@ -416,12 +412,11 @@ pub fn simple_swap(
 ) -> Result<Response, ContractError> {
     enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
-    // use the shared `with_reentrancy_guard` helper
-    // instead of open-coding the load → check → save(true) → run →
-    // save(false) pattern. Same semantics — unconditional clear on both
-    // success and error paths so mock-test storage doesn't leak a
-    // stuck lock across test cases — but the load-bearing invariant
-    // now lives in exactly one place (pool_core::generic).
+    // Run under the shared `with_reentrancy_guard` helper
+    // (pool_core::generic), which owns the load → check → save(true) →
+    // run → save(false) pattern and clears the lock unconditionally on
+    // both success and error paths so mock-test storage doesn't leak a
+    // stuck lock across test cases.
     with_reentrancy_guard(deps, move |mut deps| {
         execute_simple_swap(
             &mut deps,
@@ -468,10 +463,9 @@ pub fn execute_simple_swap(
         specs: pool_specs,
     } = PoolCtx::load(deps.storage)?;
 
-    // Hoisted from `simple_swap` so it can share PoolCtx's POOL_SPECS load
-    // (the previous structure issued a redundant POOL_SPECS.load just for
-    // this rate-limit check). USER_LAST_COMMIT writes here are reverted by
-    // the chain if the swap fails downstream, identical to before.
+    // The rate-limit check shares PoolCtx's POOL_SPECS load rather than
+    // issuing a redundant POOL_SPECS.load of its own. USER_LAST_COMMIT
+    // writes here are reverted by the chain if the swap fails downstream.
     check_rate_limit(deps, &env, &pool_specs, &sender)?;
 
     let (offer_index, offer_pool, ask_pool) =

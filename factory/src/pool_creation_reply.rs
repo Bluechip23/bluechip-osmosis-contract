@@ -13,7 +13,7 @@ use cosmwasm_std::{
 use pool_factory_interfaces::cw721_msgs::Cw721InstantiateMsg;
 
 /// CW721 NFT branding for liquidity-position NFTs minted on commit-pool
-/// creation. Hoisted to module scope so a deployment-specific re-skin
+/// creation. Kept at module scope so a deployment-specific re-skin
 /// (white-label, fork) is a single edit per constant. Pool-creation
 /// label format is `LP_NFT_LABEL_PREFIX{token_addr}` so the on-chain
 /// label always carries the deterministic creator-token suffix.

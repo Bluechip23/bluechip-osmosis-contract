@@ -55,8 +55,8 @@ fn test_threshold_with_excess_creates_position() {
     // Override max_bluechip_lock_per_pool to a value below the realistic
     // pools_bluechip_seed that this test will generate. The
     // bluechip_to_threshold is derived arithmetically from the rate
-    // captured at commit entry, rather than via a second mock oracle
-    // query that used to return a flat constant. The realistic seed for
+    // captured at commit entry, rather than via a second oracle
+    // query. The realistic seed for
     // this test's tiny usd_to_threshold ($100) is ~94_000 ubluechip, so
     // the cap must be under that for the excess branch to fire.
     let mut commit_config = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
@@ -784,8 +784,8 @@ fn test_distribution_timeout_triggers_error() {
         .unwrap();
 
     let mut env = mock_env();
-    // Just past DISTRIBUTION_STALL_TIMEOUT_SECONDS (24h). Raised from the
-    // previous 2h window so a brief keeper outage no longer bricks a pool.
+    // Just past DISTRIBUTION_STALL_TIMEOUT_SECONDS (24h). The window is
+    // generous so a brief keeper outage cannot brick a pool.
     env.block.time = old_time.plus_seconds(crate::state::DISTRIBUTION_STALL_TIMEOUT_SECONDS + 1);
 
     // Permissionless — anyone can call ContinueDistribution
@@ -803,13 +803,14 @@ fn test_distribution_timeout_triggers_error() {
 
     // The on-chain stall signal is the QueryMsg::DistributionState query,
     // not a marker written into DISTRIBUTION_STATE itself. CosmWasm reverts
-    // every staged storage write when a handler returns Err, so attempting
-    // to set `consecutive_failures = 99` immediately before the Err return
-    // would be discarded along with the failed tx (the prior version of
-    // this test relied on MockStorage NOT enforcing that revert, which
-    // masked the dead code on real chains).
+    // every staged storage write when a handler returns Err, so a marker
+    // such as `consecutive_failures = 99` written immediately before the
+    // Err return would be discarded along with the failed tx (and
+    // MockStorage does not enforce that revert, so a test asserting on
+    // such a marker would pass while the marker never lands on a real
+    // chain).
     //
-    // Verify the new observability path: query_distribution_state should
+    // Verify the observability path: query_distribution_state should
     // report `is_stalled = true` and `seconds_since_update` past the
     // 24h timeout, giving admin dashboards the structured signal they
     // need to call RecoverPoolStuckStates::StuckDistribution.
@@ -827,12 +828,12 @@ fn test_distribution_timeout_triggers_error() {
     assert!(response.seconds_since_update > crate::state::DISTRIBUTION_STALL_TIMEOUT_SECONDS);
     assert_eq!(
         response.consecutive_failures, 0,
-        "consecutive_failures must NOT have moved off 0 — the timeout branch's pre-Err save would revert on a real chain, and the new code no longer attempts it at all"
+        "consecutive_failures must NOT have moved off 0 — a save staged before the timeout branch's Err would revert on a real chain, and the handler must not attempt one at all"
     );
 }
 
 /// Regression: just BELOW the timeout, ContinueDistribution must succeed.
-/// Pins the new 24h window so a future "tighten the timeout" change has
+/// Pins the 24h window so a future "tighten the timeout" change has
 /// to also update this test.
 #[test]
 fn test_distribution_just_below_timeout_succeeds() {
@@ -914,8 +915,8 @@ fn test_accumulated_bluechips_respected() {
 
     // Set initial state: $24,000 raised at low price ($0.50 implied),
     // so the contract has 48,000 bluechips of NET-of-fees inflow
-    // accumulated. After the gross→net refactor NATIVE_RAISED_FROM_COMMIT
-    // is interpreted as net (the post-fee total that has actually
+    // accumulated. NATIVE_RAISED_FROM_COMMIT stores the net-of-fee
+    // amount (the post-fee total that has actually
     // entered the pool's bank balance), so we seed the net value
     // directly. The test's exact amount isn't load-bearing — the
     // assertion below is on the `max_bluechip_lock_per_pool` cap, which
@@ -1023,8 +1024,8 @@ fn test_concurrent_threshold_crossing_race_condition() {
         .save(&mut deps.storage, &Uint128::new(24_995_000_000))
         .unwrap();
     // At $1/bluechip, $24,995 of NET-of-fees bluechip has entered the
-    // pool's bank balance (NATIVE_RAISED_FROM_COMMIT is post-fee after
-    // the gross→net refactor). The test asserts threshold-phase
+    // pool's bank balance (NATIVE_RAISED_FROM_COMMIT stores the
+    // post-fee amount). The test asserts threshold-phase
     // semantics, not seed arithmetic, so the exact amount is just a
     // realistic placeholder.
     crate::state::NATIVE_RAISED_FROM_COMMIT
@@ -1099,8 +1100,8 @@ fn test_concurrent_threshold_crossing_race_condition() {
 #[test]
 fn test_paused_pool_rejects_pre_threshold_commit() {
     // With POOL_PAUSED set, a pre-threshold commit must be rejected at
-    // dispatch before any state is touched. Previously only
-    // process_post_threshold_commit checked POOL_PAUSED, so a paused pool
+    // dispatch before any state is touched. If only
+    // process_post_threshold_commit checked POOL_PAUSED, a paused pool
     // could still accept funding-phase deposits that ended up stuck in the
     // COMMIT_LEDGER.
     let mut deps = mock_dependencies();
@@ -1147,9 +1148,9 @@ fn test_paused_pool_rejects_pre_threshold_commit() {
 
 #[test]
 fn test_paused_pool_rejects_post_threshold_commit() {
-    // Parallel test: post-threshold path was already guarded inside
-    // process_post_threshold_commit, but the new dispatch-level check
-    // should also reject here. This pins the behavior so future refactors
+    // Parallel test: the post-threshold path is guarded both inside
+    // process_post_threshold_commit and by the dispatch-level check,
+    // which should reject here. This pins the behavior so future changes
     // can't remove one of the two checks without also removing the other.
     let mut deps = mock_dependencies();
     setup_pool_with_excess_config(&mut deps);
@@ -1358,10 +1359,10 @@ fn test_commit_rejects_below_post_threshold_floor() {
 }
 
 // ===========================================================================
-// Fix 6: NATIVE_RAISED_FROM_COMMIT stores net-of-fees, not gross
+// NATIVE_RAISED_FROM_COMMIT stores net-of-fees, not gross
 // ===========================================================================
 //
-// Coverage for the gross→net refactor in commit handlers + the matching
+// Coverage for the net-of-fees semantics in commit handlers + the matching
 // no-recovery read in `trigger_threshold_payout`. Each of the three commit
 // branches stores a different "what actually entered the pool's bank
 // balance" value:
