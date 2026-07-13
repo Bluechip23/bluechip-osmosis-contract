@@ -993,7 +993,7 @@ fn test_emergency_withdraw_clears_distribution() {
 // test asserts a commit with extra denoms is rejected.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_h1_commit_rejects_multi_denom_funds() {
+fn test_commit_rejects_multi_denom_funds() {
     use crate::msg::CommitFeeInfo;
     use crate::state::CommitLimitInfo;
     use crate::state::{COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT};
@@ -1080,7 +1080,7 @@ fn test_h1_commit_rejects_multi_denom_funds() {
 // foreign denom would be silently kept in the pool's bank balance.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_h2_deposit_rejects_non_pool_native_denom() {
+fn test_deposit_rejects_non_pool_native_denom() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
@@ -1116,7 +1116,7 @@ fn test_h2_deposit_rejects_non_pool_native_denom() {
 // Defends against an over-broad gate that rejects legitimate deposits too.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_h2_deposit_accepts_clean_native_funds() {
+fn test_deposit_accepts_clean_native_funds() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
@@ -1151,7 +1151,7 @@ fn test_h2_deposit_accepts_clean_native_funds() {
 // by a deposit.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_m2_helper_arms_auto_pause_when_reserves_below_min() {
+fn test_helper_arms_auto_pause_when_reserves_below_min() {
     use crate::state::{
         maybe_auto_pause_on_low_liquidity, PoolState, MINIMUM_LIQUIDITY, POOL_PAUSED,
         POOL_PAUSED_AUTO,
@@ -1203,7 +1203,7 @@ fn test_m2_helper_arms_auto_pause_when_reserves_below_min() {
 }
 
 #[test]
-fn test_m2_helper_does_not_override_admin_pause() {
+fn test_helper_does_not_override_admin_pause() {
     use crate::state::{
         maybe_auto_pause_on_low_liquidity, PoolState, MINIMUM_LIQUIDITY, POOL_PAUSED,
         POOL_PAUSED_AUTO,
@@ -1233,7 +1233,7 @@ fn test_m2_helper_does_not_override_admin_pause() {
 }
 
 #[test]
-fn test_m2_admin_pause_overrides_auto_flag() {
+fn test_admin_pause_overrides_auto_flag() {
     use crate::admin::execute_pause;
     use crate::state::{POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO};
     let mut deps = mock_dependencies();
@@ -1260,7 +1260,7 @@ fn test_m2_admin_pause_overrides_auto_flag() {
 // migrate must error rather than silently overwrite.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_m3_migrate_rejects_downgrade() {
+fn test_migrate_rejects_downgrade() {
     use crate::contract::migrate;
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
@@ -1287,7 +1287,7 @@ fn test_m3_migrate_rejects_downgrade() {
 // the same address within the cooldown window must reject.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_m5_continue_distribution_rate_limit_per_address() {
+fn test_continue_distribution_rate_limit_per_address() {
     use crate::msg::ExecuteMsg;
     use crate::state::{
         DistributionState, COMMIT_LEDGER, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -1409,7 +1409,7 @@ fn test_m5_continue_distribution_rate_limit_per_address() {
 // state queries honest.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_m6_recover_rejects_on_drained_pool() {
+fn test_recover_rejects_on_drained_pool() {
     use crate::msg::ExecuteMsg;
     use crate::state::{
         EmergencyWithdrawalInfo, ExpectedFactory, RecoveryType, EMERGENCY_DRAINED,
@@ -1466,7 +1466,7 @@ fn test_m6_recover_rejects_on_drained_pool() {
 // factory's TransferOwnership and first LP activity.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_m7_threshold_payout_emits_accept_ownership() {
+fn test_threshold_payout_emits_accept_ownership() {
     use crate::generic_helpers::trigger_threshold_payout;
     use crate::msg::CommitFeeInfo;
     use crate::state::{
