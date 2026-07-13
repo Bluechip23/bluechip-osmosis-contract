@@ -78,21 +78,23 @@ fn test_threshold_with_excess_creates_position() {
 
     deps.querier.update_wasm(|query| match query {
         WasmQuery::Smart { msg, .. } => {
-            // Answer the factory's ConvertNativeToUsd at $1 per token;
-            // every other cross-contract query errors (fail-soft callers
-            // fall back to their snapshots).
+            // Answer the factory's commit-path CommitContext query at
+            // $1 per token, with the live wallet matching the
+            // "ubluechip" fee snapshot these tests pin; every other
+            // cross-contract query errors.
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
             )) = from_json(msg)
             {
-                let resp = pool_factory_interfaces::ConversionResponse {
+                let resp = pool_factory_interfaces::CommitContextResponse {
                     amount,
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
+                    bluechip_wallet: Addr::unchecked("ubluechip"),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -314,21 +316,23 @@ fn test_no_excess_when_under_cap() {
 
     deps.querier.update_wasm(move |query| match query {
         WasmQuery::Smart { msg, .. } => {
-            // Answer the factory's ConvertNativeToUsd at $1 per token;
-            // every other cross-contract query errors (fail-soft callers
-            // fall back to their snapshots).
+            // Answer the factory's commit-path CommitContext query at
+            // $1 per token, with the live wallet matching the
+            // "ubluechip" fee snapshot these tests pin; every other
+            // cross-contract query errors.
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
             )) = from_json(msg)
             {
-                let resp = pool_factory_interfaces::ConversionResponse {
+                let resp = pool_factory_interfaces::CommitContextResponse {
                     amount,
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
+                    bluechip_wallet: Addr::unchecked("ubluechip"),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -930,21 +934,23 @@ fn test_accumulated_bluechips_respected() {
     // Mock oracle price at /bin/bash.50 (500,000 micros)
     deps.querier.update_wasm(|query| match query {
         WasmQuery::Smart { msg, .. } => {
-            // Answer the factory's ConvertNativeToUsd at $1 per token;
-            // every other cross-contract query errors (fail-soft callers
-            // fall back to their snapshots).
+            // Answer the factory's commit-path CommitContext query at
+            // $1 per token, with the live wallet matching the
+            // "ubluechip" fee snapshot these tests pin; every other
+            // cross-contract query errors.
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
             )) = from_json(msg)
             {
-                let resp = pool_factory_interfaces::ConversionResponse {
+                let resp = pool_factory_interfaces::CommitContextResponse {
                     amount,
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
+                    bluechip_wallet: Addr::unchecked("ubluechip"),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -1221,21 +1227,23 @@ fn test_unpaused_pool_accepts_commit_after_previously_paused() {
     // Needs oracle query; wire the conversion mock.
     deps.querier.update_wasm(move |query| match query {
         WasmQuery::Smart { msg, .. } => {
-            // Answer the factory's ConvertNativeToUsd at $1 per token;
-            // every other cross-contract query errors (fail-soft callers
-            // fall back to their snapshots).
+            // Answer the factory's commit-path CommitContext query at
+            // $1 per token, with the live wallet matching the
+            // "ubluechip" fee snapshot these tests pin; every other
+            // cross-contract query errors.
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
             )) = from_json(msg)
             {
-                let resp = pool_factory_interfaces::ConversionResponse {
+                let resp = pool_factory_interfaces::CommitContextResponse {
                     amount,
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
+                    bluechip_wallet: Addr::unchecked("ubluechip"),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }

@@ -123,6 +123,22 @@ impl WasmMockQuerier {
                                 to_json_binary(&resp).unwrap(),
                             ));
                         }
+                        // The commit path's single-round-trip query:
+                        // valuation at the same 1:1 rate as
+                        // ConvertNativeToUsd plus the live bluechip
+                        // wallet (same address the FeeInfo mock below
+                        // pins, so fee-recipient assertions line up).
+                        pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount } => {
+                            let resp = pool_factory_interfaces::CommitContextResponse {
+                                amount,
+                                rate_used: Uint128::new(1_000_000),
+                                timestamp: 0,
+                                bluechip_wallet: Addr::unchecked("ubluechip"),
+                            };
+                            return SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
+                                to_json_binary(&resp).unwrap(),
+                            ));
+                        }
                         // Answer the two admin-path queries at the same wire
                         // shape production uses (the pool_factory_query
                         // envelope). If this mock only understood

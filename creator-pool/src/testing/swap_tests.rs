@@ -31,12 +31,14 @@ use cosmwasm_std::{
 };
 use cw20::Cw20ReceiveMsg;
 
-/// Installs a mock factory ConvertNativeToUsd responder at the given
-/// rate (micro-USD per micro-native; 1_000_000 = $1 per token). Mirrors
+/// Installs a mock factory USD-valuation responder at the given rate
+/// (micro-USD per micro-native; 1_000_000 = $1 per token). Mirrors
 /// production where the factory computes the rate from the chain's
-/// x/twap over the configured native/USD-stable pool. All other
-/// cross-contract queries error (fail-soft callers like
-/// resolve_live_bluechip_wallet fall back to their snapshots).
+/// x/twap over the configured native/USD-stable pool. Answers both
+/// `ConvertNativeToUsd` and the commit path's `CommitContext` (whose
+/// `bluechip_wallet` matches the `bluechip_treasury` snapshot pinned by
+/// `setup_pool_storage`, so fee-recipient assertions line up). All
+/// other cross-contract queries error.
 pub fn with_factory_oracle(
     deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
     native_to_usd_rate: Uint128,
@@ -47,21 +49,36 @@ pub fn with_factory_oracle(
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
-            if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
-            )) = cosmwasm_std::from_json(msg)
-            {
-                let usd = amount
+            let usd_at_rate = |amount: Uint128| {
+                amount
                     .checked_mul(native_to_usd_rate)
                     .unwrap()
                     .checked_div(Uint128::new(1_000_000))
-                    .unwrap();
-                let resp = pool_factory_interfaces::ConversionResponse {
-                    amount: usd,
-                    rate_used: native_to_usd_rate,
-                    timestamp: 0,
-                };
-                return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+                    .unwrap()
+            };
+            match cosmwasm_std::from_json(msg) {
+                Ok(WrapperProbe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
+                )) => {
+                    let resp = pool_factory_interfaces::ConversionResponse {
+                        amount: usd_at_rate(amount),
+                        rate_used: native_to_usd_rate,
+                        timestamp: 0,
+                    };
+                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+                }
+                Ok(WrapperProbe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
+                )) => {
+                    let resp = pool_factory_interfaces::CommitContextResponse {
+                        amount: usd_at_rate(amount),
+                        rate_used: native_to_usd_rate,
+                        timestamp: 0,
+                        bluechip_wallet: Addr::unchecked("bluechip_treasury"),
+                    };
+                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+                }
+                _ => {}
             }
             SystemResult::Err(SystemError::InvalidRequest {
                 error: "no other cross-contract queries expected".to_string(),

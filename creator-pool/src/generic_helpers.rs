@@ -25,47 +25,13 @@ pub use crate::commit::threshold_payout::{
 
 use crate::error::ContractError;
 use crate::state::{Committing, COMMIT_INFO};
-use cosmwasm_std::{Addr, Deps, Storage, Timestamp, Uint128};
+use cosmwasm_std::{Addr, Storage, Timestamp, Uint128};
 
 // `with_reentrancy_guard` lives in `pool_core::generic` and reaches
 // callers in this crate via the `pub use pool_core::generic::*;`
 // re-export above. The swap path in `pool_core::swap` and any
 // liquidity / admin caller in either pool crate share a single
 // implementation rather than each open-coding the load/check/save dance.
-
-/// Resolve the bluechip protocol-wallet recipient by live-querying the
-/// factory, falling back to the pool-side snapshot if the query fails.
-///
-/// `COMMITFEEINFO.bluechip_wallet_address` is pinned at pool instantiate
-/// from the factory's then-current config. The factory's address is
-/// admin-tunable via the standard 48h `ProposeConfigUpdate` flow; a
-/// snapshot would leave every pool sending fees and the threshold-cross
-/// bluechip-reward to whichever wallet the admin had configured when the
-/// pool was created. After a key-compromise-driven rotation that's
-/// exactly the wallet we don't want to be sending to.
-///
-/// Mirrors the pattern already in use on the emergency-drain path
-/// (`pool-core::admin::execute_emergency_withdraw_core_drain`,
-/// `execute_sweep_unclaimed_emergency_shares`). Fail-soft on query
-/// failure (factory paused, migrated, unreachable) so a hostile factory
-/// state can't strand commits.
-pub fn resolve_live_bluechip_wallet(
-    deps: Deps,
-    factory_addr: &Addr,
-    snapshot_fallback: &Addr,
-) -> Addr {
-    match deps
-        .querier
-        .query_wasm_smart::<pool_factory_interfaces::BluechipWalletResponse>(
-            factory_addr.to_string(),
-            &pool_factory_interfaces::FactoryQueryEnvelope::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
-            ),
-        ) {
-        Ok(resp) => resp.address,
-        Err(_) => snapshot_fallback.clone(),
-    }
-}
 
 pub fn update_commit_info(
     storage: &mut dyn Storage,

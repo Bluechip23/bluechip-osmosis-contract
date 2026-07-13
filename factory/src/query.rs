@@ -237,6 +237,18 @@ pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) ->
                 address: cfg.bluechip_wallet_address,
             })
         }
+        FactoryQueryMsg::CommitContext { amount } => {
+            // Single round-trip for the pool commit path: the USD
+            // valuation plus the live bluechip wallet in one response.
+            let conversion = crate::usd_price::convert_native_to_usd(deps, &_env, amount)?;
+            let cfg = FACTORYINSTANTIATEINFO.load(deps.storage)?;
+            to_json_binary(&pool_factory_interfaces::CommitContextResponse {
+                amount: conversion.amount,
+                rate_used: conversion.rate_used,
+                timestamp: conversion.timestamp,
+                bluechip_wallet: cfg.bluechip_wallet_address,
+            })
+        }
     }
 }
 

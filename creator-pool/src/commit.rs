@@ -44,7 +44,7 @@ use crate::state::{
     THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
 
-use crate::swap_helper::get_usd_conversion;
+use crate::swap_helper::get_commit_context;
 
 use post_threshold::process_post_threshold_commit;
 use pre_threshold::process_pre_threshold_commit;
@@ -149,24 +149,6 @@ fn execute_commit_logic(
     let fee_info = COMMITFEEINFO.load(deps.storage)?;
     let sender = info.sender.clone();
 
-    // Resolve the LIVE bluechip protocol-wallet for both the per-commit
-    // fee transfer and the threshold-cross bluechip-reward mint. The
-    // pool's `COMMITFEEINFO.bluechip_wallet_address` is snapshotted at
-    // create time; the factory's address is admin-tunable via the
-    // standard 48h `ProposeConfigUpdate` flow. Querying live here keeps
-    // both fund flows in lockstep with a key-compromise-driven wallet
-    // rotation — without it, every existing pool would keep paying the
-    // protocol fee and the 25k-token threshold-cross reward to the old
-    // (potentially compromised) wallet indefinitely. Mirrors the live-
-    // query pattern already in use on the emergency-drain recipient
-    // (pool-core::admin). Fail-soft fallback to the snapshot keeps
-    // commits live if the factory is unreachable.
-    let live_bluechip_wallet = crate::generic_helpers::resolve_live_bluechip_wallet(
-        deps.as_ref(),
-        &pool_info.factory_addr,
-        &fee_info.bluechip_wallet_address,
-    );
-
     // commits flow only in the bluechip direction.
     // `validate_pool_token_info` pins `asset_infos[0]` to the canonical
     // bluechip Native denom and `asset_infos[1]` to the creator-token
@@ -186,13 +168,26 @@ fn execute_commit_logic(
 
     // Value the GROSS (pre-fee) commit in USD once at entry and thread
     // the same rate through every conversion in this handler. The rate
-    // comes from the factory's ConvertNativeToUsd query, backed by the
+    // comes from the factory's CommitContext query, backed by the
     // chain-native x/twap of the configured native/USD-stable pool —
     // one query per commit, no keeper, and no mid-tx drift because the
     // threshold split below reuses `usd_rate` rather than re-querying.
-    let conversion = get_usd_conversion(deps.as_ref(), asset.amount)?;
-    let commit_value = conversion.amount;
-    let usd_rate = conversion.rate_used;
+    //
+    // The same response carries the factory's LIVE bluechip
+    // protocol-wallet, used for both the per-commit fee transfer and the
+    // threshold-cross bluechip-reward mint. The pool's
+    // `COMMITFEEINFO.bluechip_wallet_address` is snapshotted at create
+    // time; the factory's address is admin-tunable via the standard 48h
+    // `ProposeConfigUpdate` flow. Taking the live value keeps both fund
+    // flows in lockstep with a key-compromise-driven wallet rotation —
+    // a snapshot would keep every existing pool paying the protocol fee
+    // and the 25k-token threshold-cross reward to the old (potentially
+    // compromised) wallet indefinitely. Mirrors the live-query pattern
+    // on the emergency-drain recipient (pool-core::admin).
+    let commit_ctx = get_commit_context(deps.as_ref(), &pool_info.factory_addr, asset.amount)?;
+    let commit_value = commit_ctx.amount;
+    let usd_rate = commit_ctx.rate_used;
+    let live_bluechip_wallet = commit_ctx.bluechip_wallet;
     if usd_rate.is_zero() || commit_value.is_zero() {
         return Err(ContractError::InvalidOraclePrice {});
     }
@@ -453,11 +448,11 @@ fn calculate_commit_fees(
 
 /// Build bank-send messages for the two fee recipients.
 ///
-/// `bluechip_wallet` is resolved at the caller via
-/// `generic_helpers::resolve_live_bluechip_wallet` so the protocol-fee
-/// destination tracks the LIVE factory config rather than the snapshot
-/// pinned in `fee_info.bluechip_wallet_address` at pool create. This
-/// keeps an admin wallet rotation (e.g., after a key compromise) actually
+/// `bluechip_wallet` is the live factory value returned by the
+/// `CommitContext` query at the caller, so the protocol-fee destination
+/// tracks the LIVE factory config rather than the snapshot pinned in
+/// `fee_info.bluechip_wallet_address` at pool create. This keeps an
+/// admin wallet rotation (e.g., after a key compromise) actually
 /// effective for every pre-existing pool's commit-fee stream.
 ///
 /// `fee_info.creator_wallet_address` stays as-is — the creator wallet is

@@ -113,9 +113,9 @@ pub fn trigger_threshold_payout(
     commit_config: &CommitLimitInfo,
     payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
-    // Live-resolved bluechip protocol-wallet (resolved at the entry
-    // point in `commit::execute_commit_logic` via
-    // `generic_helpers::resolve_live_bluechip_wallet`). Used as the
+    // Live-resolved bluechip protocol-wallet (returned by the factory's
+    // `CommitContext` query at the entry point in
+    // `commit::execute_commit_logic`). Used as the
     // recipient for the 25k-base-unit bluechip-share creator-token
     // mint below. Distinct from `fee_info.bluechip_wallet_address`,
     // which is the pool-instantiate snapshot — that snapshot is left

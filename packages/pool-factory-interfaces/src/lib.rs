@@ -75,6 +75,18 @@ pub enum FactoryQueryMsg {
     /// away from.
     #[returns(BluechipWalletResponse)]
     BluechipWalletAddress {},
+
+    /// Everything a pool needs to process one commit, in a single
+    /// query: the `ConvertNativeToUsd` valuation of `amount` plus the
+    /// factory's current `bluechip_wallet_address`. Commits need both —
+    /// the USD value for the threshold accounting and the live wallet
+    /// for the protocol-fee transfer (and threshold-cross reward mint) —
+    /// so bundling them halves the cross-contract round-trips on the
+    /// hottest user path. Fails closed like `ConvertNativeToUsd`: a
+    /// commit cannot proceed without a valuation, and the wallet rides
+    /// on the same response so it needs no separate fail-soft fallback.
+    #[returns(CommitContextResponse)]
+    CommitContext { amount: Uint128 },
 }
 
 /// Top-level envelope matching the factory's
@@ -107,6 +119,17 @@ pub struct EmergencyWithdrawDelayResponse {
 #[cw_serde]
 pub struct BluechipWalletResponse {
     pub address: Addr,
+}
+
+/// Response to `CommitContext`: the `ConvertNativeToUsd` valuation
+/// fields (see [`ConversionResponse`] for their semantics) plus the
+/// factory's live `bluechip_wallet_address`.
+#[cw_serde]
+pub struct CommitContextResponse {
+    pub amount: Uint128,
+    pub rate_used: Uint128,
+    pub timestamp: u64,
+    pub bluechip_wallet: Addr,
 }
 
 /// Result of a native→USD valuation. `rate_used` is the price in
