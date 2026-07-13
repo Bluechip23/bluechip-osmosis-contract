@@ -445,9 +445,9 @@ fn test_continue_distribution_skips_bounty_on_empty_batch() {
         .unwrap();
 
     // Distribution is "in progress" by state, but the ledger is empty —
-    // matches the post-final-batch window in the old (buggy) flow where
-    // the cursor had advanced past the last entry but the state had not
-    // yet been cleaned up.
+    // the post-final-batch window where the cursor has advanced past the
+    // last entry but the state has not yet been cleaned up. The handler
+    // must cope with this window rather than stall.
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(500_000_000_000),
@@ -833,9 +833,9 @@ fn test_migrate_accepts_minimum_fee() {
 #[test]
 fn test_distribution_bounty_does_not_distort_fee_growth() {
     // Pool's fee_growth_global_0 must not move when ContinueDistribution
-    // runs — the pool no longer pays the bounty itself, so there's no
+    // runs — the pool does not pay the bounty itself, so there's no
     // accounting path that could touch fee growth. This test guards
-    // against a future regression where someone reintroduces a pool-side
+    // against a regression that introduces a pool-side
     // fee deduction for keeper costs.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);

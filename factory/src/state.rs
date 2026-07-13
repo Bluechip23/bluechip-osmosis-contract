@@ -25,7 +25,7 @@ use pool_factory_interfaces::PoolStateResponseForFactory;
 
 pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config");
 // Single source of truth for every in-flight pool creation. Combines the
-// formerly-split TEMP_POOL_CREATION (pool inputs + discovered addresses)
+// temp creation data (pool inputs + discovered addresses)
 // and lifecycle status into one map so the reply handlers can't leave the
 // two halves out of sync. On any failure the whole tx reverts (every step
 // uses `SubMsg::reply_on_success`), so no retry/cleanup bookkeeping is
