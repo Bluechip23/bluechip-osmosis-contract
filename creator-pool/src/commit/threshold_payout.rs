@@ -183,7 +183,7 @@ pub fn trigger_threshold_payout(
     // the factory's `finalize_pool` dispatches `AcceptNftOwnership {}`
     // to this pool in the same tx as the CW721 `TransferOwnership`, so
     // `nft_ownership_accepted` is already true by the time threshold
-    // crosses and this branch is a no-op. Retained as defense-in-depth
+    // crosses and this branch is a no-op. Defense-in-depth
     // for the test-fixture path (and any hypothetical future code path
     // that instantiates a pool directly) where the factory-side
     // dispatch may not have run; the deposit handler in pool-core

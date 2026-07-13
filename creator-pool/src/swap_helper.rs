@@ -1,10 +1,9 @@
 //! Swap-math re-exports plus the commit-phase USD-valuation client.
 //!
-//! The pure AMM math that used to live in this file (`compute_swap`,
-//! `compute_offer_amount`, `assert_max_spread`, `update_price_accumulator`,
-//! `DEFAULT_SLIPPAGE`) lives in `pool_core::swap` and is re-exported below
-//! so existing imports like `use crate::swap_helper::compute_swap;` keep
-//! resolving.
+//! The pure AMM math (`compute_swap`, `compute_offer_amount`,
+//! `assert_max_spread`, `update_price_accumulator`, `DEFAULT_SLIPPAGE`)
+//! lives in `pool_core::swap` and is re-exported below so imports like
+//! `use crate::swap_helper::compute_swap;` resolve here.
 pub use pool_core::swap::*;
 
 use crate::state::POOL_INFO;

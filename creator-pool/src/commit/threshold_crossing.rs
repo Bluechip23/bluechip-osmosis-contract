@@ -276,7 +276,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // portion and the excess portion (if any). Sum the bluechip into one
     // value and use `commit_value` (= threshold + excess) so
     // `last_payment_*` reflects the user's full crossing commit rather
-    // than the excess-only snapshot the prior two-call structure left.
+    // than an excess-only snapshot.
     let bluechip_committed =
         bluechip_to_threshold.checked_add(bluechip_excess.checked_sub(refunded_excess)?)?;
     update_commit_info(

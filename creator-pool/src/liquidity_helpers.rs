@@ -1,6 +1,5 @@
-//! Commit-phase-only claim handlers. The shared math + validators
-//! previously in this file now live in `pool_core::liquidity_helpers`
-//! and are re-exported below.
+//! Commit-phase-only claim handlers. The shared math + validators live
+//! in `pool_core::liquidity_helpers` and are re-exported below.
 pub use pool_core::liquidity_helpers::*;
 
 use crate::asset::get_native_denom;

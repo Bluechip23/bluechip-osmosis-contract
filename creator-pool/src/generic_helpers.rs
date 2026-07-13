@@ -7,12 +7,12 @@
 //! re-exported below so every existing `use crate::generic_helpers::X;`
 //! import resolves unchanged.
 //!
-//! Threshold-payout orchestration was hoisted to
+//! Threshold-payout orchestration lives in
 //! [`crate::commit::threshold_payout`]; the post-threshold batch
-//! processor was hoisted to [`crate::commit::distribution_batch`].
-//! Re-exports here keep both reachable through the original path so
-//! existing call sites (the threshold-crossing handler, the
-//! distribution dispatcher) compile unchanged.
+//! processor lives in [`crate::commit::distribution_batch`].
+//! Re-exports here keep both reachable through this module so call
+//! sites (the threshold-crossing handler, the distribution
+//! dispatcher) import from a single path.
 
 pub use pool_core::generic::*;
 
@@ -27,10 +27,10 @@ use crate::error::ContractError;
 use crate::state::{Committing, COMMIT_INFO};
 use cosmwasm_std::{Addr, Deps, Storage, Timestamp, Uint128};
 
-// `with_reentrancy_guard` moved to `pool_core::generic` and reaches
-// existing callers in this crate via the `pub use pool_core::generic::*;`
-// re-export above. The swap path in `pool_core::swap` and any future
-// liquidity / admin caller in either pool crate now share a single
+// `with_reentrancy_guard` lives in `pool_core::generic` and reaches
+// callers in this crate via the `pub use pool_core::generic::*;`
+// re-export above. The swap path in `pool_core::swap` and any
+// liquidity / admin caller in either pool crate share a single
 // implementation rather than each open-coding the load/check/save dance.
 
 /// Resolve the bluechip protocol-wallet recipient by live-querying the

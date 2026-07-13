@@ -269,8 +269,8 @@ fn test_recover_both_resets_all_stuck_states() {
 
 #[test]
 fn test_first_deposit_locks_minimum_liquidity() {
-    // Updated for the locked-on-Position model: the first depositor's
-    // Position now carries the FULL `raw_liquidity` plus a
+    // Locked-on-Position model: the first depositor's
+    // Position carries the FULL `raw_liquidity` plus a
     // `locked_liquidity = MINIMUM_LIQUIDITY` field, so fees accrue
     // against the full position. The lock is enforced on the remove
     // paths (covered by separate tests) rather than by subtracting from
@@ -335,7 +335,7 @@ fn test_first_deposit_locks_minimum_liquidity() {
         MINIMUM_LIQUIDITY, position.locked_liquidity
     );
 
-    // total_liquidity now tracks the FULL raw amount (matches position.liquidity).
+    // total_liquidity tracks the FULL raw amount (matches position.liquidity).
     assert_eq!(
         pool_state_after.total_liquidity, raw_liquidity,
         "total_liquidity should equal raw_liquidity (full first-depositor position)"
@@ -570,7 +570,7 @@ fn test_continue_distribution_completes_in_one_tx_when_final() {
     assert_eq!(
         res.messages.len(),
         1,
-        "expected exactly 1 mint msg (no bounty msg anymore), got: {:?}",
+        "expected exactly 1 mint msg (the pool emits no bounty msg), got: {:?}",
         res.messages
     );
     let bounty_paid = res
@@ -986,11 +986,11 @@ fn test_emergency_withdraw_clears_distribution() {
 }
 
 // ---------------------------------------------------------------------------
-// `Commit` must reject multi-denom funds via `must_pay`. Pre-fix,
-// attaching `[ubluechip: amount, ibc/...: Y]` would let the bluechip-side
-// equality check pass while the IBC side was silently absorbed into the
-// pool's bank balance with no withdrawal path. This test exercises the
-// fix: commit with extras must be rejected.
+// `Commit` must reject multi-denom funds via `must_pay`. Without that
+// gate, attaching `[ubluechip: amount, ibc/...: Y]` would let the
+// bluechip-side equality check pass while the IBC side was silently
+// absorbed into the pool's bank balance with no withdrawal path. This
+// test asserts a commit with extra denoms is rejected.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_h1_commit_rejects_multi_denom_funds() {
@@ -1035,8 +1035,8 @@ fn test_h1_commit_rejects_multi_denom_funds() {
     let user = Addr::unchecked("committer");
     let amount = Uint128::new(100_000_000);
 
-    // Attaching ubluechip + a stray IBC denom must reject. Pre-fix this
-    // call would have silently absorbed the IBC funds into the pool.
+    // Attaching ubluechip + a stray IBC denom must reject — otherwise
+    // this call would silently absorb the IBC funds into the pool.
     let result = execute(
         deps.as_mut(),
         env,
@@ -1076,8 +1076,8 @@ fn test_h1_commit_rejects_multi_denom_funds() {
 
 // ---------------------------------------------------------------------------
 // `prepare_deposit` must reject any attached coin whose denom isn't one
-// of the pool's configured native sides. Pre-fix, an attached foreign
-// denom would be silently kept in the pool's bank balance.
+// of the pool's configured native sides. Without that gate, an attached
+// foreign denom would be silently kept in the pool's bank balance.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_h2_deposit_rejects_non_pool_native_denom() {
@@ -1113,7 +1113,7 @@ fn test_h2_deposit_rejects_non_pool_native_denom() {
 
 // ---------------------------------------------------------------------------
 // Verify the gate accepts a clean deposit (only pool-native denoms).
-// Defends against an over-broad fix that rejects legitimate deposits too.
+// Defends against an over-broad gate that rejects legitimate deposits too.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_h2_deposit_accepts_clean_native_funds() {
@@ -1476,8 +1476,8 @@ fn test_m7_threshold_payout_emits_accept_ownership() {
     let mut deps = mock_dependencies();
     setup_pool_storage(&mut deps);
 
-    // Seed NATIVE_RAISED_FROM_COMMIT directly. After the fix
-    // gross→net refactor this value is interpreted as the post-fee
+    // Seed NATIVE_RAISED_FROM_COMMIT directly. This value is
+    // interpreted as the post-fee
     // total that has actually entered the pool's bank balance —
     // `trigger_threshold_payout` reads it directly as
     // `pools_bluechip_seed` with no further recovery multiply. This
@@ -1575,8 +1575,8 @@ fn test_m7_threshold_payout_emits_accept_ownership() {
 // distribution liveness primitives
 // ---------------------------------------------------------------------------
 //
-// Coverage for the four-part fix (per-mint reply isolation, skip
-// primitive, self-recover, claim entry):
+// Coverage for the distribution liveness primitives (per-mint
+// reply isolation, self-recover, claim entry):
 //
 // - Per-mint isolation: a single failing recipient lands in
 // `FAILED_MINTS` rather than reverting the whole batch tx; the
@@ -1585,7 +1585,7 @@ fn test_m7_threshold_payout_emits_accept_ownership() {
 // `PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS` window; rejected
 // before the window, accepted after.
 // - ClaimFailedDistribution: committer (or anyone with their key)
-// pulls a previously-failed mint out of FAILED_MINTS, optionally
+// pulls an earlier failed mint out of FAILED_MINTS, optionally
 // redirected to a fresh wallet. Re-failures recurse cleanly back
 // into FAILED_MINTS via the same reply-isolation harness.
 mod distribution_liveness_tests {
@@ -1628,11 +1628,11 @@ mod distribution_liveness_tests {
                 },
             )
             .unwrap();
-        // Post-instantiate admin gates now read from POOL_INFO.factory_addr
+        // Post-instantiate admin gates read from POOL_INFO.factory_addr
         // rather than EXPECTED_FACTORY (one source of truth — see the
         // doc-comment on `pool_core::state::ExpectedFactory`). Test
-        // fixtures that previously overrode only EXPECTED_FACTORY must
-        // update POOL_INFO too so the new auth path sees the test's
+        // fixtures that override EXPECTED_FACTORY must
+        // update POOL_INFO too so the auth path sees the test's
         // chosen factory address.
         use pool_core::state::POOL_INFO;
         let mut pool_info = POOL_INFO.load(&deps.storage).unwrap();
@@ -1804,9 +1804,9 @@ mod distribution_liveness_tests {
     }
 
     /// Reply id ≥ BASE but with no PENDING_MINT_REPLIES stash falls
-    /// through to the canonical "unknown reply id" handler — preserves
-    /// the pre-existing regression (`reply_unknown_id_returns_error`
-    /// uses 0xDEADBEEF which is in this range).
+    /// through to the canonical "unknown reply id" handler — matching
+    /// the invariant pinned by `reply_unknown_id_returns_error`
+    /// (which uses 0xDEADBEEF, in this range).
     #[test]
     fn reply_in_distribution_range_without_stash_is_unknown() {
         let mut deps = mock_dependencies();
@@ -1821,9 +1821,8 @@ mod distribution_liveness_tests {
         );
     }
 
-    // SkipDistributionUser tests removed pre-launch — the handler was
-    // unreachable (no factory-side forward) and the recovery scenario
-    // it targeted (corrupt ledger row that `range(..)` cannot
+    // There is no per-user "skip" primitive: the scenario it would
+    // target (a corrupt ledger row that `range(..)` cannot
     // deserialize) is practically unreachable with `cw_storage_plus`
     // static typing. Per-mint reply isolation
     // (FAILED_MINTS / ClaimFailedDistribution) handles every
@@ -2198,21 +2197,21 @@ mod distribution_liveness_tests {
 // creator-pool deposit balance verification
 // ---------------------------------------------------------------------------
 //
-// The creator-pool dispatcher used to call the no-verify deposit /
-// add-to-position variants on the assumption that the pool's CW20 was
+// If the creator-pool dispatcher called the no-verify deposit /
+// add-to-position variants on the assumption that the pool's CW20 is
 // always a vanilla cw20-base freshly minted by the factory — true
-// today, but a single careless future `update_pool_token_address` or
+// today — a single careless future `update_pool_token_address` or
 // factory upgrade permitting third-party CW20s would let the pool
 // credit user-claimed amounts to reserves while the actual on-chain
 // CW20 balance lagged (fee-on-transfer, rebasing, malicious receiver).
 //
-// The fix flips the dispatcher to the `_with_verify` variants and
+// The dispatcher therefore calls the `_with_verify` variants and
 // wires `DEPOSIT_VERIFY_REPLY_ID` into the contract's `reply()`
 // dispatcher so the post-balance delta is checked before the
 // transaction commits.
 //
 // Tests in this module confirm that production deposits routed through
-// `ExecuteMsg::DepositLiquidity` / `ExecuteMsg::AddToPosition` now:
+// `ExecuteMsg::DepositLiquidity` / `ExecuteMsg::AddToPosition`:
 // - emit a final SubMsg tagged `reply_on_success` with the verify
 // reply id (the anchor the reply handler hooks onto), and
 // - persist `DEPOSIT_VERIFY_CTX` carrying the pre-balance snapshot
@@ -2359,9 +2358,9 @@ mod deposit_verify_tests {
     }
 
     /// `ExecuteMsg::AddToPosition` must also route through the verify
-    /// path. Without this assertion, a future refactor that flips just
-    /// one of the two dispatcher arms back to the unverified variant
-    /// would silently regress the balance-verify invariant on add-to-position.
+    /// path. Without this assertion, a future change that flips just
+    /// one of the two dispatcher arms to the unverified variant
+    /// would silently break the balance-verify invariant on add-to-position.
     #[test]
     fn add_to_position_through_dispatcher_emits_verify_reply_anchor() {
         let mut deps = mock_dependencies();
@@ -2632,15 +2631,15 @@ mod deposit_verify_tests {
 // empty-position persistence on full removal
 // ---------------------------------------------------------------------------
 //
-// Pre-fix, `RemoveAllLiquidity` on a non-first-depositor position
+// If `RemoveAllLiquidity` on a non-first-depositor position
 // (`locked_liquidity == 0`) deleted the LIQUIDITY_POSITIONS storage row
-// while leaving the user's CW721 NFT in place — no BurnNft was ever
-// dispatched. The NFT became a "tombstone": tradeable on secondary
+// while leaving the user's CW721 NFT in place — no BurnNft is ever
+// dispatched — the NFT would become a "tombstone": tradeable on secondary
 // markets but functionally inert, since every pool-side handler
-// (AddToPosition, CollectFees, RemoveLiquidity) loaded LIQUIDITY_POSITIONS
-// and errored with "not found".
+// (AddToPosition, CollectFees, RemoveLiquidity) loads LIQUIDITY_POSITIONS
+// and would error with "not found".
 //
-// Option A fix: keep the row alive at `liquidity == 0`. The NFT
+// The pool therefore keeps the row alive at `liquidity == 0`. The NFT
 // remains rehydrate-able — a future `AddToPosition` against the same
 // token id grows the position from zero. Mirrors Uniswap V3's
 // empty-position model.
@@ -2705,8 +2704,9 @@ mod empty_position_persistence_tests {
     }
 
     /// Full-removal path keeps LIQUIDITY_POSITIONS row alive at zero
-    /// liquidity for non-first-depositor positions. Pre-fix the row
-    /// was deleted; this assertion is the regression fence.
+    /// liquidity for non-first-depositor positions. If the row were
+    /// deleted, the NFT would become a tombstone; this assertion is
+    /// the regression fence.
     #[test]
     fn full_removal_keeps_position_row_alive_at_zero() {
         let mut deps = mock_dependencies();
@@ -2766,10 +2766,10 @@ mod empty_position_persistence_tests {
         );
     }
 
-    /// First-depositor full removal still drops to the locked floor
+    /// First-depositor full removal drops to the locked floor
     /// (MINIMUM_LIQUIDITY), not to zero. This is the
-    /// `locked_liquidity > 0` branch that was already correct pre-fix
-    /// — guard that the new code didn't accidentally collapse both
+    /// `locked_liquidity > 0` branch — guard that the empty-position
+    /// persistence logic doesn't collapse both
     /// branches and break the first-depositor's perpetual fee right.
     #[test]
     fn first_depositor_full_removal_drops_to_locked_floor_not_zero() {
@@ -2827,9 +2827,9 @@ mod empty_position_persistence_tests {
         );
     }
 
-    /// AddToPosition rehydrates an emptied position. Pre-fix this would
-    /// fail with `LIQUIDITY_POSITIONS::not_found` because the storage row
-    /// had been deleted on full removal; post-fix the row is alive at
+    /// AddToPosition rehydrates an emptied position. If the storage row
+    /// were deleted on full removal, this would fail with
+    /// `LIQUIDITY_POSITIONS::not_found`; instead the row is alive at
     /// zero liquidity and AddToPosition grows it from there.
     #[test]
     fn add_to_position_rehydrates_emptied_position() {
@@ -2964,10 +2964,10 @@ mod empty_position_persistence_tests {
 // per-position emergency-claim escrow
 // ---------------------------------------------------------------------------
 //
-// Pre-fix, Phase-2 emergency-drain swept ALL pool funds (including
-// LP-owned reserves and pending fees) to `bluechip_wallet_address`.
-// Active LPs could exit during the 24h window, but set-and-forget
-// LPs lost everything. Post-fix, LP funds escrow in
+// If Phase-2 emergency-drain swept ALL pool funds (including
+// LP-owned reserves and pending fees) to `bluechip_wallet_address`,
+// active LPs could exit during the 24h window but set-and-forget
+// LPs would lose everything. Instead, LP funds escrow in
 // `EMERGENCY_DRAIN_SNAPSHOT` for 1 year, claimable per-position via
 // `ClaimEmergencyShare`. After dormancy, the unclaimed residual
 // sweeps to the bluechip wallet via `SweepUnclaimedEmergencyShares`.
@@ -2982,7 +2982,7 @@ mod emergency_claim_escrow_tests {
 
     /// Install a CW721 OwnerOf querier returning the given owner for
     /// any token id. Local helper; mirrors the pattern used in
-    /// other H-NFT tests.
+    /// the NFT-position tests above.
     fn install_owner_querier(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, owner: &str) {
         let owner_str = owner.to_string();
         deps.querier.update_wasm(move |query| match query {
@@ -3439,10 +3439,10 @@ mod emergency_claim_escrow_tests {
 
     /// once `SweepUnclaimedEmergencyShares` has fired,
     /// per-position claims are hard-closed with
-    /// `EmergencyClaimsClosedPostSweep`. Pre-fix the snapshot's tally
-    /// would still get bumped past `drainable` if late claimants showed
-    /// up. The hard close matches the documented design intent ("after
-    /// 1 year, abandoned funds are gone").
+    /// `EmergencyClaimsClosedPostSweep`. Without the hard close, the
+    /// snapshot's tally could get bumped past `drainable` if late
+    /// claimants showed up. The hard close matches the documented
+    /// design intent ("after 1 year, abandoned funds are gone").
     #[test]
     fn claim_after_residual_sweep_rejects() {
         let mut deps = mock_dependencies();
@@ -3482,10 +3482,10 @@ mod emergency_claim_escrow_tests {
         )
         .expect("sweep after dormancy must succeed");
 
-        // Now a late claimant tries to claim. Pre-fix this would have
-        // computed a pro-rata share, bumped `total_claimed_*` past
-        // `drainable`, and queued a bank transfer that may or may not
-        // succeed depending on residual balance. Post-fix:
+        // Now a late claimant tries to claim. Without the hard close
+        // this would compute a pro-rata share, bump `total_claimed_*`
+        // past `drainable`, and queue a bank transfer that may or may
+        // not succeed depending on residual balance. Instead:
         // EmergencyClaimsClosedPostSweep.
         install_owner_querier(&mut deps, "bob");
         let err = execute(

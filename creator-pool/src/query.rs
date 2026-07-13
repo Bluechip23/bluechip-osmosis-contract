@@ -139,10 +139,10 @@ pub fn query_factory_notify_status(deps: Deps) -> StdResult<FactoryNotifyStatusR
 /// Returns `None` when no distribution is in progress (pre-threshold or
 /// fully completed and cleaned up). Returns `Some(...)` with the live
 /// `DistributionState` plus `seconds_since_update` and `is_stalled`
-/// computed against `DISTRIBUTION_STALL_TIMEOUT_SECONDS`. Replaces the
-/// previously-discarded `consecutive_failures = 99` marker as the
-/// observable stall signal — this query is what admin dashboards should
-/// poll to detect "this pool needs RecoverPoolStuckStates."
+/// computed against `DISTRIBUTION_STALL_TIMEOUT_SECONDS`. The computed
+/// `is_stalled` flag is the observable stall signal — this query is
+/// what admin dashboards should poll to detect "this pool needs
+/// RecoverPoolStuckStates."
 pub fn query_distribution_state(
     deps: Deps,
     env: &Env,
