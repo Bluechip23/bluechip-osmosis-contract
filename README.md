@@ -403,9 +403,7 @@ before rendering.
 
 ## Security Considerations
 
-The full security record lives in `SECURITY_AUDIT.md` — a multi-pass
-review of every contract with findings, verified defenses, and
-priorities. Highlights:
+Highlights of the defenses built into the contracts:
 
 ### Reentrancy & funds handling
 - Single shared `REENTRANCY_LOCK` across commit, swap, and every
@@ -484,8 +482,7 @@ Commit (1000 OSMO)
 ```
 
 Note: the creator allocation is **not vested** and creators may commit
-to their own pools; weigh that (documented as finding S-3 in
-`SECURITY_AUDIT.md`) when deciding pool parameters.
+to their own pools; weigh that when deciding pool parameters.
 
 ---
 
@@ -606,8 +603,7 @@ cargo fmt --all -- --check
 
 Current suite: creator-pool 218, factory 103, pool-core 34,
 router 22. `fuzz/` carries cargo-fuzz math targets; see
-`FUZZING.md` for status and the planned property-harness work (tracked
-as S-7 in `SECURITY_AUDIT.md`).
+`FUZZING.md` for status and the planned property-harness work.
 
 ### Repository layout
 
