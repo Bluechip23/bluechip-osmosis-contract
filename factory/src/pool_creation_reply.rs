@@ -4,11 +4,12 @@ use crate::{
     execute::{encode_reply_id, FINALIZE_POOL, MINT_CREATE_POOL},
     msg::CreatePoolReplyMsg,
     pool_create_cleanup::{extract_contract_address, give_pool_ownership_cw20_and_nft},
-    pool_struct::{CommitFeeInfo, PoolDetails},
-    state::{CreationStatus, FACTORYINSTANTIATEINFO, POOL_CREATION_CONTEXT},
+    pool_struct::{CommitFeeInfo, PoolDetails, TempPoolCreation},
+    state::FACTORYINSTANTIATEINFO,
 };
 use cosmwasm_std::{
-    to_json_binary, CosmosMsg, DepsMut, Env, Reply, Response, StdResult, SubMsg, WasmMsg,
+    from_json, to_json_binary, CosmosMsg, DepsMut, Env, Reply, Response, StdResult, SubMsg,
+    WasmMsg,
 };
 use pool_factory_interfaces::cw721_msgs::Cw721InstantiateMsg;
 
@@ -31,6 +32,29 @@ const LP_NFT_LABEL_PREFIX: &str = "AMM-LP-NFT-";
 // to implement the happy path; a defensive `into_result` guards against a
 // future change to `reply_always` / `reply_on_error` without also updating
 // these handlers.
+//
+// The creation context (`TempPoolCreation`) travels through the chain as
+// the SubMsg `payload`, echoed back verbatim in each `Reply`. Because the
+// chain is atomic, the context never needs to survive the tx, so carrying
+// it in payloads avoids a storage save/load round-trip at every step.
+// Each handler deserializes the incoming payload, adds the address it
+// just learned, and attaches the updated payload to the next SubMsg.
+
+/// Deserialize the `TempPoolCreation` context from a reply's payload,
+/// wrapping decode failures with the step name so a malformed payload
+/// (which should be impossible — the factory itself authored it one
+/// submessage earlier) is attributable.
+fn creation_context_from_payload(
+    msg: &Reply,
+    step: &'static str,
+) -> Result<TempPoolCreation, ContractError> {
+    from_json(&msg.payload).map_err(|e| {
+        ContractError::Std(cosmwasm_std::StdError::generic_err(format!(
+            "{}: invalid pool-creation payload: {}",
+            step, e
+        )))
+    })
+}
 
 pub fn set_tokens(
     deps: DepsMut,
@@ -41,20 +65,16 @@ pub fn set_tokens(
     let reply_id = msg.id;
     let result = msg
         .result
+        .clone()
         .into_result()
         .map_err(|e| ContractError::ReplyOnSuccessSawError {
             id: reply_id,
             msg: format!("set_tokens: {}", e),
         })?;
 
-    let mut ctx = POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
+    let mut ctx = creation_context_from_payload(&msg, "set_tokens")?;
     let token_address = extract_contract_address(&deps, &result)?;
-
-    // Store only in ctx.temp; ctx.state.creator_token_address is
-    // derived at query time from ctx.temp.
-    ctx.temp.creator_token_addr = Some(token_address.clone());
-    ctx.state.status = CreationStatus::TokenCreated;
-    POOL_CREATION_CONTEXT.save(deps.storage, pool_id, &ctx)?;
+    ctx.creator_token_addr = Some(token_address.clone());
 
     let config = FACTORYINSTANTIATEINFO.load(deps.storage)?;
     let factory_addr_str = env.contract.address.to_string();
@@ -72,7 +92,8 @@ pub fn set_tokens(
         label: format!("{}{}", LP_NFT_LABEL_PREFIX, token_address),
     };
 
-    let sub_msg = SubMsg::reply_on_success(nft_msg, encode_reply_id(pool_id, MINT_CREATE_POOL));
+    let sub_msg = SubMsg::reply_on_success(nft_msg, encode_reply_id(pool_id, MINT_CREATE_POOL))
+        .with_payload(to_json_binary(&ctx)?);
 
     Ok(Response::new()
         .add_attribute("action", "token_created_successfully")
@@ -90,25 +111,20 @@ pub fn mint_create_pool(
     let reply_id = msg.id;
     let result = msg
         .result
+        .clone()
         .into_result()
         .map_err(|e| ContractError::ReplyOnSuccessSawError {
             id: reply_id,
             msg: format!("mint_create_pool: {}", e),
         })?;
 
-    let mut ctx = POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
+    let mut ctx = creation_context_from_payload(&msg, "mint_create_pool")?;
     let nft_address = extract_contract_address(&deps, &result)?;
-
-    // Store only in ctx.temp; ctx.state.mint_new_position_nft_address is
-    // derived at query time from ctx.temp.
-    ctx.temp.nft_addr = Some(nft_address.clone());
-    ctx.state.status = CreationStatus::NftCreated;
-    POOL_CREATION_CONTEXT.save(deps.storage, pool_id, &ctx)?;
+    ctx.nft_addr = Some(nft_address.clone());
 
     let factory_config = FACTORYINSTANTIATEINFO.load(deps.storage)?;
     let token_address =
-        ctx.temp
-            .creator_token_addr
+        ctx.creator_token_addr
             .clone()
             .ok_or(ContractError::ReplyMissingAddress {
                 step: "mint_create_pool",
@@ -127,7 +143,7 @@ pub fn mint_create_pool(
     // Update asset infos with actual token address. The sentinel is the
     // string the factory's commit-pool create handler accepts in the
     // `CreatorToken` slot at submit time (see `validate_pool_token_info`).
-    let mut updated_asset_infos = ctx.temp.temp_pool_info.pool_token_info.clone();
+    let mut updated_asset_infos = ctx.temp_pool_info.pool_token_info.clone();
     for asset_info in updated_asset_infos.iter_mut() {
         if let TokenType::CreatorToken { contract_addr } = asset_info {
             if contract_addr.as_str()
@@ -145,7 +161,7 @@ pub fn mint_create_pool(
         threshold_payout: Some(threshold_binary),
         commit_fee_info: CommitFeeInfo {
             bluechip_wallet_address: factory_config.bluechip_wallet_address.clone(),
-            creator_wallet_address: ctx.temp.temp_creator_wallet.clone(),
+            creator_wallet_address: ctx.temp_creator_wallet.clone(),
             commit_fee_bluechip: factory_config.commit_fee_bluechip,
             commit_fee_creator: factory_config.commit_fee_creator,
         },
@@ -163,7 +179,8 @@ pub fn mint_create_pool(
         label: format!("Pool-{}", pool_id),
     };
 
-    let sub_msg = SubMsg::reply_on_success(pool_msg, encode_reply_id(pool_id, FINALIZE_POOL));
+    let sub_msg = SubMsg::reply_on_success(pool_msg, encode_reply_id(pool_id, FINALIZE_POOL))
+        .with_payload(to_json_binary(&ctx)?);
 
     Ok(Response::new()
         .add_attribute("action", "nft_created_successfully")
@@ -181,25 +198,24 @@ pub fn finalize_pool(
     let reply_id = msg.id;
     let result = msg
         .result
+        .clone()
         .into_result()
         .map_err(|e| ContractError::ReplyOnSuccessSawError {
             id: reply_id,
             msg: format!("finalize_pool: {}", e),
         })?;
 
-    let ctx = POOL_CREATION_CONTEXT.load(deps.storage, pool_id)?;
+    let ctx = creation_context_from_payload(&msg, "finalize_pool")?;
     let pool_address = extract_contract_address(&deps, &result)?;
 
     let token_address =
-        ctx.temp
-            .creator_token_addr
+        ctx.creator_token_addr
             .clone()
             .ok_or(ContractError::ReplyMissingAddress {
                 step: "finalize_pool",
                 kind: "token",
             })?;
     let nft_address = ctx
-        .temp
         .nft_addr
         .clone()
         .ok_or(ContractError::ReplyMissingAddress {
@@ -208,9 +224,9 @@ pub fn finalize_pool(
         })?;
 
     // Rebuild `pool_token_info` from the source of truth for the
-    // creator-token address, which is `ctx.temp.creator_token_addr`
+    // creator-token address, which is `ctx.creator_token_addr`
     // (set in `set_tokens` when the CW20 was instantiated). The original
-    // `ctx.temp.temp_pool_info.pool_token_info` still carries the literal
+    // `ctx.temp_pool_info.pool_token_info` still carries the literal
     // `CREATOR_TOKEN_SENTINEL` placeholder string the user supplied at
     // create time. Persisting it unchanged into `POOLS_BY_ID` would leave
     // every commit pool's registry entry with the placeholder address in
@@ -222,7 +238,7 @@ pub fn finalize_pool(
     // [Native(bluechip), CreatorToken(sentinel)] shape, so the bluechip
     // side is always at index 0 and the only field that needs the
     // real address is the CreatorToken at index 1.
-    let bluechip_side = ctx.temp.temp_pool_info.pool_token_info[0].clone();
+    let bluechip_side = ctx.temp_pool_info.pool_token_info[0].clone();
     let pool_token_info = [
         bluechip_side,
         TokenType::CreatorToken {
@@ -253,11 +269,6 @@ pub fn finalize_pool(
     // emits the matching `AcceptOwnership` to the NFT and the create tx
     // ends with the pool as actual owner.
     let pool_accept_trigger = build_pool_accept_nft_ownership_call(&pool_address)?;
-
-    // Creation succeeded end-to-end. The entire creation context
-    // (temp + state) is dropped rather than left around with
-    // status=Completed, which would accumulate indefinitely.
-    POOL_CREATION_CONTEXT.remove(deps.storage, pool_id);
 
     // Single atomic write across the three pool-registry maps so
     // they cannot drift. See state::register_pool.

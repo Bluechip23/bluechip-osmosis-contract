@@ -113,8 +113,20 @@ fn register_test_pool_addr(
         .unwrap();
 }
 
+/// Extract the pool-creation payload from a create / reply-step
+/// response. The creation context rides SubMsg payloads through the
+/// reply chain (wasmd echoes them back in each Reply), so tests thread
+/// it from each response into the next simulated Reply.
+fn creation_payload(res: &cosmwasm_std::Response) -> Binary {
+    res.messages
+        .iter()
+        .find(|m| !m.payload.is_empty())
+        .map(|m| m.payload.clone())
+        .expect("response should carry a pool-creation payload on its SubMsg")
+}
+
 #[allow(deprecated)]
-fn create_instantiate_reply(id: u64, contract_addr: &str) -> Reply {
+fn create_instantiate_reply(id: u64, contract_addr: &str, payload: Binary) -> Reply {
     Reply {
         id,
         result: SubMsgResult::Ok(SubMsgResponse {
@@ -125,7 +137,7 @@ fn create_instantiate_reply(id: u64, contract_addr: &str) -> Reply {
             data: None,
         }),
         gas_used: 0,
-        payload: Binary::default(),
+        payload,
     }
 }
 
@@ -539,21 +551,31 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
         },
     };
 
-    execute(deps.as_mut(), env.clone(), admin_info.clone(), create_msg_1).unwrap();
+    let create_res = execute(deps.as_mut(), env.clone(), admin_info.clone(), create_msg_1).unwrap();
     let pool_id_1 = POOL_COUNTER.load(&deps.storage).unwrap();
 
-    // Complete the reply chain for pool 1
+    // Complete the reply chain for pool 1, threading the creation
+    // payload from each step's response into the next Reply.
     let token_1 = make_addr("token_addr_1");
-    let token_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_1, SET_TOKENS), token_1.as_str());
-    pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
+    let token_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_1, SET_TOKENS),
+        token_1.as_str(),
+        creation_payload(&create_res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
     let nft_1 = make_addr("nft_addr_1");
-    let nft_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_1, MINT_CREATE_POOL), nft_1.as_str());
-    pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
+    let nft_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_1, MINT_CREATE_POOL),
+        nft_1.as_str(),
+        creation_payload(&res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
     let pool_1 = make_addr("pool_addr_1");
-    let pool_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_1, FINALIZE_POOL), pool_1.as_str());
+    let pool_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_1, FINALIZE_POOL),
+        pool_1.as_str(),
+        creation_payload(&res),
+    );
     pool_creation_reply(deps.as_mut(), env.clone(), pool_reply).unwrap();
 
     // Verify pool 1 registry info
@@ -590,7 +612,7 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
         .time
         .plus_seconds(crate::state::COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS + 1);
 
-    execute(
+    let create_res = execute(
         deps.as_mut(),
         env_after_cooldown.clone(),
         admin_info,
@@ -602,16 +624,25 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
 
     // Complete the reply chain for pool 2
     let token_2 = make_addr("token_addr_2");
-    let token_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_2, SET_TOKENS), token_2.as_str());
-    pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), token_reply).unwrap();
+    let token_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_2, SET_TOKENS),
+        token_2.as_str(),
+        creation_payload(&create_res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), token_reply).unwrap();
     let nft_2 = make_addr("nft_addr_2");
-    let nft_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_2, MINT_CREATE_POOL), nft_2.as_str());
-    pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), nft_reply).unwrap();
+    let nft_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_2, MINT_CREATE_POOL),
+        nft_2.as_str(),
+        creation_payload(&res),
+    );
+    let res = pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), nft_reply).unwrap();
     let pool_2 = make_addr("pool_addr_2");
-    let pool_reply =
-        create_instantiate_reply(encode_reply_id(pool_id_2, FINALIZE_POOL), pool_2.as_str());
+    let pool_reply = create_instantiate_reply(
+        encode_reply_id(pool_id_2, FINALIZE_POOL),
+        pool_2.as_str(),
+        creation_payload(&res),
+    );
     pool_creation_reply(deps.as_mut(), env_after_cooldown, pool_reply).unwrap();
 
     // Verify pool 2 registry info
@@ -1014,26 +1045,32 @@ fn test_pool_details_persists_real_creator_token_address() {
         },
     };
 
-    execute(deps.as_mut(), env.clone(), admin_info, create_msg).unwrap();
+    let create_res = execute(deps.as_mut(), env.clone(), admin_info, create_msg).unwrap();
     let pool_id = POOL_COUNTER.load(&deps.storage).unwrap();
 
-    // Walk the reply chain. The address fed into SET_TOKENS is the one
+    // Walk the reply chain, threading the creation payload from each
+    // step's response. The address fed into SET_TOKENS is the one
     // we expect to find in POOLS_BY_ID at the end.
     let real_token_addr = make_addr("freshly_instantiated_cw20");
     let token_reply = create_instantiate_reply(
         encode_reply_id(pool_id, SET_TOKENS),
         real_token_addr.as_str(),
+        creation_payload(&create_res),
     );
-    pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
     let nft_addr = make_addr("freshly_instantiated_cw721");
     let nft_reply = create_instantiate_reply(
         encode_reply_id(pool_id, MINT_CREATE_POOL),
         nft_addr.as_str(),
+        creation_payload(&res),
     );
-    pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
+    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
     let pool_addr = make_addr("freshly_instantiated_pool");
-    let pool_reply =
-        create_instantiate_reply(encode_reply_id(pool_id, FINALIZE_POOL), pool_addr.as_str());
+    let pool_reply = create_instantiate_reply(
+        encode_reply_id(pool_id, FINALIZE_POOL),
+        pool_addr.as_str(),
+        creation_payload(&res),
+    );
     pool_creation_reply(deps.as_mut(), env, pool_reply).unwrap();
 
     // Invariant: PoolDetails.pool_token_info[1] must be the REAL CW20,
