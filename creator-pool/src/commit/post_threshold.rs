@@ -72,7 +72,7 @@ pub(super) fn process_post_threshold_commit(
     // commits and simple swaps face the same per-tx cap during the
     // ramp window.
     if let Some(cap) =
-        pool_core::state::post_threshold_swap_cap(deps.storage, env.block.height, offer_pool)?
+        pool_core::state::post_threshold_swap_cap(cooldown_until, env.block.height, offer_pool)
     {
         if swap_amount > cap {
             return Err(ContractError::PostThresholdSwapCapExceeded {

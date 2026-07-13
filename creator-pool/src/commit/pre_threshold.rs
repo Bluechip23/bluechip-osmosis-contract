@@ -26,6 +26,7 @@ pub(super) fn process_pre_threshold_commit(
     asset: &TokenInfo,
     commit_value: Uint128,
     net_bluechip: Uint128,
+    new_usd_total: Uint128,
     messages: Vec<CosmosMsg>,
     pool_state: &PoolState,
     analytics: &mut PoolAnalytics,
@@ -33,8 +34,10 @@ pub(super) fn process_pre_threshold_commit(
     COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
         Ok(v.unwrap_or_default().checked_add(commit_value)?)
     })?;
-    // Capture the update return values so we don't re-read USD_RAISED /
-    // NATIVE_RAISED after the writes. `Item::update` returns the new value.
+    // `new_usd_total` is the dispatcher's already-computed
+    // `USD_RAISED_FROM_COMMIT + commit_value` (overflow-checked there,
+    // and the routing into this handler depends on it), so save it
+    // directly instead of re-reading the item for an identical add.
     //
     // `NATIVE_RAISED_FROM_COMMIT` stores the *net* bluechip that
     // entered the contract's bank balance from this commit. Storing
@@ -45,8 +48,8 @@ pub(super) fn process_pre_threshold_commit(
     // (stranding up to ~2 units per commit in the contract forever)
     // and makes the seed math exact:
     // `pools_bluechip_seed = NATIVE_RAISED`.
-    let total_raised = USD_RAISED_FROM_COMMIT
-        .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(commit_value)?))?;
+    USD_RAISED_FROM_COMMIT.save(deps.storage, &new_usd_total)?;
+    let total_raised = new_usd_total;
     let total_bluechip_raised = NATIVE_RAISED_FROM_COMMIT
         .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(net_bluechip)?))?;
 

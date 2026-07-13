@@ -22,8 +22,8 @@ use crate::generic::{
 };
 use crate::msg::Cw20HookMsg;
 use crate::state::{
-    PoolCtx, PoolInfo, PoolState, CREATOR_FEE_POT, IS_THRESHOLD_HIT, MINIMUM_LIQUIDITY,
-    POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_STATE,
+    PoolCtx, PoolState, CREATOR_FEE_POT, IS_THRESHOLD_HIT, MINIMUM_LIQUIDITY,
+    POOL_ANALYTICS, POOL_FEE_STATE, POOL_PAUSED, POOL_STATE,
     POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK,
 };
 use cosmwasm_std::{
@@ -304,11 +304,17 @@ pub fn execute_swap_cw20(
             // that bypasses this gate still rejects.
             enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
-            let pool_info: PoolInfo = POOL_INFO.load(deps.storage)?;
+            // Single-shot load of the four core state items. The same
+            // `PoolCtx` is handed to `simple_swap` below so the swap
+            // handler doesn't re-read POOL_INFO / POOL_STATE /
+            // POOL_FEE_STATE — nothing writes between here and there,
+            // so the values are guaranteed identical.
+            let ctx = PoolCtx::load(deps.storage)?;
             // Authorisation + offer-side lookup in one pass, so the
             // balance-verify step below can use the same index without
             // re-scanning the pair.
-            let offer_index = pool_info
+            let offer_index = ctx
+                .info
                 .pool_info
                 .asset_infos
                 .iter()
@@ -341,19 +347,17 @@ pub fn execute_swap_cw20(
             // closes any future regression vector — same posture as
             // creator-pool's deposit/add paths already routing through
             // `*_with_verify`.
-            let pool_state = POOL_STATE.load(deps.storage)?;
-            let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
             let creator_pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
             let (reserve_offer, fee_reserve_offer, pot_offer) = if offer_index == 0 {
                 (
-                    pool_state.reserve0,
-                    pool_fee_state.fee_reserve_0,
+                    ctx.state.reserve0,
+                    ctx.fees.fee_reserve_0,
                     creator_pot.amount_0,
                 )
             } else {
                 (
-                    pool_state.reserve1,
-                    pool_fee_state.fee_reserve_1,
+                    ctx.state.reserve1,
+                    ctx.fees.fee_reserve_1,
                     creator_pot.amount_1,
                 )
             };
@@ -391,6 +395,7 @@ pub fn execute_swap_cw20(
                 allow_high_max_spread,
                 to_addr,
                 transaction_deadline,
+                Some(ctx),
             )
         }
         Err(err) => Err(ContractError::Std(err)),
@@ -409,6 +414,7 @@ pub fn simple_swap(
     allow_high_max_spread: Option<bool>,
     to: Option<Addr>,
     transaction_deadline: Option<cosmwasm_std::Timestamp>,
+    preloaded_ctx: Option<PoolCtx>,
 ) -> Result<Response, ContractError> {
     enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
@@ -418,7 +424,28 @@ pub fn simple_swap(
     // both success and error paths so mock-test storage doesn't leak a
     // stuck lock across test cases.
     with_reentrancy_guard(deps, move |mut deps| {
-        execute_simple_swap(
+        // defense-in-depth threshold gate. The current entry points
+        // already gate on IS_THRESHOLD_HIT (creator-pool dispatcher via
+        // query_check_commit, CW20 hook at the top of execute_swap_cw20),
+        // so this check is idempotent against existing call sites. The
+        // point is to close the future-regression vector where a new
+        // entry point (router-friendly variant, batch swap, etc.) might
+        // forget the gate. Checked before the PoolCtx load so a
+        // pre-threshold call rejects without paying for the four-item
+        // state read.
+        if !IS_THRESHOLD_HIT.load(deps.storage)? {
+            return Err(ContractError::ShortOfThreshold {});
+        }
+        // `preloaded_ctx` lets the CW20 Receive path hand over the
+        // PoolCtx it already loaded for balance verification instead of
+        // re-reading the same four items. Nothing writes between that
+        // load and this point (the reentrancy guard only touches
+        // REENTRANCY_LOCK), so a preloaded ctx is always current.
+        let ctx = match preloaded_ctx {
+            Some(ctx) => ctx,
+            None => PoolCtx::load(deps.storage)?,
+        };
+        execute_simple_swap_with_ctx(
             &mut deps,
             env,
             info,
@@ -428,12 +455,54 @@ pub fn simple_swap(
             max_spread,
             allow_high_max_spread,
             to,
+            ctx,
         )
     })
 }
 
+/// Loads the pool context and runs the swap. Kept as the plain-args
+/// entry so callers (and tests) that don't already hold a `PoolCtx` get
+/// the same behavior as `execute_simple_swap_with_ctx` with a fresh
+/// load. Gates on IS_THRESHOLD_HIT before loading state so pre-threshold
+/// calls reject cheaply.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_simple_swap(
+    deps: &mut DepsMut,
+    env: Env,
+    info: MessageInfo,
+    sender: Addr,
+    offer_asset: TokenInfo,
+    belief_price: Option<Decimal>,
+    max_spread: Option<Decimal>,
+    allow_high_max_spread: Option<bool>,
+    to: Option<Addr>,
+) -> Result<Response, ContractError> {
+    if !IS_THRESHOLD_HIT.load(deps.storage)? {
+        return Err(ContractError::ShortOfThreshold {});
+    }
+    let ctx = PoolCtx::load(deps.storage)?;
+    execute_simple_swap_with_ctx(
+        deps,
+        env,
+        info,
+        sender,
+        offer_asset,
+        belief_price,
+        max_spread,
+        allow_high_max_spread,
+        to,
+        ctx,
+    )
+}
+
+/// The swap handler body. Takes the four core state items as an
+/// already-loaded `PoolCtx` so hot paths that loaded them earlier in the
+/// same tx (the CW20 Receive hook's balance-verify step) don't pay for a
+/// second read. Callers are responsible for the IS_THRESHOLD_HIT gate —
+/// both public wrappers (`simple_swap`, `execute_simple_swap`) enforce it
+/// before delegating here.
+#[allow(clippy::too_many_arguments)]
+fn execute_simple_swap_with_ctx(
     deps: &mut DepsMut,
     env: Env,
     _info: MessageInfo,
@@ -443,25 +512,14 @@ pub fn execute_simple_swap(
     max_spread: Option<Decimal>,
     allow_high_max_spread: Option<bool>,
     to: Option<Addr>,
+    ctx: PoolCtx,
 ) -> Result<Response, ContractError> {
-    // defense-in-depth threshold gate at the shared
-    // handler. The current entry points already gate on
-    // IS_THRESHOLD_HIT (creator-pool dispatcher via query_check_commit,
-    // CW20 hook at the top of execute_swap_cw20), so this check is
-    // idempotent against existing call sites. The point is
-    // to close the future-regression vector where a new entry point
-    // (router-friendly variant, batch swap, etc.) might forget the
-    // gate; with the check here, the shared handler is self-protecting.
-    if !IS_THRESHOLD_HIT.load(deps.storage)? {
-        return Err(ContractError::ShortOfThreshold {});
-    }
-
     let PoolCtx {
         info: pool_info,
         state: mut pool_state,
         fees: mut pool_fee_state,
         specs: pool_specs,
-    } = PoolCtx::load(deps.storage)?;
+    } = ctx;
 
     // The rate-limit check shares PoolCtx's POOL_SPECS load rather than
     // issuing a redundant POOL_SPECS.load of its own. USER_LAST_COMMIT
@@ -502,7 +560,7 @@ pub fn execute_simple_swap(
     // check) for pre-threshold pools (cooldown_until == 0) and for
     // pools past the ramp window.
     if let Some(cap) =
-        crate::state::post_threshold_swap_cap(deps.storage, env.block.height, offer_pool)?
+        crate::state::post_threshold_swap_cap(cooldown_until, env.block.height, offer_pool)
     {
         if offer_asset.amount > cap {
             return Err(ContractError::PostThresholdSwapCapExceeded {

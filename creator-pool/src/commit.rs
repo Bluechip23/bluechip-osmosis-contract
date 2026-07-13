@@ -39,9 +39,9 @@ use crate::generic_helpers::{
 };
 use crate::msg::CommitFeeInfo;
 use crate::state::{
-    COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT, POOL_ANALYTICS,
-    POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS,
-    THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
+    POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
+    THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
 
 use crate::swap_helper::get_usd_conversion;
@@ -119,7 +119,17 @@ pub fn commit(
         let pool_specs = POOL_SPECS.load(deps.storage)?;
         let sender = info.sender.clone();
         check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
-        execute_commit_logic(&mut deps, env, info, asset, belief_price, max_spread)
+        // Hand the already-loaded POOL_SPECS to the dispatcher so it
+        // doesn't re-read the same item.
+        execute_commit_logic(
+            &mut deps,
+            env,
+            info,
+            asset,
+            belief_price,
+            max_spread,
+            pool_specs,
+        )
     })
 }
 
@@ -130,14 +140,12 @@ fn execute_commit_logic(
     asset: TokenInfo,
     belief_price: Option<Decimal>,
     max_spread: Option<Decimal>,
+    pool_specs: PoolSpecs,
 ) -> Result<Response, ContractError> {
     let amount = asset.amount;
     let pool_info = POOL_INFO.load(deps.storage)?;
     let mut pool_state = POOL_STATE.load(deps.storage)?;
-    let pool_specs = POOL_SPECS.load(deps.storage)?;
     let commit_config = COMMIT_LIMIT_INFO.load(deps.storage)?;
-    let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-    let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
     let fee_info = COMMITFEEINFO.load(deps.storage)?;
     let sender = info.sender.clone();
 
@@ -305,6 +313,14 @@ fn execute_commit_logic(
                     }
                     THRESHOLD_PROCESSING.save(deps.storage, &true)?;
 
+                    // These two items are consumed only by the crossing
+                    // handlers, which run exactly once per pool lifetime
+                    // — load them here rather than on every commit so
+                    // the hot pre-/post-threshold paths never pay for
+                    // reads they don't use.
+                    let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
+                    let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
+
                     let value_to_threshold = commit_config
                         .commit_amount_for_threshold_usd
                         .checked_sub(current_raised)
@@ -371,12 +387,21 @@ fn execute_commit_logic(
                         // contract bank balance from this commit
                         // (see pre_threshold.rs).
                         amount_after_fees,
+                        // Already-computed USD_RAISED_FROM_COMMIT +
+                        // commit_value, so the handler saves the new
+                        // total without re-reading the item.
+                        new_total,
                         messages,
                         &pool_state,
                         &mut analytics,
                     )?
                 }
             } else {
+                // Loaded here rather than at the top of the dispatcher:
+                // the pre-threshold path never touches fee state, so
+                // only the post-threshold (and crossing) branches pay
+                // for this read.
+                let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
                 process_post_threshold_commit(
                     deps,
                     env,
