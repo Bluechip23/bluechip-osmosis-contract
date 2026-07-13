@@ -921,7 +921,7 @@ fn test_create_commit_pool_disabled_fee_rejects_attached_funds() {
 // timelock.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_m1_propose_upgrade_rejects_unregistered_pool_id() {
+fn test_propose_upgrade_rejects_unregistered_pool_id() {
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
 
@@ -947,7 +947,7 @@ fn test_m1_propose_upgrade_rejects_unregistered_pool_id() {
 }
 
 #[test]
-fn test_m1_propose_upgrade_dedups_pool_ids() {
+fn test_propose_upgrade_dedups_pool_ids() {
     use crate::state::PENDING_POOL_UPGRADE;
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
@@ -985,7 +985,7 @@ fn test_m1_propose_upgrade_dedups_pool_ids() {
 // CreatorToken address matches the SubMsg-instantiated CW20.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_c2_pool_details_persists_real_creator_token_address() {
+fn test_pool_details_persists_real_creator_token_address() {
     use crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL;
 
     let mut deps = mock_deps_with_querier(&[]);
@@ -1081,7 +1081,7 @@ fn test_c2_pool_details_persists_real_creator_token_address() {
 // `validate_creator_token_info` rejects all-numeric symbols.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_l7_create_rejects_all_numeric_symbol() {
+fn test_create_rejects_all_numeric_symbol() {
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
 
@@ -1124,7 +1124,7 @@ fn test_l7_create_rejects_all_numeric_symbol() {
 // `COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS` between successful creates.
 // ---------------------------------------------------------------------------
 #[test]
-fn test_i6_commit_pool_create_rate_limit_per_address() {
+fn test_commit_pool_create_rate_limit_per_address() {
     use crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL;
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
