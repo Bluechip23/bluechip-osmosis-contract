@@ -1591,11 +1591,11 @@ mod native_raised_net_semantics_tests {
         );
 
         // Defense-in-depth: explicitly confirm we did NOT add the
-        // pre-refactor gross value.
+        // gross bluechip_to_threshold value.
         let gross_would_be = Uint128::new(24_995_000_000 + 5_000_000);
         assert_ne!(
             total, gross_would_be,
-            "regression guard: NATIVE_RAISED must NOT equal pre-refactor gross"
+            "regression guard: NATIVE_RAISED must NOT equal the gross-based total"
         );
     }
 
@@ -1603,8 +1603,9 @@ mod native_raised_net_semantics_tests {
     /// directly into `pools_bluechip_seed` with NO `(1 - fee_rate)`
     /// recovery multiply. End-to-end: a pre-seeded NATIVE_RAISED of
     /// 1_000_000 (under the max_bluechip_lock_per_pool cap) must produce
-    /// `pool_state.reserve0 = 1_000_000` after threshold-cross — the
-    /// pre-refactor code would have produced `1_000_000 * 0.94 = 940_000`.
+    /// `pool_state.reserve0 = 1_000_000` after threshold-cross — a
+    /// gross-based recovery multiply would produce `1_000_000 * 0.94 =
+    /// 940_000`, which this test asserts we do not.
     #[test]
     fn trigger_threshold_payout_reads_native_raised_directly_no_recovery_multiply() {
         use crate::generic_helpers::trigger_threshold_payout;
@@ -1616,8 +1617,8 @@ mod native_raised_net_semantics_tests {
         setup_pool_storage(&mut deps);
 
         // Seed NATIVE_RAISED with a value below max_bluechip_lock_per_pool
-        // (which is 10_000_000_000 in setup_pool_storage). After the
-        // refactor, this entire amount becomes `pools_bluechip_seed`
+        // (which is 10_000_000_000 in setup_pool_storage). This entire
+        // amount becomes `pools_bluechip_seed`
         // and lands as `pool_state.reserve0` (no excess carve-off).
         let seeded_net = Uint128::new(1_000_000);
         NATIVE_RAISED_FROM_COMMIT
@@ -1651,26 +1652,27 @@ mod native_raised_net_semantics_tests {
 
         // Net invariant: pool_state.reserve0 == NATIVE_RAISED_FROM_COMMIT
         // (provided we're under the cap, which we are: 1M ≪ 10B).
-        // Pre-refactor would have produced 1_000_000 * 0.94 = 940_000.
+        // A gross-based recovery multiply would produce
+        // 1_000_000 * 0.94 = 940_000.
         assert_eq!(
             pool_state.reserve0, seeded_net,
-            "post-refactor: pool_state.reserve0 must equal NATIVE_RAISED directly. \
-             Got reserve0={}, seeded={}. (Pre-refactor would have produced 940_000.)",
+            "pool_state.reserve0 must equal NATIVE_RAISED directly. \
+             Got reserve0={}, seeded={}. (A recovery multiply would produce 940_000.)",
             pool_state.reserve0, seeded_net
         );
 
-        // Defense-in-depth: the pre-refactor `gross * (1 - fee_rate)`
-        // result is explicitly NOT what we got.
-        let pre_refactor_seed = seeded_net.checked_mul_floor(Decimal::percent(94)).unwrap();
+        // Defense-in-depth: the `gross * (1 - fee_rate)`
+        // recovery result is explicitly NOT what we got.
+        let recovery_multiplied_seed = seeded_net.checked_mul_floor(Decimal::percent(94)).unwrap();
         assert_ne!(
-            pool_state.reserve0, pre_refactor_seed,
-            "regression guard: must not produce pre-refactor recovery-multiplied seed"
+            pool_state.reserve0, recovery_multiplied_seed,
+            "regression guard: must not produce a recovery-multiplied seed"
         );
 
         // pool_state.reserve1 lands the full `payout.pool_seed_amount`
         // creator-token allocation (this is independent of the
-        // gross→net refactor, included as a sanity check that the
-        // payout math is otherwise unchanged).
+        // net-of-fees semantics of reserve0, included as a sanity check
+        // that the payout math is correct on the other side too).
         assert_eq!(
             pool_state.reserve1, payout.pool_seed_amount,
             "creator-token side of seed should be the full pool_seed_amount"

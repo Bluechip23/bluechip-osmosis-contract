@@ -389,7 +389,7 @@ pub fn register_pool(
 ///
 /// In production a miss in `POOL_ID_BY_ADDRESS` combined with a hit in
 /// `POOLS_BY_CONTRACT_ADDRESS` means a write bypassed `register_pool` —
-/// a real bug — and is surfaced loudly. In tests, legacy fixtures may
+/// a real bug — and is surfaced loudly. In tests, fixtures may
 /// write `POOLS_BY_ID` directly, so a linear-scan fallback keeps them
 /// resolving without rewrites.
 pub(crate) fn lookup_pool_by_addr(
