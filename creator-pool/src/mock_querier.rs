@@ -28,6 +28,13 @@ pub fn mock_dependencies(
 pub struct WasmMockQuerier {
     base: MockQuerier<Empty>,
     token_querier: TokenQuerier,
+    // The creator token is now a native TokenFactory denom. When the
+    // manual `PoolInfo {}` branch below answers a pool-reserve query it
+    // reads the creator side from the bank module under this denom (seeded
+    // via `with_balance` / the contract_balance passed to
+    // `mock_dependencies`), mirroring production where both pool sides are
+    // bank coins. Empty by default; set via `set_creator_denom`.
+    creator_denom: String,
 }
 
 #[derive(Clone, Default)]
@@ -79,12 +86,21 @@ impl WasmMockQuerier {
         WasmMockQuerier {
             base,
             token_querier: TokenQuerier::default(),
+            creator_denom: String::new(),
         }
     }
 
     // Seed CW20 balances for `contract_addr`
+    #[allow(dead_code)]
     pub fn with_token_balances(&mut self, balances: &[(&String, &[(&String, &Uint128)])]) {
         self.token_querier = TokenQuerier::new(balances);
+    }
+
+    // Register the pool's native creator TokenFactory denom so the manual
+    // `PoolInfo {}` reserve branch reads the creator side from the bank
+    // module under this denom.
+    pub fn set_creator_denom(&mut self, denom: &str) {
+        self.creator_denom = denom.to_string();
     }
 
     // Seed bluechip bank balances
@@ -193,24 +209,16 @@ impl WasmMockQuerier {
                     let bluechip = QuerierWrapper::<Empty>::new(&self.base)
                         .query_balance(contract_addr.clone(), "ubluechip".to_string())
                         .unwrap();
-                    // cw20 balance via smart query
-                    let wrapper = QuerierWrapper::<Empty>::new(&self.base);
-                    let raw: BalanceResponse = wrapper
-                        .query_wasm_smart(
-                            contract_addr.clone(),
-                            &Cw20QueryMsg::Balance {
-                                address: contract_addr.clone(),
-                            },
-                        )
-                        .unwrap();
-                    let cw20_amount = raw.balance;
+                    // creator-token balance from bank (native TokenFactory
+                    // denom now, not a CW20 smart query).
+                    let creator_amount = QuerierWrapper::<Empty>::new(&self.base)
+                        .query_balance(contract_addr.clone(), self.creator_denom.clone())
+                        .map(|c| c.amount)
+                        .unwrap_or_default();
                     let resp = PoolResponse {
                         assets: [
                             crate::asset::native_asset("ubluechip".to_string(), bluechip.amount),
-                            crate::asset::token_asset(
-                                Addr::unchecked(contract_addr.clone()),
-                                cw20_amount,
-                            ),
+                            crate::asset::token_asset(self.creator_denom.clone(), creator_amount),
                         ],
                     };
                     let bin = to_json_binary(&resp).unwrap();

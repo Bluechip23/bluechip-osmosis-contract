@@ -56,7 +56,7 @@ fn register_test_pool_addr(
                         denom: "ubluechip".to_string(),
                     },
                     TokenType::CreatorToken {
-                        contract_addr: Addr::unchecked("token"),
+                        denom: String::from("token"),
                     },
                 ],
                 creator_pool_addr: pool_addr.clone(),
@@ -378,7 +378,7 @@ fn test_update_specific_pool_from_registry() {
                 denom: "ubluechip".to_string(),
             },
             TokenType::CreatorToken {
-                contract_addr: Addr::unchecked("token"),
+                denom: String::from("token"),
             },
         ],
         creator_pool_addr: pool_addr.clone(),

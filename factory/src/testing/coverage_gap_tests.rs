@@ -91,7 +91,7 @@ fn create_pool_refunds_surplus_to_sender() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
+                    denom: String::from("WILL_BE_CREATED_BY_FACTORY"),
                 },
             ],
         },
@@ -147,7 +147,7 @@ fn create_pool_exact_pay_emits_no_refund() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
+                    denom: String::from("WILL_BE_CREATED_BY_FACTORY"),
                 },
             ],
         },

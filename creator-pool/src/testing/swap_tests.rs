@@ -13,13 +13,12 @@ use crate::swap_helper::execute_simple_swap;
 use crate::{
     contract::{execute, instantiate},
     generic_helpers::trigger_threshold_payout,
-    msg::{CommitFeeInfo, Cw20HookMsg, PoolInstantiateMsg},
+    msg::{CommitFeeInfo, PoolInstantiateMsg},
     state::{
         DistributionState, COMMITFEEINFO, COMMIT_LIMIT_INFO, DISTRIBUTION_STATE, POOL_INFO,
         THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
     },
-    swap_helper::execute_swap_cw20,
-    testing::liquidity_tests::{setup_pool_post_threshold, setup_pool_storage},
+    testing::liquidity_tests::{setup_pool_post_threshold, setup_pool_storage, CREATOR_DENOM},
 };
 use cosmwasm_std::{
     testing::{
@@ -29,7 +28,6 @@ use cosmwasm_std::{
     to_json_binary, Addr, BankMsg, Binary, Coin, ContractResult, CosmosMsg, Decimal, Order,
     OwnedDeps, SystemError, SystemResult, Timestamp, Uint128, WasmQuery,
 };
-use cw20::Cw20ReceiveMsg;
 
 /// Installs a mock factory USD-valuation responder at the given rate
 /// (micro-USD per micro-native; 1_000_000 = $1 per token). Mirrors
@@ -1062,51 +1060,42 @@ fn test_swap_with_max_spread() {
 }
 
 #[test]
-fn test_swap_cw20_via_hook() {
+fn test_swap_sell_creator_token_native() {
+    // Post-migration the creator token is a native TokenFactory denom, so
+    // selling it is a plain `SimpleSwap` with the creator denom ATTACHED as
+    // funds (the old CW20 `Receive`/hook path is gone). No CW20 balance
+    // smart-query is needed — the bank module guarantees the attached
+    // amount.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
-
-    deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { contract_addr, msg } => {
-            if contract_addr == "token_contract" {
-                let balance_response = cw20::BalanceResponse {
-                    balance: Uint128::new(360_000_000_000),
-                };
-                SystemResult::Ok(ContractResult::Ok(
-                    to_json_binary(&balance_response).unwrap(),
-                ))
-            } else {
-                SystemResult::Err(SystemError::InvalidRequest {
-                    error: "Unknown contract".to_string(),
-                    request: msg.clone(),
-                })
-            }
-        }
-        _ => SystemResult::Err(SystemError::InvalidRequest {
-            error: "Unknown query type".to_string(),
-            request: Binary::default(),
-        }),
-    });
 
     let env = mock_env();
     let swap_amount = Uint128::new(10_000_000_000); // 10k tokens
 
-    let info = message_info(&Addr::unchecked("token_contract"), &[]);
+    // The trader attaches the creator denom directly as native funds.
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: CREATOR_DENOM.to_string(),
+            amount: swap_amount,
+        }],
+    );
 
-    let cw20_msg = Cw20ReceiveMsg {
-        sender: MockApi::default().addr_make("trader").to_string(),
-        amount: swap_amount,
-        msg: to_json_binary(&Cw20HookMsg::Swap {
-            belief_price: None,
-            max_spread: Some(Decimal::percent(10)),
-            allow_high_max_spread: Some(true),
-            to: None,
-            transaction_deadline: None,
-        })
-        .unwrap(),
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::CreatorToken {
+                denom: CREATOR_DENOM.to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None,
+        max_spread: Some(Decimal::percent(10)),
+        allow_high_max_spread: Some(true),
+        to: None,
+        transaction_deadline: None,
     };
 
-    let res = execute_swap_cw20(deps.as_mut(), env, info, cw20_msg).unwrap();
+    let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
     assert_eq!(
         res.attributes
@@ -1117,67 +1106,57 @@ fn test_swap_cw20_via_hook() {
         "swap"
     );
 
+    // Selling the creator token pays out bluechip via BankMsg::Send.
+    assert!(res.messages.iter().any(|m| matches!(
+        &m.msg,
+        CosmosMsg::Bank(BankMsg::Send { amount, .. })
+            if amount.iter().any(|c| c.denom == "ubluechip")
+    )));
+
     let pool_state = POOL_STATE.load(&deps.storage).unwrap();
     assert!(pool_state.reserve0 < Uint128::new(23_500_000_000)); // Native decreased
-    assert!(pool_state.reserve1 > Uint128::new(350_000_000_000)); // CW20 increased
+    assert!(pool_state.reserve1 > Uint128::new(350_000_000_000)); // Creator increased
 }
 
-/// A hostile CW20 cannot dispatch a Receive hook with a
-/// fabricated `amount` and drain the opposite reserve. The pool
-/// queries the CW20's balance, compares to `reserve + fee_reserve +
-/// creator_pot + claimed_amount`, and rejects on shortfall.
+/// TODO(phase1-migration): the original test exercised the CW20
+/// Receive-hook anti-spoof guard (`Cw20SwapBalanceMismatch`): a hostile
+/// CW20 could dispatch a Receive claiming an `amount` it never actually
+/// transferred, so the pool re-queried the CW20 balance and rejected on
+/// shortfall. That entire attack surface is gone — the creator token is a
+/// native TokenFactory denom now, and `SimpleSwap` verifies the attached
+/// funds via `must_pay` (the bank module cannot be spoofed), so there is
+/// no balance-mismatch path left to trigger. Repurposed to assert the
+/// native sell path both requires the funds to be attached and settles
+/// correctly when they are.
 #[test]
 fn test_cw20_receive_rejects_balance_shortfall() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
-    // Hostile CW20: dispatches Receive claiming 10B tokens but its own
-    // balance for the pool is still the pre-attack reserve (350B) — no
-    // actual transfer happened.
-    deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { contract_addr, .. } if contract_addr == "token_contract" => {
-            SystemResult::Ok(ContractResult::Ok(
-                to_json_binary(&cw20::BalanceResponse {
-                    balance: Uint128::new(350_000_000_000),
-                })
-                .unwrap(),
-            ))
-        }
-        _ => SystemResult::Err(SystemError::InvalidRequest {
-            error: "Unknown query".to_string(),
-            request: Binary::default(),
-        }),
-    });
-
     let env = mock_env();
-    let info = message_info(&Addr::unchecked("token_contract"), &[]);
-    let cw20_msg = Cw20ReceiveMsg {
-        sender: MockApi::default().addr_make("attacker").to_string(),
-        amount: Uint128::new(10_000_000_000), // claim 10B with no actual transfer
-        msg: to_json_binary(&Cw20HookMsg::Swap {
-            belief_price: None,
-            max_spread: Some(Decimal::percent(5)),
-            allow_high_max_spread: None,
-            to: None,
-            transaction_deadline: None,
-        })
-        .unwrap(),
-    };
+    let swap_amount = Uint128::new(10_000_000_000);
 
-    let err = execute_swap_cw20(deps.as_mut(), env, info, cw20_msg).unwrap_err();
-    match err {
-        crate::error::ContractError::Cw20SwapBalanceMismatch {
-            expected_min,
-            actual,
-            claimed_amount,
-            ..
-        } => {
-            assert_eq!(claimed_amount, Uint128::new(10_000_000_000));
-            assert_eq!(actual, Uint128::new(350_000_000_000));
-            assert_eq!(expected_min, Uint128::new(360_000_000_000));
-        }
-        other => panic!("expected Cw20SwapBalanceMismatch, got {:?}", other),
-    }
+    // A `SimpleSwap` claiming to sell the creator token but attaching NO
+    // funds is rejected by the funds check — the native analog of the old
+    // spoofed-amount attack.
+    let no_funds = message_info(&Addr::unchecked("attacker"), &[]);
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::CreatorToken {
+                denom: CREATOR_DENOM.to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None,
+        max_spread: Some(Decimal::percent(5)),
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let err = execute(deps.as_mut(), env.clone(), no_funds, msg.clone()).unwrap_err();
+    // must_pay surfaces a generic "no funds"/denom error; either way the
+    // swap is rejected before any state mutation.
+    let _ = err;
 
     // Pool state must be untouched after the rejection.
     let pool_state = POOL_STATE.load(&deps.storage).unwrap();
@@ -1271,10 +1250,9 @@ fn test_factory_impersonation_prevented() {
                 denom: "ubluechip".to_string(),
             },
             TokenType::CreatorToken {
-                contract_addr: MockApi::default().addr_make("WILL_BE_CREATED_BY_FACTORY"),
+                denom: "factory/placeholder/ucreator".to_string(),
             },
         ],
-        cw20_token_contract_id: 2u64,
         threshold_payout: None,
         used_factory_addr: Addr::unchecked("factory_contract"),
         commit_fee_info: CommitFeeInfo {
@@ -1287,7 +1265,7 @@ fn test_factory_impersonation_prevented() {
         creator_excess_liquidity_lock_days: 7,
         commit_threshold_limit_usd: Uint128::new(350_000_000_000),
         position_nft_address: Addr::unchecked("NFT_contract"),
-        token_address: Addr::unchecked("token_contract"),
+        subdenom: "ucreator".to_string(),
     };
     let info = message_info(&Addr::unchecked("fake_factory"), &[]); // Wrong sender!
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
@@ -1539,48 +1517,36 @@ fn test_belief_price_with_zero_price() {
 
 #[test]
 fn test_swap_cw20_to_bluechip_direct() {
+    // Native sell of the creator token: attach the creator denom as funds
+    // and swap it for bluechip via `SimpleSwap`.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
-    deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { contract_addr, msg } => {
-            if contract_addr == "token_contract" {
-                let balance_response = cw20::BalanceResponse {
-                    balance: Uint128::new(360_000_000_000),
-                };
-                return SystemResult::Ok(ContractResult::Ok(
-                    to_json_binary(&balance_response).unwrap(),
-                ));
-            }
-            SystemResult::Err(SystemError::InvalidRequest {
-                error: "Unknown query".to_string(),
-                request: msg.clone(),
-            })
-        }
-        _ => SystemResult::Err(SystemError::InvalidRequest {
-            error: "Unknown query type".to_string(),
-            request: Binary::default(),
-        }),
-    });
-
     let env = mock_env();
-    let swap_amount = Uint128::new(10_000_000_000); // 10k CW20 tokens
+    let swap_amount = Uint128::new(10_000_000_000); // 10k creator tokens
 
-    let info = message_info(&Addr::unchecked("token_contract"), &[]);
-    let cw20_msg = Cw20ReceiveMsg {
-        sender: MockApi::default().addr_make("trader").to_string(),
-        amount: swap_amount,
-        msg: to_json_binary(&Cw20HookMsg::Swap {
-            belief_price: None,
-            max_spread: Some(Decimal::percent(5)), // Allow 5% slippage for this large swap
-            allow_high_max_spread: None,
-            to: None,
-            transaction_deadline: None,
-        })
-        .unwrap(),
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: CREATOR_DENOM.to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::CreatorToken {
+                denom: CREATOR_DENOM.to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None,
+        max_spread: Some(Decimal::percent(5)), // Allow 5% slippage for this large swap
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
     };
 
-    let res = execute_swap_cw20(deps.as_mut(), env, info, cw20_msg).unwrap();
+    let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
     assert_eq!(
         res.attributes
@@ -1596,7 +1562,7 @@ fn test_swap_cw20_to_bluechip_direct() {
             .find(|a| a.key == "offer_asset")
             .unwrap()
             .value,
-        "token_contract"
+        CREATOR_DENOM
     );
 
     // Should have bank send message for bluechip
@@ -1606,54 +1572,41 @@ fn test_swap_cw20_to_bluechip_direct() {
         .any(|msg| { matches!(&msg.msg, CosmosMsg::Bank(BankMsg::Send { .. })) }));
     let pool_state = POOL_STATE.load(&deps.storage).unwrap();
     assert!(pool_state.reserve0 < Uint128::new(23_500_000_000)); // Bluechip decreased
-    assert!(pool_state.reserve1 > Uint128::new(350_000_000_000)); // CW20 increased
+    assert!(pool_state.reserve1 > Uint128::new(350_000_000_000)); // Creator increased
 }
 
 #[test]
 fn test_swap_cw20_with_custom_recipient() {
+    // Native sell routed to a custom recipient via `SimpleSwap { to }`.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
-
-    deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { contract_addr, msg } => {
-            if contract_addr == "token_contract" {
-                let balance_response = cw20::BalanceResponse {
-                    balance: Uint128::new(350_100_000_000),
-                };
-                return SystemResult::Ok(ContractResult::Ok(
-                    to_json_binary(&balance_response).unwrap(),
-                ));
-            }
-            SystemResult::Err(SystemError::InvalidRequest {
-                error: "Unknown query".to_string(),
-                request: msg.clone(),
-            })
-        }
-        _ => SystemResult::Err(SystemError::InvalidRequest {
-            error: "Unknown query type".to_string(),
-            request: Binary::default(),
-        }),
-    });
 
     let env = mock_env();
     let swap_amount = Uint128::new(100_000_000); // Reduced to 100M to avoid slippage
     let recipient = MockApi::default().addr_make("beneficiary").to_string();
 
-    let info = message_info(&Addr::unchecked("token_contract"), &[]);
-    let cw20_msg = Cw20ReceiveMsg {
-        sender: MockApi::default().addr_make("trader").to_string(),
-        amount: swap_amount,
-        msg: to_json_binary(&Cw20HookMsg::Swap {
-            belief_price: None,
-            max_spread: Some(Decimal::percent(2)), // Allow 2% slippage
-            allow_high_max_spread: None,
-            to: Some(recipient.clone()),
-            transaction_deadline: None,
-        })
-        .unwrap(),
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: CREATOR_DENOM.to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::CreatorToken {
+                denom: CREATOR_DENOM.to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None,
+        max_spread: Some(Decimal::percent(2)), // Allow 2% slippage
+        allow_high_max_spread: None,
+        to: Some(recipient.clone()),
+        transaction_deadline: None,
     };
 
-    let res = execute_swap_cw20(deps.as_mut(), env, info, cw20_msg).unwrap();
+    let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
     let bank_msg = res
         .messages
@@ -2014,14 +1967,14 @@ pub fn setup_pool_with_reserves(
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("token_contract"),
+                    denom: super::liquidity_tests::CREATOR_DENOM.to_string(),
                 },
             ],
             contract_addr: Addr::unchecked("pool_contract"),
             pool_type: PoolPairType::Xyk {},
         },
         factory_addr: Addr::unchecked("factory_contract"),
-        token_address: Addr::unchecked("token_contract"),
+        token_denom: super::liquidity_tests::CREATOR_DENOM.to_string(),
         position_nft_address: Addr::unchecked("nft_contract"),
     };
     POOL_INFO.save(&mut deps.storage, &pool_info).unwrap();

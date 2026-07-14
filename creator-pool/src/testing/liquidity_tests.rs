@@ -32,6 +32,15 @@ use crate::{
 };
 const OPTIMAL_LIQUIDITY: u128 = 1_000_000;
 
+/// The pool's native creator TokenFactory denom used across the shared
+/// test fixtures. Post-migration the creator token is a bank denom
+/// (`factory/{pool_addr}/{subdenom}`) rather than a CW20 contract; the
+/// setup helpers pin the pool address as "pool_contract", so its creator
+/// denom is deterministic. Other test modules import this so their
+/// offer/ask assets and BankMsg::Send expectations line up with the
+/// fixtures.
+pub const CREATOR_DENOM: &str = "factory/pool_contract/ucreator";
+
 #[test]
 fn test_deposit_liquidity_first_position() {
     let mut deps = mock_dependencies();
@@ -879,14 +888,14 @@ pub fn setup_pool_storage(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("token_contract"),
+                    denom: CREATOR_DENOM.to_string(),
                 },
             ],
             contract_addr: Addr::unchecked("pool_contract"),
             pool_type: PoolPairType::Xyk {},
         },
         factory_addr: Addr::unchecked("factory_contract"),
-        token_address: Addr::unchecked("token_contract"),
+        token_denom: CREATOR_DENOM.to_string(),
         position_nft_address: Addr::unchecked("nft_contract"),
     };
     POOL_INFO.save(&mut deps.storage, &pool_info).unwrap();

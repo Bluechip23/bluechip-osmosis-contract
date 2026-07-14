@@ -22,13 +22,38 @@ use crate::testing::liquidity_tests::{
     create_test_position, setup_pool_post_threshold, setup_pool_storage,
 };
 
+// The pool's native creator TokenFactory denom under the mock env
+// (`factory/{pool_addr}/{subdenom}`). Simulation offer/ask assets must
+// carry this exact denom for the pool to recognize the creator side.
+fn creator_denom() -> String {
+    format!(
+        "factory/{}/ucreator",
+        cosmwasm_std::testing::MOCK_CONTRACT_ADDR
+    )
+}
+
 // Setup pool storage on the custom mock querier that supports simulation queries.
 // Simulation queries call `query_pools()` which needs bank balance + CW20 balance queries.
 fn setup_pool_with_querier() -> OwnedDeps<MockStorage, MockApi, mock_querier::WasmMockQuerier> {
-    let mut deps = mock_querier::mock_dependencies(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(23_500_000_000),
-    }]);
+    // The creator token is now a native TokenFactory denom owned by the
+    // pool contract. Seed BOTH the bluechip and creator reserves into the
+    // bank module at the pool address so `query_pools()` (which now does a
+    // bank balance query for each side) reads reserve0/reserve1 back.
+    let creator_denom = format!(
+        "factory/{}/ucreator",
+        cosmwasm_std::testing::MOCK_CONTRACT_ADDR
+    );
+    let mut deps = mock_querier::mock_dependencies(&[
+        Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(23_500_000_000),
+        },
+        Coin {
+            denom: creator_denom.clone(),
+            amount: Uint128::new(350_000_000_000),
+        },
+    ]);
+    deps.querier.set_creator_denom(&creator_denom);
 
     // Reuse setup_pool_post_threshold logic but on custom querier deps
     use crate::asset::PoolPairType;
@@ -43,14 +68,14 @@ fn setup_pool_with_querier() -> OwnedDeps<MockStorage, MockApi, mock_querier::Wa
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("token_contract"),
+                    denom: creator_denom.clone(),
                 },
             ],
             contract_addr: Addr::unchecked(cosmwasm_std::testing::MOCK_CONTRACT_ADDR),
             pool_type: PoolPairType::Xyk {},
         },
         factory_addr: Addr::unchecked("factory"),
-        token_address: Addr::unchecked("token_contract"),
+        token_denom: creator_denom.clone(),
         position_nft_address: Addr::unchecked("nft_contract"),
     };
     POOL_INFO.save(&mut deps.storage, &pool_info).unwrap();
@@ -112,14 +137,9 @@ fn setup_pool_with_querier() -> OwnedDeps<MockStorage, MockApi, mock_querier::Wa
         .unwrap();
     NEXT_POSITION_ID.save(&mut deps.storage, &1u64).unwrap();
 
-    // Seed CW20 balances so query_pools() works
-    deps.querier.with_token_balances(&[(
-        &"token_contract".to_string(),
-        &[(
-            &cosmwasm_std::testing::MOCK_CONTRACT_ADDR.to_string(),
-            &Uint128::new(350_000_000_000),
-        )],
-    )]);
+    // Creator-token reserve is seeded as a native bank balance in the
+    // `mock_dependencies` call above (creator_denom @ 350B), so
+    // `query_pools()` reads it back via a bank query — no CW20 seeding.
 
     deps
 }
@@ -172,7 +192,7 @@ fn test_query_simulation_token_to_bluechip() {
     // Simulate swapping creator tokens for bluechip
     let offer = TokenInfo {
         info: TokenType::CreatorToken {
-            contract_addr: Addr::unchecked("token_contract"),
+            denom: creator_denom(),
         },
         amount: Uint128::new(10_000_000_000), // 10k tokens
     };
@@ -213,7 +233,7 @@ fn test_query_reverse_simulation() {
     // "I want 5k creator tokens, how much bluechip do I need?"
     let ask = TokenInfo {
         info: TokenType::CreatorToken {
-            contract_addr: Addr::unchecked("token_contract"),
+            denom: creator_denom(),
         },
         amount: Uint128::new(5_000_000_000),
     };
@@ -776,7 +796,7 @@ fn simulation_on_zero_reserves_errors_cleanly_instead_of_panicking() {
         QueryMsg::ReverseSimulation {
             ask_asset: TokenInfo {
                 info: TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("token_contract"),
+                    denom: creator_denom(),
                 },
                 amount: Uint128::new(1_000_000),
             },

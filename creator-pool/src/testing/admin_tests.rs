@@ -42,12 +42,10 @@ fn install_factory_emergency_delay_mock(
 }
 
 fn mock_instantiate_msg() -> PoolInstantiateMsg {
-    // Both the CreatorToken entry and `token_address` must be bech32-valid
-    // (cosmwasm's mock API rejects raw strings via addr_validate) AND must
-    // equal each other. Using the same
-    // MockApi-derived address for both satisfies both.
-    let api = MockApi::default();
-    let token_addr = api.addr_make("creator_token");
+    // The creator token is now a native TokenFactory denom. The index-1
+    // `CreatorToken` slot is a placeholder whose denom the pool ignores —
+    // it recomputes `factory/{pool_addr}/{subdenom}` at instantiate. Supply
+    // a realistic factory-style placeholder denom.
     // Supply the fixed threshold_payout shape
     // `validate_pool_threshold_payments` accepts (creator=325B,
     // bluechip=25B, pool=350B, commit=500B, total=1.2T).
@@ -65,10 +63,9 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
                 denom: "ublue".to_string(),
             },
             TokenType::CreatorToken {
-                contract_addr: token_addr.clone(),
+                denom: "factory/creator_pool/ucreator".to_string(),
             },
         ],
-        cw20_token_contract_id: 123,
         used_factory_addr: Addr::unchecked("factory_addr"),
         threshold_payout: Some(threshold_payout),
         commit_fee_info: CommitFeeInfo {
@@ -79,7 +76,7 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
         },
         commit_threshold_limit_usd: Uint128::new(1000),
         position_nft_address: Addr::unchecked("nft_addr"),
-        token_address: token_addr,
+        subdenom: "ucreator".to_string(),
         max_bluechip_lock_per_pool: Uint128::new(10000),
         creator_excess_liquidity_lock_days: 7,
     }
@@ -466,19 +463,23 @@ fn instantiate_rejects_empty_bluechip_denom() {
 
 #[test]
 fn instantiate_rejects_creator_token_addr_mismatch() {
-    // CreatorToken.contract_addr inside pool_token_info must equal the
-    // separate `token_address` field on the msg. Mismatch is rejected so
-    // a buggy factory can't smuggle a different cw20 into the pool's
-    // accounting.
+    // TODO(phase1-migration): the original assertion checked that
+    // `CreatorToken.contract_addr` equalled the separate `token_address`
+    // field — a CW20-era guard that no longer exists. The pool now
+    // recomputes `factory/{pool_addr}/{subdenom}` and ignores the
+    // placeholder denom, so there is no addr-mismatch path to reject.
+    // Repurposed to the nearest surviving instantiate guard: an empty
+    // `subdenom` is rejected so a buggy factory can't create a pool with a
+    // malformed creator denom.
     let mut msg = mock_instantiate_msg();
-    msg.token_address = Addr::unchecked("a_completely_different_addr");
+    msg.subdenom = "   ".to_string();
     let mut deps = mock_dependencies();
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     let s = format!("{:?}", err);
     assert!(
-        s.contains("must equal msg.token_address"),
-        "expected token_address-mismatch rejection, got: {:?}",
+        s.contains("subdenom must be non-empty"),
+        "expected empty-subdenom rejection, got: {:?}",
         err
     );
 }

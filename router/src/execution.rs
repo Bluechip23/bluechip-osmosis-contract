@@ -39,15 +39,14 @@ use cosmwasm_std::{
     MessageInfo, Reply, ReplyOn, Response, StdError, SubMsg, SubMsgResult, Timestamp, Uint128,
     WasmMsg,
 };
-use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use pool_factory_interfaces::asset::{TokenInfo, TokenType};
 use pool_factory_interfaces::routing::{
-    FactoryRouteQueryMsg, PoolSwapCw20HookMsg, PoolSwapExecuteMsg, SwapOperation,
+    FactoryRouteQueryMsg, PoolSwapExecuteMsg, SwapOperation,
 };
 use pool_factory_interfaces::RegisteredPoolResponse;
 
 use crate::error::RouterError;
-use crate::msg::{Cw20HookMsg, ExecuteMsg};
+use crate::msg::ExecuteMsg;
 use crate::state::{CONFIG, MAX_HOPS};
 
 /// Reply IDs are offset by this base so that future router features can
@@ -63,10 +62,12 @@ struct HopReplyPayload {
     pool_addr: String,
 }
 
-/// Public entry: native bluechip offer for the first hop.
-///
-/// The caller must attach exactly one coin matching the first hop's
-/// declared offer denom; that coin's amount is used as the route input.
+/// Public entry: native offer for the first hop. The creator token is a
+/// TokenFactory bank denom now, so BOTH sides (bluechip and creator) are
+/// offered the same way — the caller attaches exactly one coin matching
+/// the first hop's declared offer denom, and that coin's amount is the
+/// route input. (Pre-migration a creator-token first hop had to arrive
+/// via a CW20 `Send` through a now-removed `execute_receive_cw20` entry.)
 pub fn execute_multi_hop(
     deps: DepsMut,
     env: Env,
@@ -77,12 +78,11 @@ pub fn execute_multi_hop(
     recipient: Option<String>,
 ) -> Result<Response, RouterError> {
     let first_op = operations.first().ok_or(RouterError::EmptyRoute)?;
+    // Both variants are native bank denoms — attached as funds and
+    // extracted identically.
     let offer_amount = match &first_op.offer_asset_info {
-        TokenType::Native { denom } => extract_native_offer(&info, denom)?,
-        TokenType::CreatorToken { .. } => {
-            return Err(RouterError::Std(StdError::generic_err(
-                "ExecuteMultiHop is for native offers; use cw20::Send for CW20-offered routes",
-            )));
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => {
+            extract_native_offer(&info, denom)?
         }
     };
 
@@ -96,53 +96,6 @@ pub fn execute_multi_hop(
         deadline,
         recipient,
     )
-}
-
-/// Public entry: CW20 offer for the first hop, dispatched via
-/// `cw20::Send`. The CW20 contract has already transferred the offer
-/// amount to the router by the time this handler runs.
-pub fn execute_receive_cw20(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    cw20_msg: Cw20ReceiveMsg,
-) -> Result<Response, RouterError> {
-    let hook: Cw20HookMsg = from_json(&cw20_msg.msg)?;
-    match hook {
-        Cw20HookMsg::ExecuteMultiHop {
-            operations,
-            minimum_receive,
-            deadline,
-            recipient,
-        } => {
-            let first_op = operations.first().ok_or(RouterError::EmptyRoute)?;
-            // Post-migration both pool sides are native bank denoms (the
-            // bluechip side AND the creator TokenFactory denom), so no
-            // first-hop offer arrives via a CW20 `Send` envelope anymore —
-            // native offers must use `ExecuteMultiHop` with attached funds.
-            // This CW20-receive entry is therefore a dead path; reject it.
-            match &first_op.offer_asset_info {
-                TokenType::CreatorToken { .. } | TokenType::Native { .. } => {
-                    return Err(RouterError::Std(StdError::generic_err(
-                        "creator tokens are native TokenFactory denoms now; route offers via \
-                         ExecuteMultiHop with attached funds, not cw20::Send",
-                    )));
-                }
-            }
-            #[allow(unreachable_code)]
-            let user = deps.api.addr_validate(&cw20_msg.sender)?;
-            start_multi_hop(
-                deps,
-                env,
-                user,
-                cw20_msg.amount,
-                operations,
-                minimum_receive,
-                deadline,
-                recipient,
-            )
-        }
-    }
 }
 
 /// Shared route setup. Validates the route, captures the recipient's
