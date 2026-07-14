@@ -90,10 +90,21 @@ address-permission route:
 > privileged mint of OSMO — pools only hold OSMO + project-minted
 > CW20s, and every admin mutation is behind a 48h timelock.
 
-For the per-contract route instead: `osmosisd tx gov submit-proposal
-wasm-store artifacts/factory.wasm --title ... --deposit 1600000000uosmo ...`
-(one per wasm, or a combined proposal via the newer submit-proposal JSON
-format).
+For the per-contract route instead, generate the combined gov v1
+proposal (one vote stores all three wasms, gzip-compressed, hashes and
+commit stamped into the summary):
+
+```bash
+scripts/make_storecode_proposal.sh          # writes gov/storecode_proposal.json
+osmosisd tx gov submit-proposal gov/storecode_proposal.json \
+  --from deployer --chain-id osmosis-1 --node <mainnet-rpc> \
+  --gas auto --gas-adjustment 1.4 --gas-prices 0.025uosmo
+```
+
+The osmosis-1 v1 min deposit is 6,000 OSMO as of 2026-07 — re-check
+with `osmosisd query gov params` before submitting; the script takes an
+optional deposit override argument. Replace the `<FORUM-LINK-HERE>` /
+`<REPO-URL-HERE>` placeholders in the generated JSON first.
 
 ### 4. Mainnet instantiate
 
