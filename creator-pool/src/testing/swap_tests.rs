@@ -1628,51 +1628,37 @@ fn test_swap_cw20_with_custom_recipient() {
 
 #[test]
 fn test_cw20_swap_with_belief_price() {
+    // Native sell whose large size violates the belief-price spread bound.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
-
-    // Mock CW20 balance
-    deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { contract_addr, msg } => {
-            if contract_addr == "token_contract" {
-                let balance_response = cw20::BalanceResponse {
-                    balance: Uint128::new(450_000_000_000),
-                };
-                return SystemResult::Ok(ContractResult::Ok(
-                    to_json_binary(&balance_response).unwrap(),
-                ));
-            }
-            SystemResult::Err(SystemError::InvalidRequest {
-                error: "Unknown query".to_string(),
-                request: msg.clone(),
-            })
-        }
-        _ => SystemResult::Err(SystemError::InvalidRequest {
-            error: "Unknown query type".to_string(),
-            request: Binary::default(),
-        }),
-    });
 
     let env = mock_env();
     let swap_amount = Uint128::new(100_000_000_000); // Large amount for slippage
 
     let belief_price = Some(Decimal::from_ratio(5u128, 100u128));
 
-    let info = message_info(&Addr::unchecked("token_contract"), &[]);
-    let cw20_msg = Cw20ReceiveMsg {
-        sender: MockApi::default().addr_make("trader").to_string(),
-        amount: swap_amount,
-        msg: to_json_binary(&Cw20HookMsg::Swap {
-            belief_price,
-            max_spread: Some(Decimal::percent(10)),
-            allow_high_max_spread: Some(true),
-            to: None,
-            transaction_deadline: None,
-        })
-        .unwrap(),
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: CREATOR_DENOM.to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::CreatorToken {
+                denom: CREATOR_DENOM.to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price,
+        max_spread: Some(Decimal::percent(10)),
+        allow_high_max_spread: Some(true),
+        to: None,
+        transaction_deadline: None,
     };
 
-    let err = execute_swap_cw20(deps.as_mut(), env, info, cw20_msg).unwrap_err();
+    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
     match err {
         ContractError::MaxSpreadAssertion {} => (),
         _ => panic!(
