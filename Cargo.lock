@@ -943,6 +943,7 @@ dependencies = [
  "cw20",
  "cw20-base",
  "easy-addr",
+ "osmosis-std",
  "pool-factory-interfaces",
  "thiserror 2.0.12",
 ]

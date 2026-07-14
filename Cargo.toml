@@ -33,6 +33,11 @@ integer-sqrt = "0.1"
 proptest = "1.0"
 cw20 = "2.0.0"
 cw20-base = { version = "2.0.0", features = ["library"] }
+# Osmosis-native message bindings: TokenFactory (creator token),
+# GAMM balancer pool creation (the AMM venue), and poolmanager swaps
+# (post-threshold commit routing). 0.27 is the newest release that
+# compiles on the workspace's Rust 1.75 toolchain against cosmwasm-std 2.x.
+osmosis-std = "0.27.0"
 easy-addr = { path = "packages/easy-addr" }
 
 [workspace.metadata.scripts]

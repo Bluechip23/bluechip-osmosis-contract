@@ -40,6 +40,9 @@ pub mod generic;
 pub mod liquidity;
 pub mod liquidity_helpers;
 pub mod msg;
+/// Osmosis-native message builders (TokenFactory / GAMM / poolmanager)
+/// backing the migration off the internal CW20 AMM.
+pub mod osmosis_msgs;
 pub mod query;
 pub mod state;
 pub mod swap;
