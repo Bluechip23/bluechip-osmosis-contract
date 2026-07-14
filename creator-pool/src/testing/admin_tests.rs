@@ -391,15 +391,21 @@ fn test_unauthorized_admin_actions() {
 
 #[test]
 fn instantiate_rejects_doubling_assets() {
-    // Both legs identical → DoublingAssets.
+    // Both legs set to the bluechip Native side. Post-migration the pool
+    // OVERWRITES index 1 with the CreatorToken denom it derives from
+    // `subdenom`, so the old `DoublingAssets` (index0 == index1) path is
+    // now structurally unreachable — a Native at index 1 is instead
+    // rejected earlier by the pair-shape guard. Either way the malformed
+    // pair is refused.
     let mut msg = mock_instantiate_msg();
     msg.pool_token_info[1] = msg.pool_token_info[0].clone();
     let mut deps = mock_dependencies();
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+    let s = format!("{:?}", err);
     assert!(
-        format!("{:?}", err).contains("DoublingAssets"),
-        "expected DoublingAssets, got: {:?}",
+        s.contains("CreatorToken placeholder") || s.contains("DoublingAssets"),
+        "expected malformed-pair rejection, got: {:?}",
         err
     );
 }
@@ -452,10 +458,12 @@ fn instantiate_rejects_empty_bluechip_denom() {
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     let s = format!("{:?}", err);
-    // The empty-denom guard lives in the shared `TokenType::check` and
-    // emits the kind-agnostic "Native denom must be non-empty" message.
+    // The bluechip index-0 empty-denom guard now fires in `instantiate`
+    // before the shared `TokenType::check`, emitting the bluechip-specific
+    // "Bluechip denom must be non-empty" message.
     assert!(
-        s.contains("Native denom must be non-empty"),
+        s.contains("Bluechip denom must be non-empty")
+            || s.contains("Native denom must be non-empty"),
         "expected empty-denom rejection, got: {:?}",
         err
     );

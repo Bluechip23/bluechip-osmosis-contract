@@ -2248,15 +2248,17 @@ fn test_add_liquidity_unpauses_pool() {
     POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
     POOL_PAUSED_AUTO.save(&mut deps.storage, &true).unwrap();
 
-    // Native side only — token1 is a CW20 and flows via TransferFrom,
-    // not native attached funds. The reject-extras gate rejects any
-    // attached coin whose denom isn't one of the pool's native sides.
+    // Both pool sides are native bank denoms now, so the depositor
+    // attaches BOTH the bluechip and the creator TokenFactory denom.
     let result = execute_deposit_liquidity(
         deps.as_mut(),
         mock_env(),
         message_info(
             &Addr::unchecked("provider"),
-            &[Coin::new(50_000u128, "ubluechip")],
+            &[
+                Coin::new(50_000u128, "ubluechip"),
+                Coin::new(50_000u128, CREATOR_DENOM),
+            ],
         ),
         Addr::unchecked("provider"),
         Uint128::new(50_000),
@@ -2292,14 +2294,16 @@ fn test_add_liquidity_doesnt_unpause_if_still_below_threshold() {
     setup_pool_with_reserves(&mut deps, Uint128::new(100), Uint128::new(100));
     POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
 
-    // Native side only — the reject-extras gate rejects any attached
-    // coin whose denom isn't one of the pool's native sides; token1 is CW20.
+    // Both pool sides are native bank denoms now — attach both.
     let result = execute_deposit_liquidity(
         deps.as_mut(),
         mock_env(),
         message_info(
             &Addr::unchecked("provider"),
-            &[Coin::new(500u128, "ubluechip")],
+            &[
+                Coin::new(500u128, "ubluechip"),
+                Coin::new(500u128, CREATOR_DENOM),
+            ],
         ),
         Addr::unchecked("provider"),
         Uint128::new(500),

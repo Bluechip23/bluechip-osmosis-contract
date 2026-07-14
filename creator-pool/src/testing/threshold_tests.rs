@@ -232,7 +232,9 @@ fn test_claim_excess_after_unlock_succeeds() {
     };
 
     let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
-    // Should have 2 messages: bank send for bluechip + CW20 transfer for creator tokens
+    // Should have 2 messages: bank send for bluechip + bank send for the
+    // creator TokenFactory denom (pre-migration the creator leg was a CW20
+    // Transfer).
     assert_eq!(res.messages.len(), 2);
     match &res.messages[0].msg {
         CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
@@ -242,17 +244,15 @@ fn test_claim_excess_after_unlock_succeeds() {
         _ => panic!("Expected Bank Send message for bluechip"),
     }
     match &res.messages[1].msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) => {
-            let transfer_msg: cw20::Cw20ExecuteMsg = from_json(msg).unwrap();
-            match transfer_msg {
-                cw20::Cw20ExecuteMsg::Transfer { recipient, amount } => {
-                    assert_eq!(recipient, "creator");
-                    assert_eq!(amount, Uint128::new(175_000_000_000));
-                }
-                _ => panic!("Expected CW20 Transfer message"),
-            }
+        CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
+            assert_eq!(to_address, "creator");
+            assert_eq!(
+                amount[0].denom,
+                crate::testing::liquidity_tests::CREATOR_DENOM
+            );
+            assert_eq!(amount[0].amount, Uint128::new(175_000_000_000));
         }
-        _ => panic!("Expected Wasm Execute message for creator token"),
+        _ => panic!("Expected Bank Send message for creator token"),
     }
 
     // Excess position should be cleared

@@ -47,8 +47,9 @@ fn claim_creator_fees_empties_pot_and_emits_transfers() {
     )
     .unwrap();
 
-    // Response carries both transfer messages (BankMsg native +
-    // Cw20 Transfer).
+    // Both legs are now native BankMsg::Send — the bluechip pot slice and
+    // the creator TokenFactory denom pot slice (pre-migration the creator
+    // leg was a Cw20ExecuteMsg::Transfer).
     let bank_sent = res.messages.iter().any(|sub| match &sub.msg {
         CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
             to_address == "creator_wallet"
@@ -58,20 +59,20 @@ fn claim_creator_fees_empties_pot_and_emits_transfers() {
         }
         _ => false,
     });
-    let cw20_sent = res.messages.iter().any(|sub| match &sub.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr, msg, ..
-        }) => {
-            contract_addr == "token_contract"
-                && String::from_utf8_lossy(msg.as_slice()).contains("transfer")
-                && String::from_utf8_lossy(msg.as_slice()).contains("20000")
+    let creator_sent = res.messages.iter().any(|sub| match &sub.msg {
+        CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
+            to_address == "creator_wallet"
+                && amount.iter().any(|c| {
+                    c.denom == crate::testing::liquidity_tests::CREATOR_DENOM
+                        && c.amount == Uint128::new(20_000)
+                })
         }
         _ => false,
     });
     assert!(bank_sent, "should emit BankMsg for native pot slice");
     assert!(
-        cw20_sent,
-        "should emit CW20 Transfer for creator-token pot slice"
+        creator_sent,
+        "should emit BankMsg::Send for creator-token pot slice"
     );
 
     // Pot reset to zero (after messages are built).

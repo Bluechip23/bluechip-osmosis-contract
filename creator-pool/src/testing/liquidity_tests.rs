@@ -51,12 +51,21 @@ fn test_deposit_liquidity_first_position() {
     let bluechip_amount = Uint128::new(1_000_000_000); // 1k bluechip
     let token_amount = Uint128::new(14_893_617_021); // Approximately correct ratio
 
+    // Both pool sides are native bank denoms now, so the depositor attaches
+    // the creator TokenFactory denom alongside bluechip (was a CW20
+    // TransferFrom pre-migration).
     let info = message_info(
         &user,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: bluechip_amount,
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: bluechip_amount,
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: token_amount,
+            },
+        ],
     );
 
     let res = execute_deposit_liquidity(
@@ -194,10 +203,16 @@ fn first_deposit_rejects_subfloor_reserve_side() {
     let good_amount = Uint128::new(2_000_000);
     let info = message_info(
         &seeder,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: good_amount,
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: good_amount,
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: good_amount,
+            },
+        ],
     );
     execute_deposit_liquidity(
         deps.as_mut(),
@@ -262,10 +277,16 @@ fn test_add_to_existing_position() {
 
     let info = message_info(
         &user,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: bluechip_amount,
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: bluechip_amount,
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: token_amount,
+            },
+        ],
     );
 
     let res = execute_add_to_position(
@@ -333,10 +354,16 @@ fn test_add_to_position_not_owner() {
     let user = Addr::unchecked("liquidity_provider");
     let info = message_info(
         &user,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(1_000_000),
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: Uint128::new(1_000_000),
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: Uint128::new(15_000_000),
+            },
+        ],
     );
 
     let err = execute_add_to_position(
@@ -505,10 +532,16 @@ fn test_deposit_liquidity_imbalanced_amounts() {
 
     let info = message_info(
         &user,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: bluechip_amount,
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: bluechip_amount,
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: token_amount,
+            },
+        ],
     );
 
     let res = execute_deposit_liquidity(
@@ -1395,10 +1428,16 @@ fn test_add_to_position_collects_fees_first() {
     let user = Addr::unchecked("liquidity_provider");
     let info = message_info(
         &user,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(500_000_000),
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: Uint128::new(500_000_000),
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: Uint128::new(7_500_000_000),
+            },
+        ],
     );
 
     // Add more liquidity
@@ -1591,10 +1630,16 @@ fn test_refund_calculation_accuracy() {
 
     let info = message_info(
         &user,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: sent_bluechip,
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: sent_bluechip,
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: sent_token,
+            },
+        ],
     );
 
     let res = execute_deposit_liquidity(
@@ -2057,10 +2102,16 @@ fn test_fee_distribution_proportional() {
     // LP1 deposits 1_000_000 bluechip + proportional token (Optimal size -> 1.0 multiplier)
     let info1 = message_info(
         &Addr::unchecked("lp1"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(1_000_000),
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: Uint128::new(1_000_000),
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: Uint128::new(15_000_000),
+            },
+        ],
     );
     execute_deposit_liquidity(
         deps.as_mut(),
@@ -2078,10 +2129,16 @@ fn test_fee_distribution_proportional() {
     // LP2 deposits 2_000_000 bluechip + proportional token (2x LP1, also > Optimal -> 1.0 multiplier)
     let info2 = message_info(
         &Addr::unchecked("lp2"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(2_000_000),
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: Uint128::new(2_000_000),
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: Uint128::new(30_000_000),
+            },
+        ],
     );
     execute_deposit_liquidity(
         deps.as_mut(),
@@ -2189,10 +2246,16 @@ fn test_deposit_underpayment_overflow() {
 
     let info = message_info(
         &user,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: bluechip_amount,
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: bluechip_amount,
+            },
+            Coin {
+                denom: CREATOR_DENOM.to_string(),
+                amount: token_amount,
+            },
+        ],
     );
 
     let res = execute_deposit_liquidity(

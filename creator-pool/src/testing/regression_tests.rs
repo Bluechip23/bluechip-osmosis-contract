@@ -1,5 +1,4 @@
 use cosmwasm_std::{
-    from_json,
     testing::{message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage},
     Addr, Coin, CosmosMsg, Decimal, OwnedDeps, Timestamp, Uint128, WasmMsg,
 };
@@ -97,13 +96,14 @@ fn test_swap_reserve_deducts_return_and_commission() {
         .messages
         .iter()
         .filter_map(|m| {
-            if let CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute { msg, .. }) = &m.msg {
-                // CW20 transfer message
-                if let Ok(cw20::Cw20ExecuteMsg::Transfer { amount, .. }) =
-                    cosmwasm_std::from_json(msg)
-                {
-                    return Some(amount);
-                }
+            // The creator token is a native denom now, so the output leg is
+            // a BankMsg::Send of the creator TokenFactory denom (was a CW20
+            // Transfer pre-migration).
+            if let CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { amount, .. }) = &m.msg {
+                return amount
+                    .iter()
+                    .find(|c| c.denom != "ubluechip")
+                    .map(|c| c.amount);
             }
             None
         })
@@ -293,10 +293,16 @@ fn test_first_deposit_locks_minimum_liquidity() {
 
     let info = message_info(
         &user,
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: bluechip_amount,
-        }],
+        &[
+            Coin {
+                denom: "ubluechip".to_string(),
+                amount: bluechip_amount,
+            },
+            Coin {
+                denom: crate::testing::liquidity_tests::CREATOR_DENOM.to_string(),
+                amount: token_amount,
+            },
+        ],
     );
 
     let _res = execute_deposit_liquidity(
@@ -1120,13 +1126,17 @@ fn test_deposit_accepts_clean_native_funds() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
-    // ubluechip alone — the only native side of this Native/CW20 pool.
+    // Both pool sides are native bank denoms now — a clean deposit
+    // attaches ubluechip AND the creator TokenFactory denom, nothing else.
     let result = execute_deposit_liquidity(
         deps.as_mut(),
         mock_env(),
         message_info(
             &Addr::unchecked("provider"),
-            &[Coin::new(50_000u128, "ubluechip")],
+            &[
+                Coin::new(50_000u128, "ubluechip"),
+                Coin::new(50_000u128, crate::testing::liquidity_tests::CREATOR_DENOM),
+            ],
         ),
         Addr::unchecked("provider"),
         Uint128::new(50_000),
@@ -1138,7 +1148,7 @@ fn test_deposit_accepts_clean_native_funds() {
 
     assert!(
         result.is_ok(),
-        "clean ubluechip-only deposit must succeed; got: {:?}",
+        "clean native deposit must succeed; got: {:?}",
         result.err()
     );
 }
@@ -2046,19 +2056,21 @@ mod distribution_liveness_tests {
         assert_eq!(pending.user, user);
         assert_eq!(pending.amount, owed);
 
-        // The mint message itself targets the alternate recipient.
-        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &sub.msg {
-            let parsed: cw20::Cw20ExecuteMsg = from_json(msg).unwrap();
-            match parsed {
-                cw20::Cw20ExecuteMsg::Mint { recipient, amount } => {
-                    assert_eq!(recipient, alternate.to_string());
-                    assert_eq!(amount, owed);
-                }
-                other => panic!("expected Mint, got: {:?}", other),
-            }
-        } else {
-            panic!("expected Wasm Execute SubMsg, got: {:?}", sub.msg);
-        }
+        // The mint is now a TokenFactory MsgMint (CosmosMsg::Any) minted
+        // by the pool (denom admin) to the alternate recipient — was a
+        // Cw20ExecuteMsg::Mint pre-migration. Compare against the exact
+        // builder output.
+        let expected = pool_core::osmosis_msgs::mint_msg(
+            &Addr::unchecked("pool_contract"),
+            crate::testing::liquidity_tests::CREATOR_DENOM,
+            owed,
+            &alternate,
+        );
+        assert_eq!(
+            sub.msg, expected,
+            "expected a TokenFactory MsgMint to the alternate recipient, got: {:?}",
+            sub.msg
+        );
     }
 
     /// Re-failure recursion: the alternate recipient is ALSO blocked.
@@ -2135,19 +2147,20 @@ mod distribution_liveness_tests {
         )
         .unwrap();
         let sub = &res.messages[0];
-        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &sub.msg {
-            if let cw20::Cw20ExecuteMsg::Mint { recipient, .. } = from_json(msg).unwrap() {
-                assert_eq!(
-                    recipient,
-                    user.to_string(),
-                    "default recipient must be info.sender"
-                );
-            } else {
-                panic!("not a Mint");
-            }
-        } else {
-            panic!("not a Wasm Execute");
-        }
+        // Default recipient (recipient: None) mints to the caller. The mint
+        // is a TokenFactory MsgMint now; compare against the exact builder
+        // output for the caller as recipient.
+        let expected = pool_core::osmosis_msgs::mint_msg(
+            &Addr::unchecked("pool_contract"),
+            crate::testing::liquidity_tests::CREATOR_DENOM,
+            Uint128::new(1),
+            &user,
+        );
+        assert_eq!(
+            sub.msg, expected,
+            "default recipient must be info.sender, got: {:?}",
+            sub.msg
+        );
     }
 
     /// Drained pool: every liveness primitive must reject so the
@@ -2221,7 +2234,7 @@ mod deposit_verify_tests {
     use crate::contract::reply;
     use crate::testing::liquidity_tests::setup_pool_post_threshold;
     use cosmwasm_std::{
-        to_json_binary, Binary, Coin, ContractResult, Reply, ReplyOn, SubMsgResponse, SubMsgResult,
+        to_json_binary, Binary, Coin, ContractResult, Reply, SubMsgResponse, SubMsgResult,
         SystemResult, WasmQuery,
     };
     use cw20::BalanceResponse as Cw20BalanceResponse;
@@ -2273,17 +2286,21 @@ mod deposit_verify_tests {
         });
     }
 
-    /// `ExecuteMsg::DepositLiquidity` (creator-pool dispatch path)
-    /// must emit a final SubMsg tagged `reply_on_success` carrying
-    /// `DEPOSIT_VERIFY_REPLY_ID`. This is the dispatch-anchor — without
-    /// it the reply handler never fires and the verify invariant is
-    /// vacuous.
+    /// TODO(phase1-migration): the CW20 balance-verify reply anchor is
+    /// DORMANT for the migrated pool. Both pool sides are native bank
+    /// denoms now, so `snapshot_pool_cw20_balances` returns `(None, None)`
+    /// and `finalize_deposit_response` takes the all-native fast path —
+    /// no `DEPOSIT_VERIFY_REPLY_ID` SubMsg is wired and no
+    /// `DEPOSIT_VERIFY_CTX` is saved (the machinery is retained dormant
+    /// for a future third-party-CW20 phase; see
+    /// `reply_dispatcher_routes_deposit_verify_id_to_handler`, which still
+    /// exercises the handler directly). Repurposed to lock in the current
+    /// native/native behavior: the deposit succeeds and emits NO verify
+    /// anchor.
     #[test]
     fn deposit_liquidity_through_dispatcher_emits_verify_reply_anchor() {
         let mut deps = mock_dependencies();
         setup_pool_post_threshold(&mut deps);
-        // Pre-balance is read by `prepare_deposit` — install ANY value;
-        // the test only asserts the SubMsg shape, not the reply outcome.
         install_balance_querier(&mut deps, Uint128::zero(), "liquidity_provider");
 
         let user = Addr::unchecked("liquidity_provider");
@@ -2291,10 +2308,16 @@ mod deposit_verify_tests {
         let token_amount = Uint128::new(14_893_617_021);
         let info = message_info(
             &user,
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: bluechip_amount,
-            }],
+            &[
+                Coin {
+                    denom: "ubluechip".to_string(),
+                    amount: bluechip_amount,
+                },
+                Coin {
+                    denom: crate::testing::liquidity_tests::CREATOR_DENOM.to_string(),
+                    amount: token_amount,
+                },
+            ],
         );
 
         let res = execute(
@@ -2311,56 +2334,24 @@ mod deposit_verify_tests {
         )
         .expect("dispatch must succeed");
 
-        // The LAST outgoing SubMsg must carry the verify reply id and
-        // be wired as `reply_on_success`. Production code uses the
-        // last-message anchor so the reply runs strictly after every
-        // bank/cw20 transfer the deposit emitted.
-        let last = res
-            .messages
-            .last()
-            .expect("response must contain at least one SubMsg");
-        assert_eq!(
-            last.id, DEPOSIT_VERIFY_REPLY_ID,
-            "last SubMsg must carry DEPOSIT_VERIFY_REPLY_ID — got id {} \
-             (creator-pool dispatcher must route DepositLiquidity through \
-             execute_deposit_liquidity_with_verify, not the unverified variant)",
-            last.id
-        );
+        // No message carries the verify reply id on the native/native path.
         assert!(
-            matches!(last.reply_on, ReplyOn::Success),
-            "DEPOSIT_VERIFY_REPLY_ID must be wired reply_on_success — got {:?}; \
-             reply_always or reply_on_error would let a deposit subroutine \
-             error short-circuit the verification entirely.",
-            last.reply_on
+            res.messages.iter().all(|m| m.id != DEPOSIT_VERIFY_REPLY_ID),
+            "native/native deposit must NOT wire the (dormant) verify anchor"
         );
-
-        // DEPOSIT_VERIFY_CTX is the transient handoff to the reply
-        // handler; it carries the pre-balance snapshot and credited
-        // delta. Must be present after a verify-path deposit.
-        let ctx = DEPOSIT_VERIFY_CTX
-            .may_load(&deps.storage)
-            .unwrap()
-            .expect("DEPOSIT_VERIFY_CTX must be saved by the verify-path deposit");
+        // And no transient verify context is saved.
         assert!(
-            ctx.cw20_side1_addr.is_some(),
-            "creator-pool's pair has the CW20 on side 1; verify ctx must record it"
-        );
-        // The credited delta on side 1 should equal the user-supplied
-        // CW20 amount (subject to the deposit prep math; for a first
-        // deposit shape the credit is the user-supplied amount minus
-        // any internal adjustment — we assert non-zero rather than an
-        // exact value because the deposit math is exercised separately
-        // in liquidity_tests).
-        assert!(
-            !ctx.expected_delta1.is_zero(),
-            "expected non-zero credited delta on the CW20 side"
+            DEPOSIT_VERIFY_CTX.may_load(&deps.storage).unwrap().is_none(),
+            "native/native deposit must not save DEPOSIT_VERIFY_CTX"
         );
     }
 
-    /// `ExecuteMsg::AddToPosition` must also route through the verify
-    /// path. Without this assertion, a future change that flips just
-    /// one of the two dispatcher arms to the unverified variant
-    /// would silently break the balance-verify invariant on add-to-position.
+    /// TODO(phase1-migration): as with the deposit anchor test above, the
+    /// AddToPosition verify anchor is DORMANT — both pool sides are native
+    /// bank denoms, so no `DEPOSIT_VERIFY_REPLY_ID` SubMsg is wired and no
+    /// `DEPOSIT_VERIFY_CTX` is saved. Repurposed to lock in the current
+    /// native/native behavior: AddToPosition succeeds and emits NO verify
+    /// anchor.
     #[test]
     fn add_to_position_through_dispatcher_emits_verify_reply_anchor() {
         let mut deps = mock_dependencies();
@@ -2368,19 +2359,20 @@ mod deposit_verify_tests {
         install_balance_querier(&mut deps, Uint128::zero(), "liquidity_provider");
 
         let user = Addr::unchecked("liquidity_provider");
-        // First seed a position. We go through the dispatcher so the
-        // verify path produces a position id "2" (id 1 belongs to the
-        // initial setup). The setup_pool_post_threshold helper does
-        // not pre-create LIQUIDITY_POSITIONS; the deposit handler
-        // mints id 2 because NEXT_POSITION_ID starts at 1 and is
-        // bumped post-deposit.
+        // First seed a position (id "2") through the dispatcher.
         let mut env = mock_env();
         let info = message_info(
             &user,
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: Uint128::new(1_000_000_000),
-            }],
+            &[
+                Coin {
+                    denom: "ubluechip".to_string(),
+                    amount: Uint128::new(1_000_000_000),
+                },
+                Coin {
+                    denom: crate::testing::liquidity_tests::CREATOR_DENOM.to_string(),
+                    amount: Uint128::new(14_893_617_021),
+                },
+            ],
         );
         execute(
             deps.as_mut(),
@@ -2396,24 +2388,23 @@ mod deposit_verify_tests {
         )
         .expect("first deposit must succeed");
 
-        // DEPOSIT_VERIFY_CTX is one-shot — the next deposit-class call
-        // saves a fresh one. Remove the prior context so the next save
-        // doesn't see a stale snapshot. (Production: the reply handler
-        // removes it before the next handler call ever fires.)
-        DEPOSIT_VERIFY_CTX.remove(&mut deps.storage);
-
         // Advance past `min_commit_interval` (60s in setup_pool_storage)
         // so the second deposit-class call from the same user isn't
-        // rate-limited as a "too frequent commit" — that gate is
-        // orthogonal to the verify-path assertion this test exists for.
+        // rate-limited as a "too frequent commit".
         env.block.time = env.block.time.plus_seconds(120);
 
         let info = message_info(
             &user,
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: Uint128::new(500_000_000),
-            }],
+            &[
+                Coin {
+                    denom: "ubluechip".to_string(),
+                    amount: Uint128::new(500_000_000),
+                },
+                Coin {
+                    denom: crate::testing::liquidity_tests::CREATOR_DENOM.to_string(),
+                    amount: Uint128::new(7_446_808_510),
+                },
+            ],
         );
         let res = execute(
             deps.as_mut(),
@@ -2430,20 +2421,14 @@ mod deposit_verify_tests {
         )
         .expect("AddToPosition dispatch must succeed");
 
-        let last = res.messages.last().expect("response must carry SubMsgs");
-        assert_eq!(
-            last.id, DEPOSIT_VERIFY_REPLY_ID,
-            "AddToPosition must also route through the verify path; got id {}",
-            last.id
+        assert!(
+            res.messages.iter().all(|m| m.id != DEPOSIT_VERIFY_REPLY_ID),
+            "native/native AddToPosition must NOT wire the (dormant) verify anchor"
         );
-        assert!(matches!(last.reply_on, ReplyOn::Success));
-
-        let ctx = DEPOSIT_VERIFY_CTX
-            .may_load(&deps.storage)
-            .unwrap()
-            .expect("AddToPosition with verify must save DEPOSIT_VERIFY_CTX");
-        assert!(ctx.cw20_side1_addr.is_some());
-        assert!(!ctx.expected_delta1.is_zero());
+        assert!(
+            DEPOSIT_VERIFY_CTX.may_load(&deps.storage).unwrap().is_none(),
+            "native/native AddToPosition must not save DEPOSIT_VERIFY_CTX"
+        );
     }
 
     /// Reply id `DEPOSIT_VERIFY_REPLY_ID` must route to
@@ -2863,10 +2848,16 @@ mod empty_position_persistence_tests {
         env.block.time = env.block.time.plus_seconds(120);
         let info = message_info(
             &user,
-            &[cosmwasm_std::Coin {
-                denom: "ubluechip".to_string(),
-                amount: Uint128::new(1_000_000_000),
-            }],
+            &[
+                cosmwasm_std::Coin {
+                    denom: "ubluechip".to_string(),
+                    amount: Uint128::new(1_000_000_000),
+                },
+                cosmwasm_std::Coin {
+                    denom: crate::testing::liquidity_tests::CREATOR_DENOM.to_string(),
+                    amount: Uint128::new(14_893_617_021),
+                },
+            ],
         );
         let res = execute(
             deps.as_mut(),
@@ -2886,8 +2877,12 @@ mod empty_position_persistence_tests {
         // Pool state advanced — total_liquidity grew, position now has
         // non-zero liquidity. The exact value depends on prep math; the
         // load-bearing assertion is "the rehydration is possible at all,"
-        // which it now is.
-        assert!(!res.messages.is_empty());
+        // which it now is. (Post-migration a clean native add-to-position
+        // with exact funds and no accrued fees emits no outgoing messages,
+        // so the old `!res.messages.is_empty()` check — which relied on the
+        // CW20 TransferFrom leg — no longer applies; the liquidity growth
+        // below is the real witness.)
+        let _ = &res;
         let pos = LIQUIDITY_POSITIONS.load(&deps.storage, "7").unwrap();
         assert!(
             !pos.liquidity.is_zero(),
