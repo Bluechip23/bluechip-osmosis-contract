@@ -16,9 +16,8 @@
 //! flow, so they stay here rather than in the shared library.
 
 pub use pool_core::admin::{
-    ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_emergency_share,
-    execute_emergency_withdraw_dispatch, execute_pause, execute_sweep_unclaimed_emergency_shares,
-    execute_unpause, execute_update_config_from_factory, CoreDrainResult,
+    ensure_not_drained, execute_cancel_emergency_withdraw, execute_emergency_withdraw_dispatch,
+    execute_pause, execute_unpause, execute_update_config_from_factory, CoreDrainResult,
 };
 
 use crate::error::ContractError;
@@ -93,28 +92,24 @@ pub fn execute_emergency_withdraw(
     // if anything inside the dispatcher errors, so half-drained state
     // is structurally unreachable.
     let mut deps = deps;
-    let (acc_0, acc_1) = if pending_armed {
-        let excess = CREATOR_EXCESS_POSITION.may_load(deps.storage)?;
-        let amounts = excess
-            .as_ref()
-            .map(|e| (e.bluechip_amount, e.token_amount))
-            .unwrap_or((Uint128::zero(), Uint128::zero()));
-        if excess.is_some() {
+    if pending_armed {
+        // Phase-2: the creator-excess entitlement is now a slice of the
+        // pool-held seed LP shares (released on its own timelock). The core
+        // drain sweeps ALL of the pool's `gamm/pool/{id}` LP shares to the
+        // bluechip wallet, which subsumes the creator's unclaimed slice, so
+        // there is no separate raw-token accumulation to fold in here. We
+        // still remove the entitlement record and halt distribution.
+        if CREATOR_EXCESS_POSITION.may_load(deps.storage)?.is_some() {
             CREATOR_EXCESS_POSITION.remove(deps.storage);
         }
-        // Halt any in-flight distribution so future
-        // ContinueDistribution calls reject cleanly.
         if let Ok(mut dist_state) = DISTRIBUTION_STATE.load(deps.storage) {
             dist_state.is_distributing = false;
             dist_state.distributions_remaining = 0;
             DISTRIBUTION_STATE.save(deps.storage, &dist_state)?;
         }
-        amounts
-    } else {
-        (Uint128::zero(), Uint128::zero())
-    };
+    }
 
-    execute_emergency_withdraw_dispatch(deps.branch(), env, info, acc_0, acc_1)
+    execute_emergency_withdraw_dispatch(deps.branch(), env, info, Uint128::zero(), Uint128::zero())
 }
 
 // ---------------------------------------------------------------------------

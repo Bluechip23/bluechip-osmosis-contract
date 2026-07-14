@@ -38,6 +38,11 @@ cw20-base = { version = "2.0.0", features = ["library"] }
 # (post-threshold commit routing). 0.27 is the newest release that
 # compiles on the workspace's Rust 1.75 toolchain against cosmwasm-std 2.x.
 osmosis-std = "0.27.0"
+# Protobuf decoding for osmosis-std reply responses
+# (MsgCreateBalancerPoolResponse / MsgSwapExactAmountInResponse). Pinned
+# to the same prost major osmosis-std 0.27 uses so the derived
+# `prost::Message` impls line up.
+prost = { version = "0.13", default-features = false, features = ["prost-derive"] }
 easy-addr = { path = "packages/easy-addr" }
 
 [workspace.metadata.scripts]

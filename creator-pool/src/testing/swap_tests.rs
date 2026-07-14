@@ -1,103 +1,86 @@
-use crate::asset::{PoolPairType, TokenInfo, TokenType};
-use crate::error::ContractError;
-use crate::generic_helpers::calculate_effective_batch_size;
-use crate::liquidity::execute_deposit_liquidity;
-use crate::msg::ExecuteMsg;
-use crate::state::{
-    CommitLimitInfo, PoolDetails, PoolFeeState, PoolInfo, PoolSpecs, PoolState,
-    ThresholdPayoutAmounts, COMMIT_INFO, COMMIT_LEDGER, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
-    DEFAULT_MAX_GAS_PER_TX, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, NEXT_POSITION_ID,
-    POOL_FEE_STATE, POOL_PAUSED, POOL_SPECS, POOL_STATE, REENTRANCY_LOCK, USD_RAISED_FROM_COMMIT,
-};
-use crate::swap_helper::execute_simple_swap;
-use crate::{
-    contract::{execute, instantiate},
-    generic_helpers::trigger_threshold_payout,
-    msg::{CommitFeeInfo, PoolInstantiateMsg},
-    state::{
-        DistributionState, COMMITFEEINFO, COMMIT_LIMIT_INFO, DISTRIBUTION_STATE, POOL_INFO,
-        THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
-    },
-    testing::liquidity_tests::{setup_pool_post_threshold, setup_pool_storage, CREATOR_DENOM},
-};
-use cosmwasm_std::{
-    testing::{
-        message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
-        MOCK_CONTRACT_ADDR,
-    },
-    to_json_binary, Addr, BankMsg, Binary, Coin, ContractResult, CosmosMsg, Decimal, Order,
-    OwnedDeps, SystemError, SystemResult, Timestamp, Uint128, WasmQuery,
-};
+//! Swap / commit / distribution unit tests.
+//!
+//! Phase-2: the internal constant-product AMM + LP-position system was
+//! replaced by a NATIVE Osmosis GAMM pool. A `SimpleSwap` (and a
+//! post-threshold `Commit`) no longer does reserve math and `BankMsg::Send`s
+//! the output inline; it emits ONE
+//! `SubMsg::reply_on_success(MsgSwapExactAmountIn, REPLY_ID_SWAP_FORWARD=4)`
+//! and the output `BankMsg::Send` happens later in `contract::reply(id=4)`.
+//! Tests that inspected reserves / fee-growth / price accumulators are gone.
 
-/// Installs a mock factory USD-valuation responder at the given rate
-/// (micro-USD per micro-native; 1_000_000 = $1 per token). Mirrors
-/// production where the factory computes the rate from the chain's
-/// x/twap over the configured native/USD-stable pool. Answers both
-/// `ConvertNativeToUsd` and the commit path's `CommitContext` (whose
-/// `bluechip_wallet` matches the `bluechip_treasury` snapshot pinned by
-/// `setup_pool_storage`, so fee-recipient assertions line up). All
-/// other cross-contract queries error.
-pub fn with_factory_oracle(
-    deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
-    native_to_usd_rate: Uint128,
-) {
-    deps.querier.update_wasm(move |query| match query {
-        WasmQuery::Smart { msg, .. } => {
-            #[cosmwasm_schema::cw_serde]
-            enum WrapperProbe {
-                PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
-            }
-            let usd_at_rate = |amount: Uint128| {
-                amount
-                    .checked_mul(native_to_usd_rate)
-                    .unwrap()
-                    .checked_div(Uint128::new(1_000_000))
-                    .unwrap()
-            };
-            match cosmwasm_std::from_json(msg) {
-                Ok(WrapperProbe::PoolFactoryQuery(
-                    pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
-                )) => {
-                    let resp = pool_factory_interfaces::ConversionResponse {
-                        amount: usd_at_rate(amount),
-                        rate_used: native_to_usd_rate,
-                        timestamp: 0,
-                    };
-                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
-                }
-                Ok(WrapperProbe::PoolFactoryQuery(
-                    pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
-                )) => {
-                    let resp = pool_factory_interfaces::CommitContextResponse {
-                        amount: usd_at_rate(amount),
-                        rate_used: native_to_usd_rate,
-                        timestamp: 0,
-                        bluechip_wallet: Addr::unchecked("bluechip_treasury"),
-                    };
-                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
-                }
-                _ => {}
-            }
-            SystemResult::Err(SystemError::InvalidRequest {
-                error: "no other cross-contract queries expected".to_string(),
-                request: msg.clone(),
-            })
-        }
-        _ => SystemResult::Err(SystemError::InvalidRequest {
-            error: "unsupported wasm query".to_string(),
-            request: Binary::default(),
+use crate::asset::{TokenInfo, TokenType};
+use crate::contract::{execute, instantiate};
+use crate::error::ContractError;
+use crate::generic_helpers::{calculate_effective_batch_size, trigger_threshold_payout};
+use crate::msg::{CommitFeeInfo, ExecuteMsg, PoolInstantiateMsg};
+use crate::state::{
+    DistributionState, SwapForwardPayload, COMMITFEEINFO, COMMIT_INFO, COMMIT_LEDGER,
+    COMMIT_LIMIT_INFO, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX,
+    DISTRIBUTION_STATE, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_INFO, REENTRANCY_LOCK,
+    REPLY_ID_SWAP_FORWARD, THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+};
+use crate::testing::fixtures::{
+    mock_dependencies_with_balance, setup_pool_post_threshold, setup_pool_storage,
+    with_factory_oracle, CREATOR_DENOM,
+};
+use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env, MockApi};
+use cosmwasm_std::{
+    from_json, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, DepsMut,
+    MsgResponse, Order, Reply, Response, SubMsgResponse, SubMsgResult, Timestamp, Uint128,
+};
+use osmosis_std::types::osmosis::poolmanager::v1beta1::MsgSwapExactAmountInResponse;
+use prost::Message;
+
+// ---------------------------------------------------------------------------
+// Reply helper: drive a `REPLY_ID_SWAP_FORWARD` (id 4) reply carrying the
+// given SubMsg `payload` and a mocked `token_out_amount`. Returns the
+// `Response` produced by `contract::reply`, whose `BankMsg::Send` forwards
+// the swapped-out tokens to the receiver recorded in the payload.
+// ---------------------------------------------------------------------------
+fn drive_swap_forward_reply(deps: DepsMut, payload: Binary, token_out_amount: u128) -> Response {
+    let out = MsgSwapExactAmountInResponse {
+        token_out_amount: token_out_amount.to_string(),
+    };
+    #[allow(deprecated)]
+    let reply_msg = Reply {
+        id: REPLY_ID_SWAP_FORWARD,
+        payload,
+        gas_used: 0,
+        result: SubMsgResult::Ok(SubMsgResponse {
+            events: vec![],
+            data: None,
+            msg_responses: vec![MsgResponse {
+                type_url: "/osmosis.poolmanager.v1beta1.MsgSwapExactAmountInResponse".to_string(),
+                value: Binary::from(out.encode_to_vec()),
+            }],
         }),
-    });
+    };
+    crate::contract::reply(deps, mock_env(), reply_msg).unwrap()
 }
 
-fn mock_dependencies_with_balance(
-    balances: &[Coin],
-) -> OwnedDeps<MockStorage, MockApi, MockQuerier> {
-    let mut deps = mock_dependencies();
-    deps.querier
-        .bank
-        .update_balance(MOCK_CONTRACT_ADDR, balances.to_vec());
-    deps
+/// Assert `res` carries exactly one SubMsg and that it is the native-pool
+/// swap-forward SubMsg (reply id 4). Returns its payload for reply-driving.
+fn expect_single_swap_forward(res: &Response) -> Binary {
+    assert_eq!(
+        res.messages.len(),
+        1,
+        "SimpleSwap should emit exactly one SubMsg (the native-pool swap), got {}",
+        res.messages.len()
+    );
+    assert_eq!(
+        res.messages[0].id, REPLY_ID_SWAP_FORWARD,
+        "the emitted SubMsg must be the swap-forward reply"
+    );
+    res.messages[0].payload.clone()
+}
+
+fn action_attr(res: &Response) -> String {
+    res.attributes
+        .iter()
+        .find(|a| a.key == "action")
+        .expect("response must carry an action attribute")
+        .value
+        .clone()
 }
 
 #[test]
@@ -152,6 +135,15 @@ fn test_commit_pre_threshold_basic() {
 
 #[test]
 fn test_race_condition_commits_crossing_threshold() {
+    // Phase-2: the same-block post-threshold cooldown / swap-cap ramp is
+    // gone. A follower commit landing in the SAME tx as the crossing now
+    // routes into `process_post_threshold_commit`, but the native GAMM pool
+    // id (`POOL_ID`) is only set by the `MsgCreateBalancerPool` reply, which
+    // has NOT executed yet in this unit test. So the follower's swap leg is
+    // rejected with `ShortOfThreshold` — the pool is not tradeable until the
+    // create-pool reply lands. This preserves the original invariant: a
+    // same-block follower cannot atomically trade against the freshly-crossed
+    // pool.
     let mut deps = mock_dependencies_with_balance(&[Coin {
         denom: "ubluechip".to_string(),
         amount: Uint128::new(20_000_000_000),
@@ -190,26 +182,13 @@ fn test_race_condition_commits_crossing_threshold() {
     };
 
     let res1 = execute(deps.as_mut(), env.clone(), info1, msg1).unwrap();
-    println!(
-        "[Commit 1] USD_RAISED_FROM_COMMIT: {}, IS_THRESHOLD_HIT: {}, THRESHOLD_PROCESSING: {}, Attributes: {:?}",
-        USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(),
-        IS_THRESHOLD_HIT.load(&deps.storage).unwrap(),
-        THRESHOLD_PROCESSING.load(&deps.storage).unwrap(),
-        res1.attributes
-    );
-
     assert!(res1
         .attributes
         .iter()
         .any(|a| a.value == "threshold_crossing"));
     assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
-    THRESHOLD_PROCESSING.save(&mut deps.storage, &true).unwrap();
-    println!(
-        "Simulated race -> USD_RAISED_FROM_COMMIT: {}, IS_THRESHOLD_HIT: {}, THRESHOLD_PROCESSING: {}",
-        USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(),
-        IS_THRESHOLD_HIT.load(&deps.storage).unwrap(),
-        THRESHOLD_PROCESSING.load(&deps.storage).unwrap()
-    );
+    assert!(!THRESHOLD_PROCESSING.load(&deps.storage).unwrap());
+
     let info2 = message_info(
         &Addr::unchecked("bob"),
         &[Coin {
@@ -228,33 +207,21 @@ fn test_race_condition_commits_crossing_threshold() {
         belief_price: None,
         max_spread: Some(Decimal::percent(10)),
     };
-    // A follower commit landing in the same block as the
-    // threshold-crossing tx is rejected outright with
-    // `PostThresholdCooldownActive`. This is the same-block-sandwich
-    // defense: Bob's commit must not atomically swap against Alice's
-    // freshly-seeded pool — if it fell through to
-    // `process_post_threshold_commit` it would silently succeed. Assert
-    // that Bob's tx errors with the cooldown and produces zero state
-    // side-effects.
+
     let err2 = execute(deps.as_mut(), env.clone(), info2, msg2).unwrap_err();
     match err2 {
-        ContractError::PostThresholdCooldownActive { until_block } => {
-            assert!(
-                until_block > env.block.height,
-                "cooldown until_block {} must be > current block {}",
-                until_block,
-                env.block.height
-            );
-        }
+        ContractError::ShortOfThreshold {} => {}
         other => panic!(
-            "Expected PostThresholdCooldownActive on same-block follower commit, got {:?}",
+            "Expected ShortOfThreshold on same-block follower commit (native pool id not yet set), got {:?}",
             other
         ),
     }
 
-    THRESHOLD_PROCESSING
-        .save(&mut deps.storage, &false)
-        .unwrap();
+    // Bob must not have re-crossed nor been recorded in the commit ledger.
+    assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
+    assert!(COMMIT_LEDGER
+        .load(&deps.storage, &Addr::unchecked("bob"))
+        .is_err());
 }
 
 #[test]
@@ -308,17 +275,16 @@ fn test_commit_crosses_threshold() {
         .iter()
         .any(|attr| attr.key == "phase" && attr.value == "threshold_crossing"));
 
+    // Phase-2: crossing emits mints + the MsgCreateBalancerPool SubMsg +
+    // the factory-notify SubMsg + the post-fee excess refund. No reserves
+    // are seeded locally, so the `pool_state.total_liquidity` assertion is
+    // gone; the message count still holds.
     assert!(
         res.messages.len() >= 6,
         "Expected at least 6 messages, got {}",
         res.messages.len()
     );
 
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert!(
-        !pool_state.total_liquidity.is_zero(),
-        "Seed liquidity should be non-zero after threshold crossing"
-    );
     assert!(
         DISTRIBUTION_STATE
             .may_load(&deps.storage)
@@ -362,15 +328,14 @@ fn test_commit_post_threshold_swap() {
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
+    // Fee messages (2) + the native-pool swap SubMsg. The swap output is
+    // forwarded to the committer in the REPLY_ID_SWAP_FORWARD reply, not
+    // inline, so there are no reserve/fee-growth mutations to assert.
     assert!(res.messages.len() >= 3);
-
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert!(pool_state.reserve0 > Uint128::new(23_500_000_000)); // Increased from commit
-    assert!(pool_state.reserve1 < Uint128::new(350_000_000_000)); // Decreased from swap
-
-    let fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
-    assert!(fee_state.fee_growth_global_1 > Decimal::zero());
-    assert!(fee_state.total_fees_collected_1 > Uint128::zero());
+    assert!(res
+        .messages
+        .iter()
+        .any(|m| m.id == REPLY_ID_SWAP_FORWARD));
 }
 
 #[test]
@@ -386,9 +351,14 @@ fn test_threshold_payout_integrity_check() {
         .save(&mut deps.storage, &bad_payout)
         .expect("failed to save payout");
 
+    // trigger_threshold_payout reads NATIVE_RAISED_FROM_COMMIT directly for
+    // the native-pool seed; seed a value so the (pre-corruption-check) load
+    // never trips.
+    NATIVE_RAISED_FROM_COMMIT
+        .save(&mut deps.storage, &Uint128::new(1_000_000))
+        .unwrap();
+
     let pool_info = POOL_INFO.load(&deps.storage).expect("pool_info");
-    let mut pool_state = POOL_STATE.load(&deps.storage).expect("pool_state");
-    let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).expect("pool_fee_state");
     let commit_config = COMMIT_LIMIT_INFO
         .load(&deps.storage)
         .expect("commit_config");
@@ -398,12 +368,11 @@ fn test_threshold_payout_integrity_check() {
     let result = trigger_threshold_payout(
         &mut deps.storage,
         &pool_info,
-        &mut pool_state,
-        &mut pool_fee_state,
         &commit_config,
         &bad_payout,
         &fee_info,
         &fee_info.bluechip_wallet_address,
+        Decimal::permille(3),
         &env,
     );
 
@@ -1005,25 +974,20 @@ fn test_simple_swap_bluechip_to_cw20() {
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
-    assert_eq!(
-        res.attributes
-            .iter()
-            .find(|a| a.key == "action")
-            .unwrap()
-            .value,
-        "swap"
-    );
-
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert!(pool_state.reserve0 > Uint128::new(23_500_000_000)); // Native increased
-    assert!(pool_state.reserve1 < Uint128::new(350_000_000_000)); // CW20 decreased
-
-    let fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
-    assert!(fee_state.fee_growth_global_1 > Decimal::zero());
+    // Phase-2: the swap emits ONE MsgSwapExactAmountIn SubMsg (reply id 4);
+    // the output BankMsg::Send to the trader happens in the reply. No local
+    // reserve/fee-growth mutation to inspect.
+    assert_eq!(action_attr(&res), "swap");
+    expect_single_swap_forward(&res);
 }
 
 #[test]
 fn test_swap_with_max_spread() {
+    // Phase-2: the only SYNCHRONOUS max-spread guard is `derive_token_out_min`
+    // rejecting a `max_spread` that exceeds the hard cap (5% without
+    // `allow_high_max_spread`). Realised-slippage checking moved onto the
+    // native pool's `token_out_min_amount`. A `max_spread` above the cap
+    // still errors at execute time.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
@@ -1046,7 +1010,7 @@ fn test_swap_with_max_spread() {
             amount: swap_amount,
         },
         belief_price: None,
-        max_spread: Some(Decimal::permille(1)), // 0.1%
+        max_spread: Some(Decimal::percent(6)), // Above the 5% hard cap
         allow_high_max_spread: None,
         to: None,
         transaction_deadline: None,
@@ -1063,9 +1027,9 @@ fn test_swap_with_max_spread() {
 fn test_swap_sell_creator_token_native() {
     // Post-migration the creator token is a native TokenFactory denom, so
     // selling it is a plain `SimpleSwap` with the creator denom ATTACHED as
-    // funds (the old CW20 `Receive`/hook path is gone). No CW20 balance
-    // smart-query is needed — the bank module guarantees the attached
-    // amount.
+    // funds (the old CW20 `Receive`/hook path is gone). The swap emits the
+    // native-pool SubMsg; the bluechip payout to the trader is produced when
+    // the swap-forward reply is driven.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
@@ -1097,37 +1061,25 @@ fn test_swap_sell_creator_token_native() {
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
-    assert_eq!(
-        res.attributes
-            .iter()
-            .find(|a| a.key == "action")
-            .unwrap()
-            .value,
-        "swap"
-    );
+    assert_eq!(action_attr(&res), "swap");
+    let payload = expect_single_swap_forward(&res);
 
-    // Selling the creator token pays out bluechip via BankMsg::Send.
-    assert!(res.messages.iter().any(|m| matches!(
+    // Driving the swap-forward reply pays out bluechip to the trader.
+    let reply_res = drive_swap_forward_reply(deps.as_mut(), payload, 9_876);
+    assert!(reply_res.messages.iter().any(|m| matches!(
         &m.msg,
-        CosmosMsg::Bank(BankMsg::Send { amount, .. })
-            if amount.iter().any(|c| c.denom == "ubluechip")
+        CosmosMsg::Bank(BankMsg::Send { to_address, amount })
+            if to_address == "trader"
+                && amount.iter().any(|c| c.denom == "ubluechip" && c.amount == Uint128::new(9_876))
     )));
-
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert!(pool_state.reserve0 < Uint128::new(23_500_000_000)); // Native decreased
-    assert!(pool_state.reserve1 > Uint128::new(350_000_000_000)); // Creator increased
 }
 
-/// TODO(phase1-migration): the original test exercised the CW20
-/// Receive-hook anti-spoof guard (`Cw20SwapBalanceMismatch`): a hostile
-/// CW20 could dispatch a Receive claiming an `amount` it never actually
-/// transferred, so the pool re-queried the CW20 balance and rejected on
-/// shortfall. That entire attack surface is gone — the creator token is a
-/// native TokenFactory denom now, and `SimpleSwap` verifies the attached
-/// funds via `must_pay` (the bank module cannot be spoofed), so there is
-/// no balance-mismatch path left to trigger. Repurposed to assert the
-/// native sell path both requires the funds to be attached and settles
-/// correctly when they are.
+/// TODO(phase2): the original test exercised the CW20 Receive-hook
+/// anti-spoof guard (`Cw20SwapBalanceMismatch`). That entire attack surface
+/// is gone — the creator token is a native TokenFactory denom now, and
+/// `SimpleSwap` verifies the attached funds via `must_pay` (the bank module
+/// cannot be spoofed). Repurposed to assert the native sell path REQUIRES the
+/// funds to actually be attached.
 #[test]
 fn test_cw20_receive_rejects_balance_shortfall() {
     let mut deps = mock_dependencies();
@@ -1138,7 +1090,7 @@ fn test_cw20_receive_rejects_balance_shortfall() {
 
     // A `SimpleSwap` claiming to sell the creator token but attaching NO
     // funds is rejected by the funds check — the native analog of the old
-    // spoofed-amount attack.
+    // spoofed-amount attack. No state is mutated.
     let no_funds = message_info(&Addr::unchecked("attacker"), &[]);
     let msg = ExecuteMsg::SimpleSwap {
         offer_asset: TokenInfo {
@@ -1153,15 +1105,10 @@ fn test_cw20_receive_rejects_balance_shortfall() {
         to: None,
         transaction_deadline: None,
     };
-    let err = execute(deps.as_mut(), env.clone(), no_funds, msg.clone()).unwrap_err();
-    // must_pay surfaces a generic "no funds"/denom error; either way the
-    // swap is rejected before any state mutation.
+    let err = execute(deps.as_mut(), env.clone(), no_funds, msg).unwrap_err();
+    // `must_pay` surfaces a no-funds / denom error; the swap is rejected
+    // before any state mutation or SubMsg emission.
     let _ = err;
-
-    // Pool state must be untouched after the rejection.
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(pool_state.reserve0, Uint128::new(23_500_000_000));
-    assert_eq!(pool_state.reserve1, Uint128::new(350_000_000_000));
 }
 
 #[test]
@@ -1200,46 +1147,6 @@ fn test_swap_wrong_asset() {
 }
 
 #[test]
-fn test_swap_price_accumulator_update() {
-    let mut deps = mock_dependencies();
-    setup_pool_post_threshold(&mut deps);
-
-    let mut env = mock_env();
-    env.block.time = Timestamp::from_seconds(1_600_001_000); // 1000 seconds later
-
-    let initial_state = POOL_STATE.load(&deps.storage).unwrap();
-    let initial_price0 = initial_state.price0_cumulative_last;
-
-    let info = message_info(
-        &Addr::unchecked("trader"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(1_000_000),
-        }],
-    );
-
-    let msg = ExecuteMsg::SimpleSwap {
-        offer_asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(1_000_000),
-        },
-        belief_price: None,
-        max_spread: None,
-        allow_high_max_spread: None,
-        to: None,
-        transaction_deadline: None,
-    };
-
-    execute(deps.as_mut(), env.clone(), info, msg).unwrap();
-
-    let updated_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert!(updated_state.price0_cumulative_last > initial_price0);
-    assert_eq!(updated_state.block_time_last, env.block.time.seconds());
-}
-
-#[test]
 fn test_factory_impersonation_prevented() {
     let mut deps = mock_dependencies();
 
@@ -1264,7 +1171,6 @@ fn test_factory_impersonation_prevented() {
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
         commit_threshold_limit_usd: Uint128::new(350_000_000_000),
-        position_nft_address: Addr::unchecked("NFT_contract"),
         subdenom: "ucreator".to_string(),
     };
     let info = message_info(&Addr::unchecked("fake_factory"), &[]); // Wrong sender!
@@ -1386,8 +1292,6 @@ fn test_usd_calculation_overflow() {
         "Error should mention overflow, got: {}",
         err
     );
-
-    println!("Correctly rejected overflow with error: {}", err);
 }
 
 #[test]
@@ -1427,19 +1331,18 @@ fn test_swap_with_belief_price_protection() {
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
-    // Should succeed because actual price is better than belief
-    assert_eq!(
-        res.attributes
-            .iter()
-            .find(|a| a.key == "action")
-            .unwrap()
-            .value,
-        "swap"
-    );
+    // A valid belief_price derives a non-erroring token_out_min floor, so
+    // the swap SubMsg is emitted (the native pool enforces the floor).
+    assert_eq!(action_attr(&res), "swap");
+    expect_single_swap_forward(&res);
 }
 
 #[test]
 fn test_swap_belief_price_rejects_bad_price_corrected() {
+    // Phase-2: synchronous rejection is driven by the max_spread-vs-hard-cap
+    // guard in `derive_token_out_min`. A `max_spread` above the 5% cap (no
+    // `allow_high_max_spread`) errors at execute time regardless of the
+    // belief price.
     let mut deps = mock_dependencies_with_balance(&[Coin {
         denom: "ubluechip".to_string(),
         amount: Uint128::new(10_000_000_000),
@@ -1467,7 +1370,7 @@ fn test_swap_belief_price_rejects_bad_price_corrected() {
             amount: swap_amount,
         },
         belief_price,
-        max_spread: Some(Decimal::percent(1)), // Tight spread to ensure failure
+        max_spread: Some(Decimal::percent(6)), // Above the 5% hard cap
         allow_high_max_spread: None,
         to: None,
         transaction_deadline: None,
@@ -1540,7 +1443,7 @@ fn test_swap_cw20_to_bluechip_direct() {
             amount: swap_amount,
         },
         belief_price: None,
-        max_spread: Some(Decimal::percent(5)), // Allow 5% slippage for this large swap
+        max_spread: Some(Decimal::percent(5)),
         allow_high_max_spread: None,
         to: None,
         transaction_deadline: None,
@@ -1548,14 +1451,7 @@ fn test_swap_cw20_to_bluechip_direct() {
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
-    assert_eq!(
-        res.attributes
-            .iter()
-            .find(|a| a.key == "action")
-            .unwrap()
-            .value,
-        "swap"
-    );
+    assert_eq!(action_attr(&res), "swap");
     assert_eq!(
         res.attributes
             .iter()
@@ -1565,14 +1461,15 @@ fn test_swap_cw20_to_bluechip_direct() {
         CREATOR_DENOM
     );
 
-    // Should have bank send message for bluechip
-    assert!(res
-        .messages
-        .iter()
-        .any(|msg| { matches!(&msg.msg, CosmosMsg::Bank(BankMsg::Send { .. })) }));
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert!(pool_state.reserve0 < Uint128::new(23_500_000_000)); // Bluechip decreased
-    assert!(pool_state.reserve1 > Uint128::new(350_000_000_000)); // Creator increased
+    let payload = expect_single_swap_forward(&res);
+
+    // Driving the reply forwards bluechip to the trader.
+    let reply_res = drive_swap_forward_reply(deps.as_mut(), payload, 42_000);
+    assert!(reply_res.messages.iter().any(|m| matches!(
+        &m.msg,
+        CosmosMsg::Bank(BankMsg::Send { amount, .. })
+            if amount.iter().any(|c| c.denom == "ubluechip" && c.amount == Uint128::new(42_000))
+    )));
 }
 
 #[test]
@@ -1582,7 +1479,7 @@ fn test_swap_cw20_with_custom_recipient() {
     setup_pool_post_threshold(&mut deps);
 
     let env = mock_env();
-    let swap_amount = Uint128::new(100_000_000); // Reduced to 100M to avoid slippage
+    let swap_amount = Uint128::new(100_000_000);
     let recipient = MockApi::default().addr_make("beneficiary").to_string();
 
     let info = message_info(
@@ -1600,7 +1497,7 @@ fn test_swap_cw20_with_custom_recipient() {
             amount: swap_amount,
         },
         belief_price: None,
-        max_spread: Some(Decimal::percent(2)), // Allow 2% slippage
+        max_spread: Some(Decimal::percent(2)),
         allow_high_max_spread: None,
         to: Some(recipient.clone()),
         transaction_deadline: None,
@@ -1608,981 +1505,31 @@ fn test_swap_cw20_with_custom_recipient() {
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
-    let bank_msg = res
+    let payload = expect_single_swap_forward(&res);
+
+    // The custom recipient is recorded in the swap-forward payload...
+    let decoded: SwapForwardPayload = from_json(&payload).unwrap();
+    assert_eq!(
+        decoded.receiver.to_string(),
+        recipient,
+        "swap-forward payload must carry the custom recipient"
+    );
+
+    // ...and the reply forwards the swapped-out bluechip to it.
+    let reply_res = drive_swap_forward_reply(deps.as_mut(), payload, 12_345);
+    let to_address = reply_res
         .messages
         .iter()
-        .find_map(|msg| {
-            if let CosmosMsg::Bank(BankMsg::Send { to_address, .. }) = &msg.msg {
+        .find_map(|m| {
+            if let CosmosMsg::Bank(BankMsg::Send { to_address, .. }) = &m.msg {
                 Some(to_address.clone())
             } else {
                 None
             }
         })
         .expect("Should have bank send message");
-
     assert_eq!(
-        bank_msg, recipient,
+        to_address, recipient,
         "Bluechip should be sent to custom recipient"
-    );
-}
-
-#[test]
-fn test_cw20_swap_with_belief_price() {
-    // Native sell whose large size violates the belief-price spread bound.
-    let mut deps = mock_dependencies();
-    setup_pool_post_threshold(&mut deps);
-
-    let env = mock_env();
-    let swap_amount = Uint128::new(100_000_000_000); // Large amount for slippage
-
-    let belief_price = Some(Decimal::from_ratio(5u128, 100u128));
-
-    let info = message_info(
-        &Addr::unchecked("trader"),
-        &[Coin {
-            denom: CREATOR_DENOM.to_string(),
-            amount: swap_amount,
-        }],
-    );
-    let msg = ExecuteMsg::SimpleSwap {
-        offer_asset: TokenInfo {
-            info: TokenType::CreatorToken {
-                denom: CREATOR_DENOM.to_string(),
-            },
-            amount: swap_amount,
-        },
-        belief_price,
-        max_spread: Some(Decimal::percent(10)),
-        allow_high_max_spread: Some(true),
-        to: None,
-        transaction_deadline: None,
-    };
-
-    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
-    match err {
-        ContractError::MaxSpreadAssertion {} => (),
-        _ => panic!(
-            "Expected MaxSpreadAssertion due to belief price, got {:?}",
-            err
-        ),
-    }
-}
-
-#[test]
-fn test_race_condition_not_manually_set() {
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(20_000_000_000),
-    }]);
-
-    setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
-    THRESHOLD_PROCESSING
-        .save(&mut deps.storage, &false)
-        .unwrap();
-
-    USD_RAISED_FROM_COMMIT
-        .save(&mut deps.storage, &Uint128::new(24_900_000_000))
-        .unwrap();
-
-    let env = mock_env();
-
-    let alice_info = message_info(
-        &Addr::unchecked("alice"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(200_000_000),
-        }],
-    );
-
-    let alice_msg = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(200_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    let alice_res = execute(deps.as_mut(), env.clone(), alice_info, alice_msg).unwrap();
-
-    assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
-    assert!(alice_res
-        .attributes
-        .iter()
-        .any(|a| a.value == "threshold_crossing"));
-
-    assert!(
-        !THRESHOLD_PROCESSING.load(&deps.storage).unwrap(),
-        "THRESHOLD_PROCESSING should be cleared after successful threshold crossing"
-    );
-
-    let bob_info = message_info(
-        &Addr::unchecked("bob"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(200_000_000),
-        }],
-    );
-    let before = POOL_STATE.load(&deps.storage).unwrap();
-    println!(
-        "Before Bob's swap: reserve0: {}, reserve1: {}",
-        before.reserve0, before.reserve1
-    );
-
-    let bob_msg = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(200_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: Some(Decimal::percent(10)),
-    };
-
-    // A same-block follower commit is blocked by the post-threshold
-    // cooldown (eliminates the atomic same-block sandwich on the
-    // freshly-seeded pool). Pool reserves must remain at the seeded
-    // values from Alice's crossing.
-    let err = execute(deps.as_mut(), env.clone(), bob_info.clone(), bob_msg).unwrap_err();
-    match err {
-        ContractError::PostThresholdCooldownActive { until_block } => {
-            assert!(
-                until_block > env.block.height,
-                "cooldown until_block {} must be > current block {}",
-                until_block,
-                env.block.height
-            );
-        }
-        other => panic!("Expected PostThresholdCooldownActive, got {:?}", other),
-    }
-
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(
-        pool_state.reserve0, before.reserve0,
-        "Pool reserve0 must NOT change while cooldown blocks Bob's commit"
-    );
-    assert_eq!(
-        pool_state.reserve1, before.reserve1,
-        "Pool reserve1 must NOT change while cooldown blocks Bob's commit"
-    );
-}
-
-#[test]
-fn test_concurrent_commits_both_recorded() {
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(20_000_000_000),
-    }]);
-
-    setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
-    THRESHOLD_PROCESSING
-        .save(&mut deps.storage, &false)
-        .unwrap();
-
-    USD_RAISED_FROM_COMMIT
-        .save(&mut deps.storage, &Uint128::new(24_900_000_000))
-        .unwrap();
-
-    COMMIT_LEDGER
-        .save(
-            &mut deps.storage,
-            &Addr::unchecked("previous1"),
-            &Uint128::new(10_000_000_000),
-        )
-        .unwrap();
-    COMMIT_LEDGER
-        .save(
-            &mut deps.storage,
-            &Addr::unchecked("previous2"),
-            &Uint128::new(14_900_000_000),
-        )
-        .unwrap();
-
-    let env = mock_env();
-
-    let alice_info = message_info(
-        &Addr::unchecked("alice"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(200_000_000),
-        }],
-    );
-
-    let alice_msg = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(200_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    execute(deps.as_mut(), env.clone(), alice_info.clone(), alice_msg).unwrap();
-
-    assert!(
-        COMMIT_LEDGER
-            .load(&deps.storage, &alice_info.sender)
-            .is_ok(),
-        "Alice should remain in commit ledger pending batched distribution"
-    );
-    assert!(
-        DISTRIBUTION_STATE
-            .may_load(&deps.storage)
-            .unwrap()
-            .is_some(),
-        "Distribution state should be active for batched payout"
-    );
-
-    // Use a smaller amount relative to the pool reserves. With the 20% excess
-    // swap cap, Alice's threshold crossing leaves the pool thinner, so Bob's
-    // post-threshold commit (swap) must be reasonably sized to stay within spread.
-    let bob_amount = Uint128::new(5_000_000);
-    let bob_info = message_info(
-        &Addr::unchecked("bob"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: bob_amount,
-        }],
-    );
-
-    let before = POOL_STATE.load(&deps.storage).unwrap();
-    println!(
-        "Before Bob's swap: reserve0: {}, reserve1: {}",
-        before.reserve0, before.reserve1
-    );
-
-    let bob_msg = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: bob_amount,
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        // `Commit` doesn't expose `allow_high_max_spread`; the
-        // post-threshold AMM swap path passes None to assert_max_spread,
-        // so the hard cap on Bob's max_spread is 5% (the default-cap
-        // ceiling) and a 10% request would be rejected.
-        max_spread: Some(Decimal::percent(5)),
-    };
-
-    // Same-block follower: rejected by post-threshold cooldown.
-    let same_block_err = execute(
-        deps.as_mut(),
-        env.clone(),
-        bob_info.clone(),
-        bob_msg.clone(),
-    )
-    .unwrap_err();
-    match same_block_err {
-        ContractError::PostThresholdCooldownActive { .. } => {}
-        other => panic!(
-            "Expected PostThresholdCooldownActive on same-block commit, got {:?}",
-            other
-        ),
-    }
-    let pool_state_blocked = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(
-        pool_state_blocked.reserve0, before.reserve0,
-        "Reserves must be unchanged while cooldown blocks Bob"
-    );
-
-    // After advancing past the cooldown, the same commit succeeds and
-    // routes through the post-threshold AMM swap path, recording a
-    // reserve increase for Bob's bluechip — confirms the cooldown is
-    // a temporary gate, not a permanent block.
-    //
-    // A per-tx swap cap ramps from 0.5% of reserve up to "unrestricted"
-    // over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks AFTER the cooldown ends.
-    // To exercise the post-cooldown commit path with Bob's full
-    // 4.7M-bluechip offer (much larger than 0.5% of the seeded reserve),
-    // advance past the full ramp window so no per-tx cap applies. Tests
-    // that verify the ramp behaviour themselves live in `ramp_cap_tests`
-    // (pool-core/state.rs) and exercise the cap at boundary blocks directly.
-    let cooldown_until = pool_core::state::POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
-        .load(&deps.storage)
-        .expect("cooldown must be armed after threshold cross");
-    let mut env_after_cooldown = env.clone();
-    env_after_cooldown.block.height =
-        cooldown_until + pool_core::state::POST_THRESHOLD_SWAP_RAMP_BLOCKS;
-    // Advance time too so the per-user `min_commit_interval` rate-limit
-    // (13s) doesn't reject the retry under the same-block timestamp.
-    env_after_cooldown.block.time = env_after_cooldown.block.time.plus_seconds(60);
-    let bob_res = execute(deps.as_mut(), env_after_cooldown, bob_info.clone(), bob_msg).unwrap();
-
-    assert!(
-        bob_res
-            .attributes
-            .iter()
-            .any(|a| a.key == "action" && a.value == "commit"),
-        "Bob's transaction should be a swap after threshold"
-    );
-
-    assert!(
-        COMMIT_LEDGER.load(&deps.storage, &bob_info.sender).is_err(),
-        "Bob shouldn't be in commit ledger - his transaction is a swap"
-    );
-
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert!(
-        pool_state.reserve0 > before.reserve0,
-        "Pool reserve0 should have increased from Bob's bluechip swap"
-    );
-}
-pub fn setup_pool_with_reserves(
-    deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
-    reserve0: Uint128,
-    reserve1: Uint128,
-) {
-    let pool_info = PoolInfo {
-        pool_id: 1u64,
-        pool_info: PoolDetails {
-            asset_infos: [
-                TokenType::Native {
-                    denom: "ubluechip".to_string(),
-                },
-                TokenType::CreatorToken {
-                    denom: super::liquidity_tests::CREATOR_DENOM.to_string(),
-                },
-            ],
-            contract_addr: Addr::unchecked("pool_contract"),
-            pool_type: PoolPairType::Xyk {},
-        },
-        factory_addr: Addr::unchecked("factory_contract"),
-        token_denom: super::liquidity_tests::CREATOR_DENOM.to_string(),
-        position_nft_address: Addr::unchecked("nft_contract"),
-    };
-    POOL_INFO.save(&mut deps.storage, &pool_info).unwrap();
-
-    let pool_state = PoolState {
-        pool_contract_address: Addr::unchecked("pool_contract"),
-        nft_ownership_accepted: true,
-        reserve0, // No reserves pre-threshold
-        reserve1,
-        total_liquidity: Uint128::zero(),
-        block_time_last: 0,
-        price0_cumulative_last: Uint128::zero(),
-        price1_cumulative_last: Uint128::zero(),
-    };
-    POOL_STATE.save(&mut deps.storage, &pool_state).unwrap();
-
-    let pool_fee_state = PoolFeeState {
-        fee_growth_global_0: Decimal::zero(),
-        fee_growth_global_1: Decimal::zero(),
-        total_fees_collected_0: Uint128::zero(),
-        total_fees_collected_1: Uint128::zero(),
-        fee_reserve_0: Uint128::zero(),
-        fee_reserve_1: Uint128::zero(),
-    };
-    POOL_FEE_STATE
-        .save(&mut deps.storage, &pool_fee_state)
-        .unwrap();
-
-    let pool_specs = PoolSpecs {
-        lp_fee: Decimal::percent(3) / Uint128::new(10), // 0.3% fee (3/1000)
-        min_commit_interval: 60,                        // 1 minute minimum between commits
-    };
-    POOL_SPECS.save(&mut deps.storage, &pool_specs).unwrap();
-
-    let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000), // $25k with 6 decimals
-        max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
-        creator_excess_liquidity_lock_days: 7,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
-    };
-    COMMIT_LIMIT_INFO
-        .save(&mut deps.storage, &commit_config)
-        .unwrap();
-
-    let threshold_payout = ThresholdPayoutAmounts {
-        creator_reward_amount: Uint128::new(325_000_000_000), // 325k tokens
-        bluechip_reward_amount: Uint128::new(25_000_000_000), // 25k tokens
-        pool_seed_amount: Uint128::new(350_000_000_000),      // 350k tokens
-        commit_return_amount: Uint128::new(500_000_000_000),  // 500k tokens
-    };
-    THRESHOLD_PAYOUT_AMOUNTS
-        .save(&mut deps.storage, &threshold_payout)
-        .unwrap();
-    let commit_fee_info = CommitFeeInfo {
-        bluechip_wallet_address: Addr::unchecked("bluechip_treasury"),
-        creator_wallet_address: Addr::unchecked("creator_wallet"),
-        commit_fee_bluechip: Decimal::percent(1), // 1%
-        commit_fee_creator: Decimal::percent(5),  // 5%
-    };
-    COMMITFEEINFO
-        .save(&mut deps.storage, &commit_fee_info)
-        .unwrap();
-
-    THRESHOLD_PROCESSING
-        .save(&mut deps.storage, &false)
-        .unwrap();
-    IS_THRESHOLD_HIT.save(&mut deps.storage, &false).unwrap();
-    USD_RAISED_FROM_COMMIT
-        .save(&mut deps.storage, &Uint128::zero())
-        .unwrap();
-    NATIVE_RAISED_FROM_COMMIT
-        .save(&mut deps.storage, &Uint128::zero())
-        .unwrap();
-    NEXT_POSITION_ID.save(&mut deps.storage, &1u64).unwrap();
-}
-
-#[test]
-fn test_swap_fails_when_reserves_below_pause_threshold() {
-    let mut deps = mock_dependencies();
-
-    // Setup pool with reserves just below pause threshold
-    setup_pool_with_reserves(&mut deps, Uint128::new(9), Uint128::new(100_000));
-    // execute_simple_swap gates on IS_THRESHOLD_HIT as defense-in-depth.
-    // The setup helper seeds the flag as false (pre-
-    // threshold default); these direct-handler-call tests exercise
-    // post-threshold AMM mechanics, so flip it on explicitly.
-    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-
-    let offer = TokenInfo {
-        info: TokenType::Native {
-            denom: "ubluechip".to_string(),
-        },
-        amount: Uint128::new(100),
-    };
-
-    let result = execute_simple_swap(
-        &mut deps.as_mut(),
-        mock_env(),
-        message_info(&Addr::unchecked("user"), &[]),
-        Addr::unchecked("user"),
-        offer,
-        None,
-        None,
-        None,
-        None,
-    );
-
-    // Swap must be rejected when a side is below MINIMUM_LIQUIDITY. The drain
-    // guard must not try to persist POOL_PAUSED on this path — a Wasm Err
-    // return would revert the save — so the pool is "soft-paused" solely by
-    // the reserve pre-check firing on every subsequent swap attempt.
-    assert!(matches!(
-        result,
-        Err(ContractError::InsufficientReserves {})
-    ));
-    assert!(
-        !POOL_PAUSED
-            .may_load(&deps.storage)
-            .unwrap()
-            .unwrap_or(false),
-        "POOL_PAUSED should not be set by the drain guard (save would be rolled back on chain)"
-    );
-}
-
-#[test]
-fn test_swap_fails_when_pool_already_paused() {
-    let mut deps = mock_dependencies();
-    setup_pool_with_reserves(&mut deps, Uint128::new(50_000), Uint128::new(50_000));
-    // execute_simple_swap gates on IS_THRESHOLD_HIT.
-    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-
-    // Manually pause the pool
-    POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
-
-    let offer = TokenInfo {
-        info: TokenType::Native {
-            denom: "ubluechip".to_string(),
-        },
-
-        amount: Uint128::new(100),
-    };
-
-    let result = execute_simple_swap(
-        &mut deps.as_mut(),
-        mock_env(),
-        message_info(&Addr::unchecked("user"), &[]),
-        Addr::unchecked("user"),
-        offer,
-        None,
-        None,
-        None,
-        None,
-    );
-
-    assert!(matches!(
-        result,
-        Err(ContractError::PoolPausedLowLiquidity {})
-    ));
-}
-#[test]
-fn test_swap_prevented_if_would_deplete_below_minimum() {
-    let mut deps = mock_dependencies();
-
-    setup_pool_with_reserves(
-        &mut deps,
-        Uint128::new(10000), // Well above SWAP_PAUSE_THRESHOLD
-        Uint128::new(1100),  // Just above MINIMUM_LIQUIDITY
-    );
-    // execute_simple_swap gates on IS_THRESHOLD_HIT.
-    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-
-    let swap_amount = Uint128::new(2000);
-    let info = message_info(
-        &Addr::unchecked("user"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: swap_amount,
-        }],
-    );
-
-    let offer = TokenInfo {
-        info: TokenType::Native {
-            denom: "ubluechip".to_string(),
-        },
-        amount: swap_amount,
-    };
-
-    let result = execute_simple_swap(
-        &mut deps.as_mut(),
-        mock_env(),
-        info,
-        Addr::unchecked("user"),
-        offer,
-        None,
-        Some(Decimal::percent(10)),
-        Some(true),
-        None,
-    );
-
-    // A swap large enough to deplete reserves below `MINIMUM_LIQUIDITY` is
-    // stopped by the 10%-with-override hard cap on realised slippage, which
-    // fires before the reserve arithmetic that would surface
-    // `InsufficientReserves` — that error is structurally unreachable on this
-    // path. Confirm the slippage gate IS the binding guard for
-    // depletion-bordering swaps. The MIN-reserve guard is still exercised
-    // from `liquidity_tests` via direct AMM math.
-    assert!(
-        matches!(result, Err(ContractError::MaxSpreadAssertion {})),
-        "Expected MaxSpreadAssertion (slippage cap fires before the MIN-reserve check), got: {:?}",
-        result
-    );
-}
-
-#[test]
-fn test_swap_triggers_pause_at_threshold() {
-    let mut deps = mock_dependencies();
-
-    // Set one reserve below MINIMUM_LIQUIDITY
-    setup_pool_with_reserves(
-        &mut deps,
-        Uint128::new(99), // Below MINIMUM_LIQUIDITY
-        Uint128::new(10000),
-    );
-    // execute_simple_swap gates on IS_THRESHOLD_HIT.
-    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-
-    let swap_amount = Uint128::new(10);
-    let info = message_info(
-        &Addr::unchecked("user"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: swap_amount,
-        }],
-    );
-
-    let offer = TokenInfo {
-        info: TokenType::Native {
-            denom: "ubluechip".to_string(),
-        },
-        amount: swap_amount,
-    };
-
-    let result = execute_simple_swap(
-        &mut deps.as_mut(),
-        mock_env(),
-        info,
-        Addr::unchecked("user"),
-        offer,
-        None,
-        Some(Decimal::percent(50)),
-        None,
-        None,
-    );
-
-    // The drain guard rejects the swap. On chain, any attempt to persist
-    // POOL_PAUSED here would be rolled back with the Err, so the guard
-    // deliberately does not touch POOL_PAUSED. The soft-pause is enforced
-    // by the pre-check running on every swap attempt.
-    assert!(
-        matches!(result, Err(ContractError::InsufficientReserves {})),
-        "Expected InsufficientReserves at pre-swap check, got: {:?}",
-        result
-    );
-    assert!(
-        !POOL_PAUSED
-            .may_load(&deps.storage)
-            .unwrap()
-            .unwrap_or(false),
-        "POOL_PAUSED flag must stay unset on the drain-guard path (rollback semantics)"
-    );
-}
-
-#[test]
-fn test_add_liquidity_unpauses_pool() {
-    use crate::state::POOL_PAUSED_AUTO;
-    let mut deps = mock_dependencies();
-
-    // Setup pool with low reserves and simulate an auto-pause:
-    // POOL_PAUSED + POOL_PAUSED_AUTO both true means "paused because
-    // a swap or remove dropped reserves below MIN, recoverable via
-    // deposit". Without POOL_PAUSED_AUTO, the deposit treats this as
-    // a hard pause and refuses to clear it.
-    setup_pool_with_reserves(&mut deps, Uint128::new(5000), Uint128::new(5000));
-    POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
-    POOL_PAUSED_AUTO.save(&mut deps.storage, &true).unwrap();
-
-    // Both pool sides are native bank denoms now, so the depositor
-    // attaches BOTH the bluechip and the creator TokenFactory denom.
-    let result = execute_deposit_liquidity(
-        deps.as_mut(),
-        mock_env(),
-        message_info(
-            &Addr::unchecked("provider"),
-            &[
-                Coin::new(50_000u128, "ubluechip"),
-                Coin::new(50_000u128, CREATOR_DENOM),
-            ],
-        ),
-        Addr::unchecked("provider"),
-        Uint128::new(50_000),
-        Uint128::new(50_000),
-        None,
-        None,
-        None,
-    );
-    if result.is_err() {
-        println!("Liquidity deposit failed: {:?}", result);
-    }
-    assert!(result.is_ok());
-
-    // Check pool is unpaused
-    let is_paused = POOL_PAUSED.load(&deps.storage).unwrap();
-    assert!(
-        !is_paused,
-        "Pool should be uspaused after adding sufficient liquidity"
-    );
-
-    // Verify the response contains unpause attribute
-    let response = result.unwrap();
-    assert!(response
-        .attributes
-        .iter()
-        .any(|attr| attr.key == "pool_unpaused" && attr.value == "true"));
-}
-
-#[test]
-fn test_add_liquidity_doesnt_unpause_if_still_below_threshold() {
-    let mut deps = mock_dependencies();
-
-    setup_pool_with_reserves(&mut deps, Uint128::new(100), Uint128::new(100));
-    POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
-
-    // Both pool sides are native bank denoms now — attach both.
-    let result = execute_deposit_liquidity(
-        deps.as_mut(),
-        mock_env(),
-        message_info(
-            &Addr::unchecked("provider"),
-            &[
-                Coin::new(500u128, "ubluechip"),
-                Coin::new(500u128, CREATOR_DENOM),
-            ],
-        ),
-        Addr::unchecked("provider"),
-        Uint128::new(500),
-        Uint128::new(500),
-        None,
-        None,
-        None,
-    );
-    assert!(result.is_ok());
-
-    let is_paused = POOL_PAUSED.load(&deps.storage).unwrap();
-    assert!(
-        is_paused,
-        "Pool should remain paused with insufficient liquidity"
-    );
-}
-
-#[test]
-fn test_both_reserves_checked() {
-    let mut deps = mock_dependencies();
-
-    // Test with low reserve0
-    setup_pool_with_reserves(&mut deps, Uint128::new(9999), Uint128::new(10));
-    // execute_simple_swap gates on IS_THRESHOLD_HIT.
-    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-
-    let result1 = execute_simple_swap(
-        &mut deps.as_mut(),
-        mock_env(),
-        message_info(&Addr::unchecked("user"), &[]),
-        Addr::unchecked("user"),
-        TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-
-            amount: Uint128::new(100),
-        },
-        None,
-        None,
-        None,
-        None,
-    );
-
-    assert!(matches!(
-        result1,
-        Err(ContractError::InsufficientReserves {})
-    ));
-
-    // Test with low reserve1. Use a different sender than the first call —
-    // execute_simple_swap runs the rate-limit check (shared with the PoolCtx
-    // POOL_SPECS load), which would otherwise reject the same-sender second
-    // call with TooFrequentCommits before reaching the reserve guard this
-    // test exercises.
-    setup_pool_with_reserves(&mut deps, Uint128::new(10), Uint128::new(9999));
-    // setup_pool_with_reserves resets IS_THRESHOLD_HIT
-    // to false, so re-flip it for this second post-threshold scenario.
-    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-    POOL_PAUSED.remove(&mut deps.storage); // Reset pause state
-
-    let result2 = execute_simple_swap(
-        &mut deps.as_mut(),
-        mock_env(),
-        message_info(&Addr::unchecked("user2"), &[]),
-        Addr::unchecked("user2"),
-        TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-
-            amount: Uint128::new(100),
-        },
-        None,
-        None,
-        None,
-        None,
-    );
-
-    assert!(matches!(
-        result2,
-        Err(ContractError::InsufficientReserves {})
-    ));
-}
-
-#[test]
-fn test_pause_state_persistence() {
-    // A drained pool does not flip POOL_PAUSED via the swap path (that save
-    // would be reverted by the Err return on chain). Repeat calls to the
-    // swap entry point should each be rejected by the reserve pre-check
-    // with InsufficientReserves, NOT the PoolPausedLowLiquidity branch.
-    let mut deps = mock_dependencies();
-    setup_pool_with_reserves(&mut deps, Uint128::new(15), Uint128::new(15));
-    // execute_simple_swap gates on IS_THRESHOLD_HIT.
-    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-
-    let first = execute_simple_swap(
-        &mut deps.as_mut(),
-        mock_env(),
-        message_info(&Addr::unchecked("user1"), &[]),
-        Addr::unchecked("user1"),
-        TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(100),
-        },
-        None,
-        None,
-        None,
-        None,
-    );
-    assert!(matches!(first, Err(ContractError::InsufficientReserves {})));
-
-    let second = execute_simple_swap(
-        &mut deps.as_mut(),
-        mock_env(),
-        message_info(&Addr::unchecked("user2"), &[]),
-        Addr::unchecked("user2"),
-        TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(100),
-        },
-        None,
-        None,
-        None,
-        None,
-    );
-    assert!(
-        matches!(second, Err(ContractError::InsufficientReserves {})),
-        "Second swap should still hit the reserve pre-check, not the pause branch. Got: {:?}",
-        second
-    );
-    assert!(
-        !POOL_PAUSED
-            .may_load(&deps.storage)
-            .unwrap()
-            .unwrap_or(false),
-        "POOL_PAUSED must stay unset — the swap path never persists it"
-    );
-}
-
-#[test]
-fn test_swap_lopsided_pool_after_threshold() {
-    // A swap whose realised spread exceeds 10% is rejected even with
-    // `allow_high_max_spread = Some(true)`. A 50%-of-reserve swap
-    // (extreme spread) must not succeed; under the hard cap it must be
-    // rejected with `MaxSpreadAssertion`. The lopsided-pool setup
-    // exercises the 10% slippage cap in the worst-case scenario.
-    let mut deps = mock_dependencies();
-    setup_pool_post_threshold(&mut deps);
-
-    let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    pool_state.reserve0 = Uint128::new(1_000_000_000); // 1k bluechip
-    pool_state.reserve1 = Uint128::new(100_000_000_000); // 100k tokens
-    POOL_STATE.save(&mut deps.storage, &pool_state).unwrap();
-
-    let env = mock_env();
-    let swap_amount = Uint128::new(500_000_000); // 50% of reserve (extreme)
-
-    let info = message_info(
-        &Addr::unchecked("trader"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: swap_amount,
-        }],
-    );
-
-    let msg = ExecuteMsg::SimpleSwap {
-        offer_asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: swap_amount,
-        },
-        belief_price: None,
-        max_spread: Some(Decimal::percent(10)),
-        allow_high_max_spread: Some(true),
-        to: None,
-        transaction_deadline: None,
-    };
-
-    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
-    assert!(
-        matches!(err, ContractError::MaxSpreadAssertion {}),
-        "lopsided 50%-of-reserve swap must be rejected by the \
-         10% hard cap on realised slippage; got {:?}",
-        err
-    );
-}
-
-#[test]
-fn test_swap_slippage_lopsided() {
-    let mut deps = mock_dependencies();
-    setup_pool_post_threshold(&mut deps);
-
-    // Skew pool
-    let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    pool_state.reserve0 = Uint128::new(1_000_000_000);
-    pool_state.reserve1 = Uint128::new(100_000_000_000);
-    POOL_STATE.save(&mut deps.storage, &pool_state).unwrap();
-
-    let env = mock_env();
-    let swap_amount = Uint128::new(500_000_000); // 50% of reserve
-
-    let info = message_info(
-        &Addr::unchecked("trader"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: swap_amount,
-        }],
-    );
-    let msg = ExecuteMsg::SimpleSwap {
-        offer_asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: swap_amount,
-        },
-        belief_price: Some(Decimal::percent(1)), // 0.01
-        max_spread: Some(Decimal::percent(1)),   // 1% tolerance
-        allow_high_max_spread: None,
-        to: None,
-        transaction_deadline: None,
-    };
-
-    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
-    match err {
-        ContractError::MaxSpreadAssertion { .. } => {}
-        _ => panic!("Expected MaxSpreadAssertion error due to high slippage in lopsided pool"),
-    }
-}
-
-/// Regression: `process_post_threshold_commit` must reject when reserves
-/// are already below `MINIMUM_LIQUIDITY`. If the post-threshold commit
-/// path lacked the MIN check that `simple_swap` enforces, a commit on a
-/// drained pool would execute against near-zero reserves and continue
-/// draining. The commit path mirrors the swap path's pre-state check.
-#[test]
-fn post_threshold_commit_rejects_when_pre_state_reserve_below_min() {
-    use pool_core::state::MINIMUM_LIQUIDITY;
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(1_000_000_000),
-    }]);
-    setup_pool_post_threshold(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
-
-    // Manually drop reserve1 below MIN (simulating a drained pool that
-    // somehow stayed un-paused; the test setup doesn't auto-pause).
-    let mut state = POOL_STATE.load(&deps.storage).unwrap();
-    state.reserve1 = MINIMUM_LIQUIDITY.checked_sub(Uint128::one()).unwrap();
-    POOL_STATE.save(&mut deps.storage, &state).unwrap();
-
-    let commit_amount = Uint128::new(100_000_000);
-    let info = message_info(
-        &Addr::unchecked("commiter"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: commit_amount,
-        }],
-    );
-    let msg = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: commit_amount,
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
-    assert!(
-        matches!(err, ContractError::InsufficientReserves {}),
-        "expected InsufficientReserves on pre-state check, got: {:?}",
-        err
     );
 }

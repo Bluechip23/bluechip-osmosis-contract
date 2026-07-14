@@ -18,7 +18,7 @@
 use crate::asset::TokenType;
 use crate::pool_struct::{PoolDetails, ThresholdPayoutAmounts};
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Binary, Decimal, StdResult, Storage, Timestamp, Uint128};
+use cosmwasm_std::{Addr, Binary, Coin, Decimal, StdResult, Storage, Timestamp, Uint128};
 use cw_storage_plus::{Item, Map};
 use pool_factory_interfaces::PoolStateResponseForFactory;
 
@@ -167,6 +167,19 @@ pub struct FactoryInstantiate {
     /// Setting this to zero disables the fee entirely (legitimate
     /// configuration choice for permissioned deployments).
     pub pool_creation_fee: Uint128,
+    /// GAMM pool-creation fee that the chain's `x/gamm` module auto-charges
+    /// when `MsgCreateBalancerPool` executes at threshold crossing. The
+    /// pool contract must hold this coin at that moment, so the factory
+    /// collects it from the creator at `Create` time (IN ADDITION to the
+    /// flat `pool_creation_fee` above) and forwards it into the pool's
+    /// instantiate `funds`. The pool holds it until threshold crossing.
+    /// Zero amount disables collection (e.g. test environments where the
+    /// gamm create fee is waived).
+    ///
+    /// `#[serde(default)]` lets pre-this-field factory records deserialize
+    /// with an empty (zero) coin.
+    #[serde(default = "default_gamm_pool_creation_fee")]
+    pub gamm_pool_creation_fee: Coin,
     /// Per-pool threshold-payout splits applied when a commit pool
     /// crosses its threshold. The sum is also used as the CW20
     /// mint cap pinned at create time, so changing these values
@@ -215,6 +228,14 @@ pub fn default_emergency_withdraw_delay_seconds() -> u64 {
 
 pub fn default_twap_window_seconds() -> u64 {
     600
+}
+
+/// Default (zero) GAMM pool-creation fee — collection disabled.
+pub fn default_gamm_pool_creation_fee() -> Coin {
+    Coin {
+        denom: String::new(),
+        amount: Uint128::zero(),
+    }
 }
 
 #[cw_serde]

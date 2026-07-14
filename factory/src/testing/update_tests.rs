@@ -88,6 +88,10 @@ fn test_propose_and_execute_update_config() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -929,6 +933,10 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     }

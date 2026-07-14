@@ -40,8 +40,8 @@ use crate::generic_helpers::{
 use crate::msg::CommitFeeInfo;
 use crate::state::{
     PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
-    POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
-    THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    POOL_ANALYTICS, POOL_INFO, POOL_PAUSED, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
+    THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
 
 use crate::swap_helper::get_commit_context;
@@ -313,8 +313,6 @@ fn execute_commit_logic(
                     // the hot pre-/post-threshold paths never pay for
                     // reads they don't use.
                     let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
-                    let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-                    let mut pool_state = POOL_STATE.load(deps.storage)?;
 
                     let value_to_threshold = commit_config
                         .commit_amount_for_threshold_usd
@@ -333,8 +331,6 @@ fn execute_commit_logic(
                             commit_value,
                             value_to_threshold,
                             usd_rate,
-                            &mut pool_state,
-                            &mut pool_fee_state,
                             &pool_specs,
                             &pool_info,
                             &commit_config,
@@ -360,8 +356,7 @@ fn execute_commit_logic(
                             amount_after_fees,
                             commit_value,
                             new_total,
-                            &mut pool_state,
-                            &mut pool_fee_state,
+                            &pool_specs,
                             &pool_info,
                             &commit_config,
                             &threshold_payout,
@@ -397,12 +392,6 @@ fn execute_commit_logic(
                     )?
                 }
             } else {
-                // Loaded here rather than at the top of the dispatcher:
-                // the pre-threshold path touches neither fee state nor
-                // pool state, so only the post-threshold (and crossing)
-                // branches pay for these reads.
-                let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-                let mut pool_state = POOL_STATE.load(deps.storage)?;
                 process_post_threshold_commit(
                     deps,
                     env,
@@ -415,8 +404,6 @@ fn execute_commit_logic(
                     max_spread,
                     &pool_info,
                     &pool_specs,
-                    &mut pool_state,
-                    &mut pool_fee_state,
                     &mut analytics,
                 )?
             };

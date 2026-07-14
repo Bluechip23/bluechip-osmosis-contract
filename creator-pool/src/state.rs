@@ -376,16 +376,24 @@ pub struct CommitLimitInfo {
     pub min_commit_usd_post_threshold: Uint128,
 }
 
+/// Time-locked creator entitlement to a portion of the pool's seed LP.
+///
+/// Phase-2: when the raised bluechip exceeds `max_bluechip_lock_per_pool`,
+/// the excess no longer parks raw tokens. Instead the creator becomes
+/// entitled to a proportional slice of the `gamm/pool/{id}` LP shares the
+/// pool holds. The slice is `total_seed_lp * excess_bluechip /
+/// total_seeded_bluechip`, computed at CLAIM time by reading the pool's
+/// current `gamm/pool/{id}` bank balance (its permanently-held seed LP).
 #[cw_serde]
 pub struct CreatorExcessLiquidity {
     /// Creator wallet entitled to claim the excess once unlocked.
     pub creator: Addr,
-    /// Bluechip portion of the excess (above max_bluechip_lock_per_pool).
-    pub bluechip_amount: Uint128,
-    /// Creator-token portion of the excess proportional to bluechip_amount.
-    pub token_amount: Uint128,
+    /// Bluechip raised above `max_bluechip_lock_per_pool` — the numerator
+    /// of the LP-share proportion.
+    pub excess_bluechip: Uint128,
+    /// Total net bluechip raised toward threshold — the denominator of the
+    /// LP-share proportion (`excess_bluechip / total_seeded_bluechip`).
+    pub total_seeded_bluechip: Uint128,
     /// Earliest block time at which the creator may claim this excess.
     pub unlock_time: Timestamp,
-    /// Position-NFT id minted on claim (None until claimed).
-    pub excess_nft_id: Option<String>,
 }

@@ -1,40 +1,32 @@
-//! Threshold-crossing commit handler. Fires when a single commit carries
+//! Threshold-crossing commit handlers. Fire when a single commit carries
 //! the pool over its `commit_amount_for_threshold_usd` target.
 //!
-//! Responsibilities (in order):
+//! Phase-2 responsibilities (in order):
 //! 1. Split the incoming commit into a threshold portion (up to the
-//! remaining target) and an excess portion.
+//!    remaining target) and an excess portion.
 //! 2. Credit the threshold portion to `COMMIT_LEDGER` +
-//! `USD_RAISED_FROM_COMMIT` / `NATIVE_RAISED_FROM_COMMIT`, flip
-//! `IS_THRESHOLD_HIT`, and run the payout (seeds LP reserves, sends
-//! creator tokens, schedules the factory notify SubMsg).
-//! 3. Swap the excess through the freshly-seeded pool, capped at 3% of
-//! the new bluechip reserve to prevent the crosser from capturing a
-//! structural MEV trade. Whatever is above the cap is refunded.
-//! 4. Update commit analytics and clear `THRESHOLD_PROCESSING` so the
-//! next commit can proceed.
-//!
-//! The factory-notify message is attached as a SubMsg (not a plain
-//! CosmosMsg) so a failure on the factory side is recoverable via
-//! `RetryFactoryNotify` rather than reverting the whole crossing tx.
+//!    `USD_RAISED_FROM_COMMIT` / `NATIVE_RAISED_FROM_COMMIT`, then run the
+//!    payout: mint the splits, schedule the distribution airdrop, and emit
+//!    the `MsgCreateBalancerPool` SubMsg that seeds the NATIVE pool.
+//! 3. REFUND the entire post-fee bluechip excess to the crosser via
+//!    `BankMsg::Send` — there is no inline swap anymore (the native pool
+//!    doesn't exist yet within this tx; third-party trading happens on the
+//!    native pool once seeded).
+//! 4. Update commit analytics and clear `THRESHOLD_PROCESSING`.
 
 use cosmwasm_std::{Addr, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128};
 
 use crate::asset::{get_native_denom, TokenInfo};
 use crate::error::ContractError;
 use crate::generic_helpers::{
-    get_bank_transfer_to_msg, trigger_threshold_payout, update_commit_info, update_pool_fee_growth,
+    get_bank_transfer_to_msg, trigger_threshold_payout, update_commit_info,
 };
 use crate::msg::CommitFeeInfo;
 use crate::state::{
-    CommitLimitInfo, PoolAnalytics, PoolFeeState, PoolInfo, PoolSpecs, PoolState,
-    ThresholdPayoutAmounts, COMMIT_LEDGER, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT,
-    POOL_FEE_STATE, POOL_STATE, POST_THRESHOLD_COOLDOWN_BLOCKS,
-    POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    CommitLimitInfo, PoolAnalytics, PoolInfo, PoolSpecs, ThresholdPayoutAmounts, COMMIT_LEDGER,
+    IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
-use crate::swap_helper::{
-    assert_max_spread, compute_swap, update_price_accumulator, usd_to_native_at_rate,
-};
+use crate::swap_helper::usd_to_native_at_rate;
 
 use super::commit_base_attributes;
 
@@ -46,297 +38,114 @@ pub(crate) fn process_threshold_crossing_with_excess(
     asset: &TokenInfo,
     amount: Uint128,
     amount_after_fees: Uint128,
-    commit_value: Uint128,
+    _commit_value: Uint128,
     value_to_threshold: Uint128,
     usd_rate: Uint128,
-    pool_state: &mut PoolState,
-    pool_fee_state: &mut PoolFeeState,
     pool_specs: &PoolSpecs,
     pool_info: &PoolInfo,
     commit_config: &CommitLimitInfo,
     threshold_payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
-    // Live-resolved bluechip protocol-wallet, threaded down from
-    // `execute_commit_logic` so the threshold-cross creator-token
-    // reward mint goes to the CURRENT factory wallet, not the
-    // snapshot pinned on COMMITFEEINFO at pool create time.
     bluechip_wallet: &Addr,
     mut messages: Vec<CosmosMsg>,
-    belief_price: Option<Decimal>,
-    max_spread: Option<Decimal>,
+    _belief_price: Option<Decimal>,
+    _max_spread: Option<Decimal>,
     analytics: &mut PoolAnalytics,
 ) -> Result<Response, ContractError> {
-    // Defensive entry gate: refuse to re-cross. The dispatcher in
-    // `commit::execute_commit_logic` only routes here when
-    // `IS_THRESHOLD_HIT == false`, but if a future call site (or a storage
-    // corruption desyncing `IS_THRESHOLD_HIT` from `USD_RAISED_FROM_COMMIT`)
-    // ever reached this function with the flag already true, the body
-    // would re-run `trigger_threshold_payout` and re-mint the 1.2T
-    // creator-token splits. Failing closed here keeps the no-double-mint
-    // invariant load-bearing rather than incidental.
+    // Defensive entry gate: refuse to re-cross.
     if IS_THRESHOLD_HIT.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::StuckThresholdProcessing);
     }
 
-    // The threshold gap is USD-denominated; convert it back to native
-    // at EXACTLY the rate captured at commit entry (usd_to_native_at_rate
-    // is the inverse of the valuation math), so the split is
+    // The threshold gap is USD-denominated; convert it back to native at
+    // EXACTLY the rate captured at commit entry so the split is
     // arithmetically consistent with the valuation.
     let bluechip_to_threshold = usd_to_native_at_rate(value_to_threshold, usd_rate)?;
-    let bluechip_excess = asset.amount.checked_sub(bluechip_to_threshold)?;
+    let _bluechip_excess = asset.amount.checked_sub(bluechip_to_threshold)?;
 
     let threshold_portion_after_fees = if amount.is_zero() {
         Uint128::zero()
     } else {
         amount_after_fees.multiply_ratio(bluechip_to_threshold, amount)
     };
+    // The entire post-fee excess is refunded to the crosser (no inline
+    // swap). Third-party trades happen on the native pool after seeding.
     let effective_bluechip_excess = amount_after_fees.checked_sub(threshold_portion_after_fees)?;
 
-    // Update commit ledger with only the threshold portion
+    // Update commit ledger with only the threshold portion.
     COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
         Ok(v.unwrap_or_default().checked_add(value_to_threshold)?)
     })?;
     USD_RAISED_FROM_COMMIT.save(deps.storage, &commit_config.commit_amount_for_threshold_usd)?;
-    // NATIVE_RAISED_FROM_COMMIT stores the *net* bluechip entering the
-    // threshold-pool side of the contract's bank balance — i.e. the
-    // threshold-portion-after-fees, not the gross `bluechip_to_threshold`.
-    // The excess (post-fee) goes through the AMM swap inline and lands
-    // directly in `pool_state.reserve0` via the swap accounting below;
-    // it does not enter NATIVE_RAISED. This makes
-    // `pools_bluechip_seed = NATIVE_RAISED_FROM_COMMIT` exact in
-    // `trigger_threshold_payout`, no `(1 - fee_rate)` recovery
-    // multiply needed.
+    // NATIVE_RAISED_FROM_COMMIT stores the NET bluechip entering the pool
+    // for the threshold portion. The excess is refunded, not seeded.
     NATIVE_RAISED_FROM_COMMIT.update::<_, ContractError>(deps.storage, |r| {
         Ok(r.checked_add(threshold_portion_after_fees)?)
     })?;
 
-    // IS_THRESHOLD_HIT.save(true) happens inside trigger_threshold_payout
-    // (called below). That function holds the structural no-double-mint
-    // gate: it checks the flag at entry and sets it only after mint +
-    // seed completes. The handler's own entry gate above
-    // remains as fail-fast so the COMMIT_LEDGER / USD/NATIVE_RAISED
-    // writes don't run on a re-crossing attempt.
-
-    // Arm the post-threshold cooldown. The crosser's own bounded excess
-    // swap (capped at 3% of seeded reserve below) executes in this same
-    // tx — the gate sits on simple_swap / process_post_threshold_commit,
-    // none of which run inside the
-    // crossing tx. So the crosser's privileged excess is unaffected,
-    // while every follower trade in this block plus the next
-    // POST_THRESHOLD_COOLDOWN_BLOCKS blocks is rejected with
-    // PostThresholdCooldownActive. Once the cooldown ends, the
-    // post-threshold swap-cap ramp bounds per-tx MEV for
-    // POST_THRESHOLD_SWAP_RAMP_BLOCKS additional blocks.
-    POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK.save(
-        deps.storage,
-        &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
-    )?;
-
-    // Hold factory_notify aside; it becomes a SubMsg on the final Response
-    // so a factory-side failure is recoverable via RetryFactoryNotify
-    // rather than reverting the whole threshold crossing.
+    // Run the payout: mints + distribution setup + the MsgCreateBalancerPool
+    // SubMsg that seeds the native pool. IS_THRESHOLD_HIT is flipped inside.
     let payout_msgs = trigger_threshold_payout(
         deps.storage,
         pool_info,
-        pool_state,
-        pool_fee_state,
         commit_config,
         threshold_payout,
         fee_info,
         bluechip_wallet,
+        pool_specs.lp_fee,
         &env,
     )?;
     messages.extend(payout_msgs.other_msgs);
-    let factory_notify = payout_msgs.factory_notify;
 
-    // `update_commit_info` is deferred to a single call at the bottom of
-    // this handler so `Committing.last_payment_bluechip` /
-    // `last_payment_usd` reflect the WHOLE crossing tx, not just the
-    // excess portion. Calling update_commit_info twice — once for the
-    // threshold portion, once for the excess — would let the second
-    // call's overwrite of `last_payment_*` leave a frontend showing
-    // the excess-only values as "last commit". Both portions
-    // accumulate into `total_paid_*` and land in `last_payment_*` in a
-    // single write. See the consolidation at the bottom of this
-    // handler.
-
-    // Process the excess as a swap, capped at 3% of pool reserves to keep
-    // the threshold-crosser from capturing a disproportionate share of the
-    // freshly-seeded pool on a single atomic tx. A materially larger cap
-    // would turn every threshold crossing into a guaranteed MEV bonanza
-    // (a large slice of the newly-minted creator tokens at seed price,
-    // front-run by anyone with gas). 3% removes the structural free trade
-    // while still letting a modest overshoot settle in the same tx rather
-    // than requiring a full refund + manual re-swap.
-    let mut return_amt = Uint128::zero();
-    let mut spread_amt = Uint128::zero();
-    let mut commission_amt = Uint128::zero();
+    // Refund the entire post-fee excess to the crosser.
     let mut refunded_excess = Uint128::zero();
-    let mut capped_excess = Uint128::zero();
-
-    if effective_bluechip_excess > Uint128::zero() {
-        // `trigger_threshold_payout` above mutated pool_state/pool_fee_state
-        // in place AND saved them to storage, so the caller-provided refs
-        // already reflect the post-seed pool. No reload needed; we modify
-        // the refs directly through the swap and save once at the end.
-        let offer_pool = pool_state.reserve0;
-        let ask_pool = pool_state.reserve1;
-
-        // Cap the excess swap at 3% of the freshly seeded bluechip reserve.
-        // Any remainder is refunded to the sender — they can swap it in
-        // subsequent transactions where other participants can also trade.
-        let max_excess_swap = offer_pool.multiply_ratio(3u128, 100u128);
-        capped_excess = effective_bluechip_excess.min(max_excess_swap);
-        refunded_excess = effective_bluechip_excess.checked_sub(capped_excess)?;
-
-        if !ask_pool.is_zero() && !offer_pool.is_zero() && !capped_excess.is_zero() {
-            let (ret, sp, comm) =
-                compute_swap(offer_pool, ask_pool, capped_excess, pool_specs.lp_fee)?;
-            return_amt = ret;
-            spread_amt = sp;
-            commission_amt = comm;
-        }
-
-        // Dust-swap guard: mirror the rejection in `simple_swap` and
-        // `process_post_threshold_commit`. If `compute_swap` truncated
-        // `return_amt` to zero against a tiny excess on the freshly-seeded
-        // pool, the rest of this branch would absorb `capped_excess` into
-        // reserve0 (line below) without sending any creator tokens back to
-        // the user — silently donating their excess to LPs. Failing loudly
-        // here forces the user to size their commit so the excess is large
-        // enough to yield a non-zero swap, or accept the refund-only path
-        // by overshooting further than 3% of the seed reserve.
-        if !capped_excess.is_zero() && return_amt.is_zero() {
-            return Err(ContractError::ZeroAmount {});
-        }
-
-        if !capped_excess.is_zero() {
-            // Unconditional slippage protection on the threshold-crossing
-            // excess swap — the check runs even when the caller omits
-            // max_spread, so nobody trades unprotected by accident.
-            //
-            // With the excess cap at 3% of the freshly-seeded bluechip
-            // reserve, the maximum honest x*y=k spread on this swap is
-            // ~3% as well. 5% gives a small buffer for rounding / fee
-            // interaction without leaving a hole wide enough for
-            // front-runners to sandwich the crossing tx.
-            //
-            // Users who explicitly set a tighter `max_spread` get that
-            // stricter bound honored; callers who forgot to specify one
-            // get 5% instead of no protection at all.
-            let effective_max_spread = max_spread.or(Some(Decimal::percent(5)));
-            assert_max_spread(
-                belief_price,
-                effective_max_spread,
-                None,
-                capped_excess,
-                return_amt.checked_add(commission_amt)?,
-                spread_amt,
-            )?;
-        }
-
-        update_price_accumulator(pool_state, env.block.time.seconds())?;
-
-        pool_state.reserve0 = offer_pool.checked_add(capped_excess)?;
-        pool_state.reserve1 = ask_pool.checked_sub(return_amt.checked_add(commission_amt)?)?;
-
-        update_pool_fee_growth(pool_fee_state, pool_state, 0, commission_amt)?;
-        POOL_FEE_STATE.save(deps.storage, pool_fee_state)?;
-        POOL_STATE.save(deps.storage, pool_state)?;
-
-        if !return_amt.is_zero() {
-            // Creator tokens out are a native bank send of the TokenFactory
-            // denom now (pre-migration this was a Cw20ExecuteMsg::Transfer).
-            messages.push(get_bank_transfer_to_msg(
-                &sender,
-                &pool_info.token_denom,
-                return_amt,
-            )?);
-        }
-
-        // Refund the capped portion back to the sender
-        if !refunded_excess.is_zero() {
-            let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
-            messages.push(get_bank_transfer_to_msg(
-                &sender,
-                &bluechip_denom,
-                refunded_excess,
-            )?);
-        }
+    if !effective_bluechip_excess.is_zero() {
+        let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
+        messages.push(get_bank_transfer_to_msg(
+            &sender,
+            &bluechip_denom,
+            effective_bluechip_excess,
+        )?);
+        refunded_excess = effective_bluechip_excess;
     }
 
-    // Single consolidated commit-info update covering BOTH the threshold
-    // portion and the excess portion (if any). Sum the bluechip into one
-    // value and use `commit_value` (= threshold + excess) so
-    // `last_payment_*` reflects the user's full crossing commit rather
-    // than an excess-only snapshot.
-    let bluechip_committed =
-        bluechip_to_threshold.checked_add(bluechip_excess.checked_sub(refunded_excess)?)?;
+    // Commit-info records the threshold portion only (the excess was
+    // refunded). Fees on the whole commit were already transferred out by
+    // the dispatcher's `build_fee_messages`.
     update_commit_info(
         deps.storage,
         &sender,
-        &pool_state.pool_contract_address,
-        bluechip_committed,
-        commit_value,
+        &pool_info.pool_info.contract_addr,
+        bluechip_to_threshold,
+        value_to_threshold,
         env.block.time,
     )?;
 
     THRESHOLD_PROCESSING.save(deps.storage, &false)?;
 
-    // Update analytics — `total_commit_count` is incremented and persisted
-    // by the dispatcher (`commit::execute_commit_logic`); this handler
-    // only mutates the swap-specific fields on the shared `&mut analytics`
-    // when an excess swap actually occurred.
-    if !capped_excess.is_zero() && !return_amt.is_zero() {
-        analytics.total_swap_count += 1;
-        analytics.total_volume_0 = analytics.total_volume_0.saturating_add(capped_excess);
-        analytics.total_volume_1 = analytics.total_volume_1.saturating_add(return_amt);
-        analytics.last_trade_block = env.block.height;
-        analytics.last_trade_timestamp = env.block.time.seconds();
-    }
-
-    // `pool_state` (outer &mut ref) already reflects the committed on-chain
-    // state after trigger_threshold_payout + the optional excess-swap block
-    // above, so no reload from storage is needed here.
     let base = commit_base_attributes(
         "threshold_crossing",
         &sender,
-        &pool_state.pool_contract_address,
+        &pool_info.pool_info.contract_addr,
         analytics.total_commit_count,
         &env,
     );
     Ok(Response::new()
-        .add_submessage(factory_notify)
         .add_messages(messages)
+        .add_submessage(payout_msgs.create_pool)
+        .add_submessage(payout_msgs.factory_notify)
         .add_attributes(base)
         .add_attribute("total_amount_bluechip", asset.amount.to_string())
         .add_attribute(
             "threshold_amount_bluechip",
             bluechip_to_threshold.to_string(),
         )
-        .add_attribute("swap_amount_bluechip", capped_excess.to_string())
-        .add_attribute(
-            "swap_amount_bluechip_pre_cap",
-            effective_bluechip_excess.to_string(),
-        )
-        .add_attribute("bluechip_excess_spread", spread_amt.to_string())
-        .add_attribute("bluechip_excess_returned", return_amt.to_string())
-        .add_attribute("bluechip_excess_commission", commission_amt.to_string())
-        .add_attribute("bluechip_excess_refunded", refunded_excess.to_string())
-        .add_attribute("reserve0_after", pool_state.reserve0.to_string())
-        .add_attribute("reserve1_after", pool_state.reserve1.to_string()))
+        .add_attribute("bluechip_excess_refunded", refunded_excess.to_string()))
 }
 
-/// Threshold-hit-exact handler. Fires when a commit hits the
-/// `commit_amount_for_threshold_usd` target precisely (no excess to
-/// route through the AMM swap). Sister to
-/// [`process_threshold_crossing_with_excess`] — same payout / NFT-accept /
-/// cooldown / factory-notify pipeline, just no swap branch.
-///
-/// Lives here rather than inline in `commit::execute_commit_logic` so
-/// all four phase handlers (`pre_threshold`, `post_threshold`,
-/// `threshold_crossing_*`, distribution batch) sit at the same module
-/// depth.
+/// Threshold-hit-exact handler — commit hits the target precisely (no
+/// excess to refund). Sister to
+/// [`process_threshold_crossing_with_excess`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_threshold_hit_exact(
     deps: &mut DepsMut,
@@ -346,24 +155,15 @@ pub(crate) fn process_threshold_hit_exact(
     amount_after_fees: Uint128,
     commit_value: Uint128,
     new_total: Uint128,
-    pool_state: &mut PoolState,
-    pool_fee_state: &mut PoolFeeState,
+    pool_specs: &PoolSpecs,
     pool_info: &PoolInfo,
     commit_config: &CommitLimitInfo,
     threshold_payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
-    // See `process_threshold_crossing_with_excess` for the rationale on
-    // this parameter — live-resolved factory wallet for the
-    // threshold-cross creator-token reward mint.
     bluechip_wallet: &Addr,
     mut messages: Vec<CosmosMsg>,
     analytics: &PoolAnalytics,
 ) -> Result<Response, ContractError> {
-    // Defensive entry gate — same rationale as the equivalent check at
-    // the top of `process_threshold_crossing_with_excess`. The dispatcher
-    // upstream already routes only when IS_THRESHOLD_HIT == false; this
-    // belt-and-braces gate keeps the no-double-mint invariant load-bearing
-    // against any future call site or storage-state desync.
     if IS_THRESHOLD_HIT.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::StuckThresholdProcessing);
     }
@@ -373,62 +173,41 @@ pub(crate) fn process_threshold_hit_exact(
     })?;
     let final_raised = new_total.min(commit_config.commit_amount_for_threshold_usd);
     USD_RAISED_FROM_COMMIT.save(deps.storage, &final_raised)?;
-    // Store the net-of-fees bluechip that actually enters the contract's
-    // bank balance (see the pre_threshold.rs comment block). Storing net
-    // avoids any dust-stranding mismatch between per-commit fee floors
-    // and a gross-recovery formula in `trigger_threshold_payout`.
     NATIVE_RAISED_FROM_COMMIT
         .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(amount_after_fees)?))?;
-    // IS_THRESHOLD_HIT.save(true) happens inside trigger_threshold_payout
-    // (called below). See the equivalent comment in
-    // `process_threshold_crossing_with_excess` for full rationale.
-
-    // Arm the post-threshold cooldown so other actors can't atomically
-    // sandwich the freshly-seeded pool in the same block (or the next
-    // two). Crossing tx itself is unaffected — the writes here land
-    // before the next tx ever runs the cooldown check. After cooldown
-    // ends, the post-threshold swap-cap ramp caps per-tx MEV for
-    // POST_THRESHOLD_SWAP_RAMP_BLOCKS additional blocks.
-    POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK.save(
-        deps.storage,
-        &(env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
-    )?;
 
     let payout = trigger_threshold_payout(
         deps.storage,
         pool_info,
-        pool_state,
-        pool_fee_state,
         commit_config,
         threshold_payout,
         fee_info,
         bluechip_wallet,
+        pool_specs.lp_fee,
         &env,
     )?;
     messages.extend(payout.other_msgs);
     update_commit_info(
         deps.storage,
         &sender,
-        &pool_state.pool_contract_address,
+        &pool_info.pool_info.contract_addr,
         asset.amount,
         commit_value,
         env.block.time,
     )?;
     THRESHOLD_PROCESSING.save(deps.storage, &false)?;
 
-    // `payout.factory_notify` is attached as a SubMsg so a factory-side
-    // failure lands in the pool's reply handler rather than reverting
-    // the commit.
     let base = commit_base_attributes(
         "threshold_hit_exact",
         &sender,
-        &pool_state.pool_contract_address,
+        &pool_info.pool_info.contract_addr,
         analytics.total_commit_count,
         &env,
     );
     Ok(Response::new()
-        .add_submessage(payout.factory_notify)
         .add_messages(messages)
+        .add_submessage(payout.create_pool)
+        .add_submessage(payout.factory_notify)
         .add_attributes(base)
         .add_attribute("commit_amount_bluechip", asset.amount.to_string())
         .add_attribute("total_raised_after", new_total.to_string()))

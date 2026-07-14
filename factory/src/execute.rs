@@ -38,7 +38,7 @@ pub use config::{
 pub use pool_lifecycle::admin::{
     execute_cancel_emergency_withdraw_pool, execute_emergency_withdraw_pool,
     execute_notify_threshold_crossed, execute_pause_pool, execute_recover_pool_stuck_states,
-    execute_sweep_unclaimed_emergency_shares_pool, execute_unpause_pool,
+    execute_unpause_pool,
 };
 pub use upgrades::{
     execute_apply_pool_upgrade, execute_cancel_pool_upgrade, execute_continue_pool_upgrade,
@@ -47,7 +47,7 @@ pub use upgrades::{
 
 use crate::error::ContractError;
 use crate::msg::ExecuteMsg;
-use crate::pool_creation_reply::{finalize_pool, mint_create_pool};
+use crate::pool_creation_reply::finalize_pool;
 use crate::state::FACTORYINSTANTIATEINFO;
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -57,11 +57,12 @@ use crate::{CONTRACT_NAME, CONTRACT_VERSION};
 
 // Reply step constants (stored in low 8 bits of reply ID).
 //
-// The CW20-instantiate step (`SET_TOKENS`) was removed with the
-// TokenFactory migration — the creator token is now a pool-owned native
-// denom, so the reply chain is NFT-instantiate -> pool-instantiate ->
-// finalize. `MINT_CREATE_POOL` now handles the NFT-created reply.
-pub const MINT_CREATE_POOL: u64 = 2;
+// Phase-2: the CW20-instantiate step AND the position-NFT-instantiate step
+// are both gone. The creator token is a pool-owned native denom and the
+// internal LP system was removed, so the reply chain is a single step:
+// pool-instantiate -> finalize. `FINALIZE_POOL` handles the pool-created
+// reply. (`MINT_CREATE_POOL` = 2 is retired; the constant is left out so a
+// stale reply id routes to `UnknownReplyId`.)
 pub const FINALIZE_POOL: u64 = 3;
 
 /// Encodes a `pool_id` and a reply-chain step into a single SubMsg reply ID.
@@ -150,9 +151,6 @@ pub fn execute(
         }
         ExecuteMsg::CancelEmergencyWithdrawPool { pool_id } => {
             execute_cancel_emergency_withdraw_pool(deps, info, pool_id)
-        }
-        ExecuteMsg::SweepUnclaimedEmergencyPool { pool_id } => {
-            execute_sweep_unclaimed_emergency_shares_pool(deps, info, pool_id)
         }
         ExecuteMsg::RecoverPoolStuckStates {
             pool_id,
@@ -267,7 +265,6 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractEr
 pub fn pool_creation_reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractError> {
     let (pool_id, step) = decode_reply_id(msg.id);
     match step {
-        MINT_CREATE_POOL => mint_create_pool(deps, env, msg, pool_id),
         FINALIZE_POOL => finalize_pool(deps, env, msg, pool_id),
         _ => Err(ContractError::UnknownReplyId { id: msg.id }),
     }

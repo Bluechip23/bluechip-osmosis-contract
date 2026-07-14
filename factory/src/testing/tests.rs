@@ -6,7 +6,7 @@ use cosmwasm_std::{
 
 use crate::asset::{TokenInfo, TokenType};
 use crate::execute::{
-    encode_reply_id, execute, instantiate, pool_creation_reply, FINALIZE_POOL, MINT_CREATE_POOL,
+    encode_reply_id, execute, instantiate, pool_creation_reply, FINALIZE_POOL,
 };
 use crate::mock_querier::{mock_dependencies, WasmMockQuerier};
 use crate::msg::{CreatorTokenInfo, ExecuteMsg};
@@ -57,6 +57,10 @@ fn create_default_instantiate_msg() -> FactoryInstantiate {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     }
@@ -119,6 +123,10 @@ fn proper_initialization() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -169,6 +177,10 @@ fn create_pair() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -298,6 +310,10 @@ fn test_create_pair_with_custom_params() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -332,11 +348,11 @@ fn test_create_pair_with_custom_params() {
     let info = message_info(&admin_addr(), &creation_fee_funds());
     let res = execute(deps.as_mut(), env, info, create_msg).unwrap();
 
-    // 1-3 messages: cw20 instantiate + optional fee BankMsg + optional
-    // surplus-refund BankMsg from the creation-fee gate.
+    // 1-3 messages: pool instantiate submessage + optional fee BankMsg +
+    // optional surplus-refund BankMsg from the creation-fee gate.
     assert!(
         !res.messages.is_empty() && res.messages.len() <= 3,
-        "Should have 1-3 messages (token instantiate + fee + optional surplus refund), got {}",
+        "Should have 1-3 messages (pool instantiate + fee + optional surplus refund), got {}",
         res.messages.len()
     );
 }
@@ -368,24 +384,14 @@ fn simulate_complete_reply_chain(
     pool_id: u64,
     create_res: &cosmwasm_std::Response,
 ) {
-    // Post-migration 2-step reply chain: the create handler dispatched the
-    // NFT instantiate (reply id MINT_CREATE_POOL); its reply instantiates
-    // the pool (reply id FINALIZE_POOL); that reply finalizes/registers.
-    // The former CW20-instantiate (`SET_TOKENS`) step is gone — the pool
-    // owns its own TokenFactory creator denom.
-    let nft_addr = make_addr(&format!("nft_address_{}", pool_id));
-    let nft_reply = create_instantiate_reply(
-        encode_reply_id(pool_id, MINT_CREATE_POOL),
-        nft_addr.as_str(),
-        creation_payload(create_res),
-    );
-    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
-
+    // Phase-2 single-step reply chain: the create handler dispatched the
+    // pool instantiate directly (reply id FINALIZE_POOL); its reply
+    // finalizes/registers the pool. There is no NFT or CW20 instantiate step.
     let pool_addr = make_addr(&format!("pool_address_{}", pool_id));
     let pool_reply = create_instantiate_reply(
         encode_reply_id(pool_id, FINALIZE_POOL),
         pool_addr.as_str(),
-        creation_payload(&res),
+        creation_payload(create_res),
     );
     pool_creation_reply(deps.as_mut(), env.clone(), pool_reply).unwrap();
 }
@@ -484,13 +490,12 @@ fn test_multiple_pool_creation() {
         );
         created_pool_ids.push(pool_id);
 
-        // The payload should carry the creator, the derived subdenom, and
-        // no addresses yet. Subdenom = symbol.to_lowercase(); the symbol is
+        // The payload carries the creator and the derived subdenom.
+        // Subdenom = symbol.to_lowercase(); the symbol is
         // `format!("Token{i}").to_uppercase()` => "TOKEN{i}".
         assert_eq!(temp.pool_id, pool_id);
         assert_eq!(temp.temp_creator_wallet, admin_addr());
         assert_eq!(temp.subdenom, format!("token{}", i));
-        assert!(temp.nft_addr.is_none());
 
         // Simulate complete reply chain with the actual pool_id
         simulate_complete_reply_chain(&mut deps, env.clone(), pool_id, &res);
@@ -524,6 +529,10 @@ fn test_complete_pool_creation_flow() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -560,13 +569,13 @@ fn test_complete_pool_creation_flow() {
         !res.attributes.is_empty(),
         "Should have response attributes"
     );
-    // 1-3 messages: NFT instantiate submessage (always) + fee BankMsg to
+    // 1-3 messages: pool instantiate submessage (always) + fee BankMsg to
     // wallet (when required > 0) + optional surplus refund BankMsg when the
-    // caller overpays the flat native fee. The factory no longer
-    // instantiates a CW20 for the creator token.
+    // caller overpays the flat native fee. Phase-2: the factory instantiates
+    // neither a CW20 nor an NFT — the pool owns its TokenFactory creator denom.
     assert!(
         !res.messages.is_empty() && res.messages.len() <= 3,
-        "Should have 1-3 messages (NFT instantiate + fee + optional surplus refund), got {}",
+        "Should have 1-3 messages (pool instantiate + fee + optional surplus refund), got {}",
         res.messages.len()
     );
 
@@ -578,26 +587,10 @@ fn test_complete_pool_creation_flow() {
     assert_eq!(temp.temp_creator_wallet, admin_addr());
     // subdenom = symbol.to_lowercase(); symbol "TEST" => "test".
     assert_eq!(temp.subdenom, "test");
-    assert!(temp.nft_addr.is_none());
 
-    // Step 1: NFT-created reply -> instantiates the pool. (The former
-    // CW20-instantiate `SET_TOKENS` step no longer exists.)
-    let nft_addr = make_addr("nft_address");
-    let nft_reply = create_instantiate_reply(
-        encode_reply_id(pool_id, MINT_CREATE_POOL),
-        nft_addr.as_str(),
-        creation_payload(&res),
-    );
-    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
-
-    // The outgoing payload now carries the NFT address; the single
-    // outgoing submessage is the pool instantiate.
-    let temp: TempPoolCreation = from_json(creation_payload(&res)).unwrap();
-    assert_eq!(temp.nft_addr, Some(nft_addr.clone()));
-    assert_eq!(temp.subdenom, "test");
-    assert_eq!(res.messages.len(), 1);
-
-    // Step 2: Pool Finalization Reply
+    // Phase-2 single-step reply chain: the create handler dispatched the
+    // pool instantiate directly (reply id FINALIZE_POOL); its reply
+    // finalizes/registers the pool. There is no NFT or CW20 step.
     let pool_addr = make_addr("pool_address");
     let pool_reply = create_instantiate_reply(
         encode_reply_id(pool_id, FINALIZE_POOL),
@@ -618,13 +611,22 @@ fn test_complete_pool_creation_flow() {
         }
     );
 
-    // finalize_pool emits two messages (no CW20 minter handoff anymore):
-    // 1. CW721 TransferOwnership (stage the pool as pending_owner)
-    // 2. AcceptNftOwnership {} dispatched to the pool itself, mirroring
-    //    the symmetric two-phase NFT-accept flow. The pool's handler then
-    //    sends the matching AcceptOwnership back to the CW721, closing the
-    //    pending-ownership window inside this create tx.
-    assert_eq!(res.messages.len(), 2);
+    // finalize_pool only registers the pool across the three registry maps;
+    // it emits no messages (no NFT ownership handoff anymore).
+    assert!(res.messages.is_empty());
+    // register_pool writes all three coupled registry maps atomically.
+    assert_eq!(
+        crate::state::POOL_ID_BY_ADDRESS
+            .load(&deps.storage, pool_addr.clone())
+            .unwrap(),
+        pool_id
+    );
+    assert!(crate::state::POOLS_BY_CONTRACT_ADDRESS.has(&deps.storage, pool_addr.clone()));
+    let pair_key = crate::state::canonical_pair_key(&pool_by_id.pool_token_info);
+    assert_eq!(
+        crate::state::PAIRS.load(&deps.storage, pair_key).unwrap(),
+        pool_id
+    );
 }
 
 #[test]
@@ -667,6 +669,10 @@ fn test_config() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -704,6 +710,10 @@ fn test_reply_handling() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -728,23 +738,22 @@ fn test_reply_handling() {
     };
 
     // The creation context arrives in the Reply payload, exactly as the
-    // create handler attaches it to the NFT-instantiate SubMsg. (The
-    // former CW20-instantiate `SET_TOKENS` step is gone; the first reply
-    // step is now the NFT-created reply handled by `mint_create_pool`.)
+    // create handler attaches it to the pool-instantiate SubMsg. Phase-2:
+    // the reply chain is a single step — the pool-instantiate reply
+    // (reply id FINALIZE_POOL) finalizes and registers the pool.
     let temp = TempPoolCreation {
         pool_id,
         temp_creator_wallet: the_admin.clone(),
         temp_pool_info: pool_msg,
         subdenom: "test".to_string(),
-        nft_addr: None,
     };
 
-    let contract_addr_obj = make_addr("nft_contract_address");
+    let contract_addr_obj = make_addr("pool_contract_address");
     let contract_addr = contract_addr_obj.as_str();
 
-    // Create the NFT-created reply with pool_id encoded in the reply ID.
+    // Create the pool-instantiate reply with pool_id encoded in the reply ID.
     let reply_msg = Reply {
-        id: encode_reply_id(pool_id, MINT_CREATE_POOL),
+        id: encode_reply_id(pool_id, FINALIZE_POOL),
         result: SubMsgResult::Ok(SubMsgResponse {
             events: vec![
                 Event::new("instantiate").add_attribute("_contract_address", contract_addr)
@@ -759,17 +768,23 @@ fn test_reply_handling() {
     let res = pool_creation_reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
 
     assert_eq!(res.attributes.len(), 3);
-    assert_eq!(res.attributes[0], ("action", "nft_created_successfully"));
-    assert_eq!(res.attributes[1], ("nft_address", contract_addr));
+    assert_eq!(res.attributes[0], ("action", "pool_created_successfully"));
+    assert_eq!(res.attributes[1], ("pool_address", contract_addr));
     assert_eq!(res.attributes[2], ("pool_id", "1"));
+    // finalize_pool registers only; no outgoing messages.
+    assert!(res.messages.is_empty());
 
-    // The outgoing payload (attached to the pool-instantiate SubMsg) is
-    // the single source of truth for the NFT address discovered here.
-    let updated: TempPoolCreation = from_json(creation_payload(&res)).unwrap();
-    assert_eq!(updated.nft_addr, Some(Addr::unchecked(contract_addr)));
-    assert_eq!(updated.subdenom, "test");
-    assert_eq!(updated.pool_id, pool_id);
-    assert_eq!(updated.temp_creator_wallet, the_admin);
+    // The pool is now registered with the reconstructed pool-owned creator
+    // denom `factory/{pool_addr}/{subdenom}`.
+    let pool_by_id = POOLS_BY_ID.load(&deps.storage, pool_id).unwrap();
+    assert_eq!(pool_by_id.pool_id, pool_id);
+    assert_eq!(pool_by_id.creator_pool_addr, contract_addr_obj);
+    assert_eq!(
+        pool_by_id.pool_token_info[1],
+        TokenType::CreatorToken {
+            denom: format!("factory/{}/test", contract_addr),
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,6 +1347,10 @@ fn create_pair_sets_marketing_admin_to_creator() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };

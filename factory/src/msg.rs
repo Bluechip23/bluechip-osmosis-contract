@@ -28,8 +28,6 @@ pub struct CreatePoolReplyMsg {
     /// Replaces the old `token_address` (CW20 contract) and
     /// `cw20_token_contract_id`.
     pub subdenom: String,
-    //address called by the pool to mint new liquidity position NFTs.
-    pub position_nft_address: Addr,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
 }
@@ -92,14 +90,6 @@ pub enum ExecuteMsg {
         pool_id: u64,
     },
     CancelEmergencyWithdrawPool {
-        pool_id: u64,
-    },
-    /// forwards `SweepUnclaimedEmergencyShares {}`
-    /// to a pool whose 1-year claim dormancy has elapsed. Admin-only;
-    /// the pool itself verifies both the dormancy and the
-    /// factory-as-sender invariants before sweeping its unclaimed
-    /// residual to the bluechip wallet.
-    SweepUnclaimedEmergencyPool {
         pool_id: u64,
     },
     RecoverPoolStuckStates {

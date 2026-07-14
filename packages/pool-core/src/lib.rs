@@ -29,16 +29,8 @@
 
 pub mod admin;
 pub mod asset;
-/// SubMsg-based deposit balance verification reply handler.
-/// The consuming contract's `reply` entry point dispatches
-/// `DEPOSIT_VERIFY_REPLY_ID` here to confirm the actual CW20 balance
-/// delta on the pool matches the credited deposit amount. See module
-/// docs for the threat model.
-pub mod balance_verify;
 pub mod error;
 pub mod generic;
-pub mod liquidity;
-pub mod liquidity_helpers;
 pub mod msg;
 /// Osmosis-native message builders (TokenFactory / GAMM / poolmanager)
 /// backing the migration off the internal CW20 AMM.

@@ -13,7 +13,7 @@ use crate::msg::{
     PoolAnalyticsResponse, PoolCommitResponse, QueryMsg,
 };
 use crate::state::{
-    COMMITFEEINFO, COMMIT_INFO, COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION, CREATOR_FEE_POT,
+    COMMITFEEINFO, COMMIT_INFO, COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION,
     DISTRIBUTION_STALL_TIMEOUT_SECONDS, DISTRIBUTION_STATE, IS_THRESHOLD_HIT,
     NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY, POOL_COMMITS_QUERY_DEFAULT_LIMIT,
     POOL_COMMITS_QUERY_MAX_LIMIT, THRESHOLD_CROSSED_AT, USD_RAISED_FROM_COMMIT,
@@ -30,24 +30,11 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         // Shared
         QueryMsg::PoolState {} => to_json_binary(&query_pool_state(deps)?),
         QueryMsg::FeeState {} => to_json_binary(&query_fee_state(deps)?),
-        QueryMsg::Position { position_id } => to_json_binary(&query_position(deps, position_id)?),
-        QueryMsg::Positions { start_after, limit } => {
-            to_json_binary(&query_positions(deps, start_after, limit)?)
-        }
-        QueryMsg::PositionsByOwner {
-            owner,
-            start_after,
-            limit,
-        } => to_json_binary(&query_positions_by_owner(deps, owner, start_after, limit)?),
         QueryMsg::PoolInfo {} => to_json_binary(&query_pool_info(deps)?),
         QueryMsg::Pair {} => to_json_binary(&query_pair_info(deps)?),
         QueryMsg::Simulation { offer_asset } => {
             to_json_binary(&query_simulation(deps, offer_asset)?)
         }
-        QueryMsg::ReverseSimulation { ask_asset } => {
-            to_json_binary(&query_reverse_simulation(deps, ask_asset)?)
-        }
-        QueryMsg::CumulativePrices {} => to_json_binary(&query_cumulative_prices(deps, env)?),
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
         QueryMsg::FeeInfo {} => to_json_binary(&query_fee_info(deps)?),
         QueryMsg::GetPoolState {} => query_for_factory(deps, env, PoolQueryMsg::GetPoolState {}),
@@ -110,19 +97,17 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
 /// earnings state exists yet.
 pub fn query_creator_earnings(deps: Deps, env: &Env) -> StdResult<CreatorEarningsResponse> {
     let fee_info = COMMITFEEINFO.load(deps.storage)?;
-    let fee_pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
     let excess =
         CREATOR_EXCESS_POSITION
             .may_load(deps.storage)?
             .map(|e| CreatorExcessEarningsResponse {
-                bluechip_amount: e.bluechip_amount,
-                token_amount: e.token_amount,
+                excess_bluechip: e.excess_bluechip,
+                total_seeded_bluechip: e.total_seeded_bluechip,
                 unlock_time: e.unlock_time,
                 claimable_now: env.block.time >= e.unlock_time,
             });
     Ok(CreatorEarningsResponse {
         creator_wallet_address: fee_info.creator_wallet_address,
-        fee_pot,
         excess,
         is_threshold_hit: IS_THRESHOLD_HIT.may_load(deps.storage)?.unwrap_or(false),
         threshold_crossed_at: THRESHOLD_CROSSED_AT.may_load(deps.storage)?,

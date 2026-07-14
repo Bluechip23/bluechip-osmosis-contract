@@ -2,7 +2,7 @@ use crate::asset::{TokenInfo, TokenType};
 use crate::contract::{execute, instantiate};
 use crate::msg::CommitFeeInfo;
 use crate::msg::{ExecuteMsg, PoolConfigUpdate, PoolInstantiateMsg};
-use crate::state::{ThresholdPayoutAmounts, POOL_PAUSED, POOL_SPECS, POOL_STATE};
+use crate::state::{ThresholdPayoutAmounts, POOL_PAUSED, POOL_SPECS};
 use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env, MockApi};
 use cosmwasm_std::{
     to_json_binary, Addr, Binary, Coin, ContractResult, Decimal, SystemError, SystemResult,
@@ -75,7 +75,6 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
             commit_fee_creator: Decimal::percent(1),
         },
         commit_threshold_limit_usd: Uint128::new(1000),
-        position_nft_address: Addr::unchecked("nft_addr"),
         subdenom: "ucreator".to_string(),
         max_bluechip_lock_per_pool: Uint128::new(10000),
         creator_excess_liquidity_lock_days: 7,
@@ -152,11 +151,6 @@ fn test_emergency_withdraw() {
     // for the (admin-tunable) delay; install the mock before triggering it.
     install_factory_emergency_delay_mock(&mut deps, "factory_addr");
 
-    // Inject some liquidity mock manually for testing.
-    let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    pool_state.reserve0 = Uint128::new(1000); // 1000 ublue
-    pool_state.reserve1 = Uint128::new(2000); // 2000 creator token
-    POOL_STATE.save(&mut deps.storage, &pool_state).unwrap();
     let initiate_res = execute(
         deps.as_mut(),
         base_env.clone(),
@@ -174,11 +168,6 @@ fn test_emergency_withdraw() {
 
     // Pool should be paused immediately on initiation.
     assert!(POOL_PAUSED.load(&deps.storage).unwrap());
-
-    // No funds moved yet — reserves are still intact.
-    let ps = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(ps.reserve0, Uint128::new(1000));
-    assert_eq!(ps.reserve1, Uint128::new(2000));
 
     // Calling again before timelock should fail.
     let early_err = execute(
@@ -208,21 +197,16 @@ fn test_emergency_withdraw() {
         .unwrap();
     assert_eq!(action.value, "emergency_withdraw");
 
-    // LP-owned funds (reserve0=1000, reserve1=2000) are
-    // escrowed for per-position claims via ClaimEmergencyShare rather
-    // than swept to the bluechip wallet. The response's `amount0/amount1`
-    // attributes report ONLY the funds actually swept (CREATOR_FEE_POT +
-    // creator-excess-position). Both are empty in this test setup, so
-    // sweep is zero on both sides and no transfer messages are emitted.
+    // Phase-2 drain sweeps the pool's held `gamm/pool/{id}` LP shares to
+    // the bluechip wallet. This test never set POOL_ID and holds no LP
+    // shares, so the sweep is zero on both sides and no messages are
+    // emitted.
     let amount0 = exec_res
         .attributes
         .iter()
         .find(|a| a.key == "amount0")
         .unwrap();
-    assert_eq!(
-        amount0.value, "0",
-        "LP funds escrow, only non-LP buckets sweep — both empty here"
-    );
+    assert_eq!(amount0.value, "0");
 
     let amount1 = exec_res
         .attributes
@@ -231,25 +215,11 @@ fn test_emergency_withdraw() {
         .unwrap();
     assert_eq!(amount1.value, "0");
 
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(pool_state.reserve0, Uint128::zero());
-    assert_eq!(pool_state.reserve1, Uint128::zero());
-
-    // No transfer messages — sweep was zero on both sides.
+    // No transfer messages — no LP shares to sweep.
     assert_eq!(exec_res.messages.len(), 0);
 
-    // The LP-owned funds are captured in EMERGENCY_DRAIN_SNAPSHOT
-    // for per-position claims. Verify the snapshot recorded the
-    // pre-drain reserves correctly so positions can claim against
-    // them.
-    let snap = pool_core::state::EMERGENCY_DRAIN_SNAPSHOT
-        .load(&deps.storage)
-        .expect("snapshot must exist post-Phase-2");
-    assert_eq!(snap.reserve0_at_drain, Uint128::new(1000));
-    assert_eq!(snap.reserve1_at_drain, Uint128::new(2000));
-    assert_eq!(snap.total_claimed_0, Uint128::zero());
-    assert_eq!(snap.total_claimed_1, Uint128::zero());
-    assert!(!snap.residual_swept);
+    // Pool is permanently drained.
+    assert!(pool_core::state::EMERGENCY_DRAINED.load(&deps.storage).unwrap());
 }
 
 #[test]
@@ -265,12 +235,6 @@ fn test_cancel_emergency_withdraw() {
     // execute_emergency_withdraw_initiate queries the factory at runtime
     // for the (admin-tunable) delay; install the mock before triggering it.
     install_factory_emergency_delay_mock(&mut deps, "factory_addr");
-
-    // Inject reserves.
-    let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    pool_state.reserve0 = Uint128::new(500);
-    pool_state.reserve1 = Uint128::new(1000);
-    POOL_STATE.save(&mut deps.storage, &pool_state).unwrap();
 
     // Phase 1: initiate
     execute(
@@ -298,11 +262,8 @@ fn test_cancel_emergency_withdraw() {
         .unwrap();
     assert_eq!(action.value, "emergency_withdraw_cancelled");
 
-    // Pool unpaused, reserves intact.
+    // Pool unpaused.
     assert!(!POOL_PAUSED.load(&deps.storage).unwrap());
-    let ps = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(ps.reserve0, Uint128::new(500));
-    assert_eq!(ps.reserve1, Uint128::new(1000));
 }
 
 #[test]

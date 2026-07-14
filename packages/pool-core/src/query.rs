@@ -1,33 +1,28 @@
 //! Shared query handlers.
 //!
-//! Every reader of shared state moves here; commit-only queries
-//! (`query_check_threshold_limit`, `query_pool_committers`,
-//! `query_factory_notify_status`) and the top-level `pub fn query`
-//! dispatch stay per-contract in creator-pool.
+//! Phase-2: the internal AMM is gone. Reserves, positions, price
+//! accumulators and internal fee accounting no longer exist locally.
+//! Queries that used to read that state now either:
+//!  - route to the native Osmosis pool (e.g. `Simulation` via the
+//!    poolmanager `estimate_swap_exact_amount_in` query), or
+//!  - return zero/default for a retained wire field, documented inline.
 //!
 //! `query_analytics` is factored: `query_analytics_core` assembles the
 //! shared-state portion of `PoolAnalyticsResponse`; the consuming
-//! contract's wrapper supplies the commit-adjacent fields
-//! (`threshold_status`, `total_usd_raised`, `total_bluechip_raised`).
-//! Creator-pool loads commit ledger state for them.
+//! contract's wrapper supplies the commit-adjacent fields.
 
 use crate::asset::TokenInfo;
-use crate::liquidity_helpers::calculate_unclaimed_fees;
 use crate::msg::{
-    CommitStatus, ConfigResponse, CumulativePricesResponse, FeeInfoResponse, PoolAnalyticsResponse,
-    PoolFeeStateResponse, PoolInfoResponse, PoolStateResponse, PositionResponse, PositionsResponse,
-    ReverseSimulationResponse, SimulationResponse,
+    CommitStatus, ConfigResponse, FeeInfoResponse, PoolAnalyticsResponse, PoolFeeStateResponse,
+    PoolInfoResponse, PoolStateResponse, SimulationResponse,
 };
 use crate::state::{
-    PoolDetails, PoolFeeState, Position, COMMITFEEINFO, IS_THRESHOLD_HIT, LIQUIDITY_POSITIONS,
-    NEXT_POSITION_ID, OWNER_POSITIONS, POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED,
-    POOL_SPECS, POOL_STATE,
+    PoolDetails, COMMITFEEINFO, IS_THRESHOLD_HIT, POOL_ANALYTICS, POOL_ID, POOL_INFO, POOL_PAUSED,
+    POOL_STATE,
 };
-use crate::swap::{compute_offer_amount, compute_swap, update_price_accumulator};
-use cosmwasm_std::{
-    to_json_binary, Binary, Decimal, Deps, Env, Order, StdError, StdResult, Uint128,
-};
-use cw_storage_plus::Bound;
+use cosmwasm_std::{to_json_binary, Binary, Deps, Env, StdError, StdResult, Uint128};
+use std::str::FromStr;
+use osmosis_std::types::osmosis::poolmanager::v1beta1::{PoolmanagerQuerier, SwapAmountInRoute};
 use pool_factory_interfaces::{
     AllPoolsResponse, IsPausedResponse, PoolQueryMsg, PoolStateResponseForFactory,
 };
@@ -42,121 +37,65 @@ pub fn query_pair_info(deps: Deps) -> StdResult<PoolDetails> {
     Ok(pool_info.pool_info)
 }
 
-/// Quote against POOL_STATE's accounting reserves — the exact values
-/// `execute_simple_swap` trades against — NOT the contract's bank/cw20
-/// balances. Balances also hold non-AMM funds (LP fee reserves, the
-/// creator fee pot, pre-threshold commit proceeds, emergency escrow),
-/// so a balance-based quote overstates depth and returns optimistic
-/// amounts that execution then undershoots.
+/// Extract the denom string of a `TokenType`.
+fn denom_of(t: &crate::asset::TokenType) -> String {
+    use crate::asset::TokenType;
+    match t {
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom.clone(),
+    }
+}
+
+/// Simulate a swap against the NATIVE Osmosis pool via the poolmanager
+/// `estimate_swap_exact_amount_in` query. `spread_amount` /
+/// `commission_amount` are not returned by that estimate, so they are
+/// reported as zero — callers wanting the full breakdown must inspect the
+/// native pool directly. Errors (pre-threshold pool with no `POOL_ID`, or
+/// an estimate query failure) propagate.
 pub fn query_simulation(deps: Deps, offer_asset: TokenInfo) -> StdResult<SimulationResponse> {
     let pool_info = POOL_INFO.load(deps.storage)?;
-    let pool_specs = POOL_SPECS.load(deps.storage)?;
-    let pool_state = POOL_STATE.load(deps.storage)?;
-
     let infos = &pool_info.pool_info.asset_infos;
-    let (offer_reserve, ask_reserve) = if offer_asset.info.equal(&infos[0]) {
-        (pool_state.reserve0, pool_state.reserve1)
+
+    let (offer_denom, ask_denom) = if offer_asset.info.equal(&infos[0]) {
+        (denom_of(&infos[0]), denom_of(&infos[1]))
     } else if offer_asset.info.equal(&infos[1]) {
-        (pool_state.reserve1, pool_state.reserve0)
+        (denom_of(&infos[1]), denom_of(&infos[0]))
     } else {
         return Err(StdError::generic_err(
             "Given offer asset does not belong in the pair",
         ));
     };
 
-    // Zero accounting reserves (pre-threshold commit pool, or a drained
-    // pool) must return a clean error: `compute_swap` divides by the
-    // offer reserve and would otherwise panic the query.
-    if offer_reserve.is_zero() || ask_reserve.is_zero() {
-        return Err(StdError::generic_err(
-            "Pool has no active liquidity to quote against (pre-threshold or drained)",
-        ));
-    }
+    let pool_id = POOL_ID.may_load(deps.storage)?.ok_or_else(|| {
+        StdError::generic_err("Pool has not been seeded yet (pre-threshold); nothing to quote")
+    })?;
 
-    let (return_amount, spread_amount, commission_amount) = compute_swap(
-        offer_reserve,
-        ask_reserve,
-        offer_asset.amount,
-        pool_specs.lp_fee,
+    let querier = PoolmanagerQuerier::new(&deps.querier);
+    let token_in = format!("{}{}", offer_asset.amount, offer_denom);
+    let resp = querier.estimate_swap_exact_amount_in(
+        String::new(),
+        pool_id,
+        token_in,
+        vec![SwapAmountInRoute {
+            pool_id,
+            token_out_denom: ask_denom,
+        }],
     )?;
+    let return_amount = Uint128::from_str(&resp.token_out_amount)
+        .map_err(|e| StdError::generic_err(format!("invalid estimate token_out_amount: {}", e)))?;
 
     Ok(SimulationResponse {
         return_amount,
-        spread_amount,
-        commission_amount,
-    })
-}
-
-pub fn query_reverse_simulation(
-    deps: Deps,
-    ask_asset: TokenInfo,
-) -> StdResult<ReverseSimulationResponse> {
-    let pool_info = POOL_INFO.load(deps.storage)?;
-    let pool_specs = POOL_SPECS.load(deps.storage)?;
-    let pool_state = POOL_STATE.load(deps.storage)?;
-
-    // Same accounting-reserve sourcing as `query_simulation` — see the
-    // doc-comment there.
-    let infos = &pool_info.pool_info.asset_infos;
-    let (offer_reserve, ask_reserve) = if ask_asset.info.equal(&infos[0]) {
-        (pool_state.reserve1, pool_state.reserve0)
-    } else if ask_asset.info.equal(&infos[1]) {
-        (pool_state.reserve0, pool_state.reserve1)
-    } else {
-        return Err(StdError::generic_err(
-            "Given ask asset doesn't belong to pairs",
-        ));
-    };
-
-    // Same zero-reserve guard as `query_simulation`.
-    if offer_reserve.is_zero() || ask_reserve.is_zero() {
-        return Err(StdError::generic_err(
-            "Pool has no active liquidity to quote against (pre-threshold or drained)",
-        ));
-    }
-
-    let (offer_amount, spread_amount, commission_amount) = compute_offer_amount(
-        offer_reserve,
-        ask_reserve,
-        ask_asset.amount,
-        pool_specs.lp_fee,
-    )?;
-
-    Ok(ReverseSimulationResponse {
-        offer_amount,
-        spread_amount,
-        commission_amount,
-    })
-}
-
-pub fn query_cumulative_prices(deps: Deps, env: Env) -> StdResult<CumulativePricesResponse> {
-    let pool_info = POOL_INFO.load(deps.storage)?;
-    let mut pool_state = POOL_STATE.load(deps.storage)?;
-    let contract_addr = pool_info.pool_info.contract_addr.clone();
-    let assets = pool_info
-        .pool_info
-        .query_pools(&deps.querier, contract_addr)?;
-
-    pool_state.reserve0 = assets[0].amount;
-    pool_state.reserve1 = assets[1].amount;
-
-    update_price_accumulator(&mut pool_state, env.block.time.seconds())
-        .map_err(|e| StdError::generic_err(format!("Failed to update price accumulator: {}", e)))?;
-
-    let price0_cumulative_last = pool_state.price0_cumulative_last;
-    let price1_cumulative_last = pool_state.price1_cumulative_last;
-
-    Ok(CumulativePricesResponse {
-        assets,
-        price0_cumulative_last,
-        price1_cumulative_last,
+        spread_amount: Uint128::zero(),
+        commission_amount: Uint128::zero(),
     })
 }
 
 pub fn query_config(deps: Deps) -> StdResult<ConfigResponse> {
-    let pool_state = POOL_STATE.load(deps.storage)?;
+    // `block_time_last` was part of the retired internal price accumulator;
+    // reported as zero now.
+    let _ = deps;
     Ok(ConfigResponse {
-        block_time_last: pool_state.block_time_last,
+        block_time_last: 0,
         params: None,
     })
 }
@@ -172,146 +111,81 @@ pub fn query_check_commit(deps: Deps) -> StdResult<bool> {
     IS_THRESHOLD_HIT.load(deps.storage)
 }
 
+/// Best-effort read of the pool's held liquidity on the native Osmosis
+/// pool: `(reserve0, reserve1)` matching `asset_infos` order. Returns
+/// `(0, 0)` when the pool has not been seeded or the native query fails
+/// (keeps queries robust in unit-test environments with no gamm module).
+fn native_reserves(deps: Deps) -> (Uint128, Uint128) {
+    let Ok(pool_info) = POOL_INFO.load(deps.storage) else {
+        return (Uint128::zero(), Uint128::zero());
+    };
+    let Ok(Some(pool_id)) = POOL_ID.may_load(deps.storage) else {
+        return (Uint128::zero(), Uint128::zero());
+    };
+    let querier = PoolmanagerQuerier::new(&deps.querier);
+    let Ok(resp) = querier.total_pool_liquidity(pool_id) else {
+        return (Uint128::zero(), Uint128::zero());
+    };
+    let denom0 = denom_of(&pool_info.pool_info.asset_infos[0]);
+    let denom1 = denom_of(&pool_info.pool_info.asset_infos[1]);
+    let find = |d: &str| -> Uint128 {
+        resp.liquidity
+            .iter()
+            .find(|c| c.denom == d)
+            .and_then(|c| Uint128::from_str(&c.amount).ok())
+            .unwrap_or_default()
+    };
+    (find(&denom0), find(&denom1))
+}
+
 pub fn query_pool_state(deps: Deps) -> StdResult<PoolStateResponse> {
-    let pool_state = POOL_STATE.load(deps.storage)?;
+    let (reserve0, reserve1) = native_reserves(deps);
     Ok(PoolStateResponse {
-        nft_ownership_accepted: pool_state.nft_ownership_accepted,
-        reserve0: pool_state.reserve0,
-        reserve1: pool_state.reserve1,
-        total_liquidity: pool_state.total_liquidity,
-        block_time_last: pool_state.block_time_last,
+        // `nft_ownership_accepted` is retained for wire compatibility; the
+        // position-NFT integration was removed in Phase-2.
+        nft_ownership_accepted: false,
+        reserve0,
+        reserve1,
+        // total_liquidity is the pool-held gamm LP-share amount; not
+        // surfaced here (query the native pool by `gamm/pool/{id}` denom).
+        total_liquidity: Uint128::zero(),
+        block_time_last: 0,
     })
 }
 
-pub fn query_fee_state(deps: Deps) -> StdResult<PoolFeeStateResponse> {
-    let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
+pub fn query_fee_state(_deps: Deps) -> StdResult<PoolFeeStateResponse> {
+    // Internal fee-growth accounting was removed; swap fees accrue
+    // natively to the pool-held seed LP. Reported as zero.
     Ok(PoolFeeStateResponse {
-        fee_growth_global_0: pool_fee_state.fee_growth_global_0,
-        fee_growth_global_1: pool_fee_state.fee_growth_global_1,
-        total_fees_collected_0: pool_fee_state.total_fees_collected_0,
-        total_fees_collected_1: pool_fee_state.total_fees_collected_1,
-    })
-}
-
-/// Build a `PositionResponse` from a pre-loaded `Position` and a pre-loaded
-/// `PoolFeeState`. Lets list queries load `POOL_FEE_STATE` once and reuse it
-/// across every row instead of reloading per-position.
-fn build_position_response(
-    position_id: String,
-    position: Position,
-    pool_fee_state: &PoolFeeState,
-) -> StdResult<PositionResponse> {
-    let unclaimed_fees_0 = calculate_unclaimed_fees(
-        position.liquidity,
-        position.fee_growth_inside_0_last,
-        pool_fee_state.fee_growth_global_0,
-    )?
-    .checked_add(position.unclaimed_fees_0)?;
-    let unclaimed_fees_1 = calculate_unclaimed_fees(
-        position.liquidity,
-        position.fee_growth_inside_1_last,
-        pool_fee_state.fee_growth_global_1,
-    )?
-    .checked_add(position.unclaimed_fees_1)?;
-
-    Ok(PositionResponse {
-        position_id,
-        liquidity: position.liquidity,
-        owner: position.owner,
-        fee_growth_inside_0_last: position.fee_growth_inside_0_last,
-        fee_growth_inside_1_last: position.fee_growth_inside_1_last,
-        created_at: position.created_at,
-        last_fee_collection: position.last_fee_collection,
-        unclaimed_fees_0,
-        unclaimed_fees_1,
-    })
-}
-
-pub fn query_position(deps: Deps, position_id: String) -> StdResult<PositionResponse> {
-    let position = LIQUIDITY_POSITIONS.load(deps.storage, &position_id)?;
-    let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-    build_position_response(position_id, position, &pool_fee_state)
-}
-
-pub fn query_positions(
-    deps: Deps,
-    start_after: Option<String>,
-    limit: Option<u32>,
-) -> StdResult<PositionsResponse> {
-    let limit = limit.unwrap_or(10).min(30) as usize;
-    let start = start_after.as_ref().map(|s| Bound::exclusive(s.as_str()));
-    let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-
-    let liquidity_positions: StdResult<Vec<_>> = LIQUIDITY_POSITIONS
-        .range(deps.storage, start, None, Order::Ascending)
-        .take(limit)
-        .map(|item| {
-            let (position_id, position) = item?;
-            build_position_response(position_id, position, &pool_fee_state)
-        })
-        .collect();
-
-    Ok(PositionsResponse {
-        positions: liquidity_positions?,
-    })
-}
-
-pub fn query_positions_by_owner(
-    deps: Deps,
-    owner: String,
-    start_after: Option<String>,
-    limit: Option<u32>,
-) -> StdResult<PositionsResponse> {
-    let owner_addr = deps.api.addr_validate(&owner)?;
-    let limit = limit.unwrap_or(10).min(30) as usize;
-    let start = start_after
-        .as_ref()
-        .map(|s| Bound::<&str>::exclusive(s.as_str()));
-    let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-
-    let positions: StdResult<Vec<_>> = OWNER_POSITIONS
-        .prefix(&owner_addr)
-        .range(deps.storage, start, None, Order::Ascending)
-        .take(limit)
-        .map(|item| {
-            let (position_id, _) = item?;
-            let position = LIQUIDITY_POSITIONS.load(deps.storage, &position_id)?;
-            build_position_response(position_id, position, &pool_fee_state)
-        })
-        .collect();
-
-    Ok(PositionsResponse {
-        positions: positions?,
+        fee_growth_global_0: cosmwasm_std::Decimal::zero(),
+        fee_growth_global_1: cosmwasm_std::Decimal::zero(),
+        total_fees_collected_0: Uint128::zero(),
+        total_fees_collected_1: Uint128::zero(),
     })
 }
 
 pub fn query_pool_info(deps: Deps) -> StdResult<PoolInfoResponse> {
-    let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-    let next_position_id = NEXT_POSITION_ID.load(deps.storage)?;
-    let pool_state = POOL_STATE.load(deps.storage)?;
-
+    let (reserve0, reserve1) = native_reserves(deps);
     Ok(PoolInfoResponse {
         pool_state: PoolStateResponse {
-            nft_ownership_accepted: pool_state.nft_ownership_accepted,
-            reserve0: pool_state.reserve0,
-            reserve1: pool_state.reserve1,
-            total_liquidity: pool_state.total_liquidity,
-            block_time_last: pool_state.block_time_last,
+            nft_ownership_accepted: false,
+            reserve0,
+            reserve1,
+            total_liquidity: Uint128::zero(),
+            block_time_last: 0,
         },
         fee_state: PoolFeeStateResponse {
-            fee_growth_global_0: pool_fee_state.fee_growth_global_0,
-            fee_growth_global_1: pool_fee_state.fee_growth_global_1,
-            total_fees_collected_0: pool_fee_state.total_fees_collected_0,
-            total_fees_collected_1: pool_fee_state.total_fees_collected_1,
+            fee_growth_global_0: cosmwasm_std::Decimal::zero(),
+            fee_growth_global_1: cosmwasm_std::Decimal::zero(),
+            total_fees_collected_0: Uint128::zero(),
+            total_fees_collected_1: Uint128::zero(),
         },
-        total_positions: next_position_id,
+        total_positions: 0,
     })
 }
 
 /// Assembles the parts of `PoolAnalyticsResponse` that don't depend on
-/// commit-phase state. Each contract supplies the commit-adjacent
-/// fields (`threshold_status`, `total_usd_raised`, `total_bluechip_raised`)
-/// from whatever state it has access to.
+/// commit-phase state.
 pub fn query_analytics_core(
     deps: Deps,
     threshold_status: CommitStatus,
@@ -319,17 +193,15 @@ pub fn query_analytics_core(
     total_bluechip_raised: Uint128,
 ) -> StdResult<PoolAnalyticsResponse> {
     let analytics = POOL_ANALYTICS.may_load(deps.storage)?.unwrap_or_default();
-    let pool_state = POOL_STATE.load(deps.storage)?;
-    let pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-    let next_position_id = NEXT_POSITION_ID.load(deps.storage)?;
+    let (reserve0, reserve1) = native_reserves(deps);
 
-    let current_price_0_to_1 = if !pool_state.reserve0.is_zero() {
-        Decimal::from_ratio(pool_state.reserve1, pool_state.reserve0).to_string()
+    let current_price_0_to_1 = if !reserve0.is_zero() {
+        cosmwasm_std::Decimal::from_ratio(reserve1, reserve0).to_string()
     } else {
         "0".to_string()
     };
-    let current_price_1_to_0 = if !pool_state.reserve1.is_zero() {
-        Decimal::from_ratio(pool_state.reserve0, pool_state.reserve1).to_string()
+    let current_price_1_to_0 = if !reserve1.is_zero() {
+        cosmwasm_std::Decimal::from_ratio(reserve0, reserve1).to_string()
     } else {
         "0".to_string()
     };
@@ -338,14 +210,15 @@ pub fn query_analytics_core(
         analytics,
         current_price_0_to_1,
         current_price_1_to_0,
-        total_value_locked_0: pool_state.reserve0,
-        total_value_locked_1: pool_state.reserve1,
-        fee_reserve_0: pool_fee_state.fee_reserve_0,
-        fee_reserve_1: pool_fee_state.fee_reserve_1,
+        total_value_locked_0: reserve0,
+        total_value_locked_1: reserve1,
+        // Internal fee-reserve accounting removed; fees accrue natively.
+        fee_reserve_0: Uint128::zero(),
+        fee_reserve_1: Uint128::zero(),
         threshold_status,
         total_usd_raised,
         total_bluechip_raised,
-        total_positions: next_position_id,
+        total_positions: 0,
     })
 }
 
@@ -353,6 +226,7 @@ pub fn query_analytics_core(
 fn build_factory_response(deps: Deps) -> StdResult<PoolStateResponseForFactory> {
     let pool_state = POOL_STATE.load(deps.storage)?;
     let pool_info = POOL_INFO.load(deps.storage)?;
+    let (reserve0, reserve1) = native_reserves(deps);
     let assets: Vec<String> = pool_info
         .pool_info
         .asset_infos
@@ -362,13 +236,13 @@ fn build_factory_response(deps: Deps) -> StdResult<PoolStateResponseForFactory> 
 
     Ok(PoolStateResponseForFactory {
         pool_contract_address: pool_state.pool_contract_address,
-        nft_ownership_accepted: pool_state.nft_ownership_accepted,
-        reserve0: pool_state.reserve0,
-        reserve1: pool_state.reserve1,
-        total_liquidity: pool_state.total_liquidity,
-        block_time_last: pool_state.block_time_last,
-        price0_cumulative_last: pool_state.price0_cumulative_last,
-        price1_cumulative_last: pool_state.price1_cumulative_last,
+        nft_ownership_accepted: false,
+        reserve0,
+        reserve1,
+        total_liquidity: Uint128::zero(),
+        block_time_last: 0,
+        price0_cumulative_last: Uint128::zero(),
+        price1_cumulative_last: Uint128::zero(),
         assets,
     })
 }

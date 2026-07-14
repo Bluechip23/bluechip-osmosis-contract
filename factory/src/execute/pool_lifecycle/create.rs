@@ -12,18 +12,16 @@ use cosmwasm_std::{
     WasmMsg,
 };
 use cw_utils::{must_pay, PaymentError};
-use pool_factory_interfaces::cw721_msgs::Cw721InstantiateMsg;
 
 use crate::error::ContractError;
-use crate::msg::CreatorTokenInfo;
-use crate::pool_creation_reply::{LP_NFT_LABEL_PREFIX, LP_NFT_NAME, LP_NFT_SYMBOL};
-use crate::pool_struct::{CreatePool, TempPoolCreation};
+use crate::msg::{CreatePoolReplyMsg, CreatorTokenInfo};
+use crate::pool_struct::{CommitFeeInfo, CreatePool, TempPoolCreation};
 use crate::state::{
     COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS, FACTORYINSTANTIATEINFO, LAST_COMMIT_POOL_CREATE_AT,
     POOL_COUNTER,
 };
 
-use super::super::{encode_reply_id, MINT_CREATE_POOL};
+use super::super::{encode_reply_id, FINALIZE_POOL};
 
 // Placeholder value the caller supplies for the CreatorToken slot's denom.
 // The pool creates its own TokenFactory denom at instantiate and the
@@ -283,51 +281,79 @@ pub(crate) fn execute_create_creator_pool(
     }
 
     let creator_attr = info.sender.to_string();
+    let creator_wallet = info.sender.clone();
     let pool_counter = POOL_COUNTER.may_load(deps.storage)?.unwrap_or(0);
     let pool_id = pool_counter + 1;
     POOL_COUNTER.save(deps.storage, &pool_id)?;
 
-    // The creator token is a native TokenFactory denom the POOL owns, so
-    // the factory no longer instantiates a CW20. The reply chain now
-    // starts by instantiating the position NFT; its reply
-    // (`mint_create_pool`) instantiates the pool, which creates its own
-    // `factory/{pool_addr}/{subdenom}` denom; `finalize_pool` then
-    // reconstructs the deterministic denom and registers the pool.
+    // Phase-2: the pool no longer takes a position NFT (the internal LP
+    // system was removed), so the reply chain collapses to a single step:
+    // instantiate the pool directly, then `finalize_pool` registers it.
+    // The pool creates its own `factory/{pool_addr}/{subdenom}` denom and
+    // seeds a NATIVE Osmosis pool at threshold crossing.
     //
     // `subdenom` is derived from the (already-validated) token symbol and
-    // carried through the chain in the SubMsg payload.
+    // carried through the reply payload for `finalize_pool` to reconstruct
+    // the deterministic denom.
     let subdenom = subdenom_from_symbol(&token_info.symbol);
 
-    let factory_addr_str = env.contract.address.to_string();
-    let nft_msg = WasmMsg::Instantiate {
-        code_id: factory_cw20.cw721_nft_contract_id,
-        msg: to_json_binary(&Cw721InstantiateMsg {
-            name: LP_NFT_NAME.to_string(),
-            symbol: LP_NFT_SYMBOL.to_string(),
-            minter: factory_addr_str.clone(),
-        })?,
-        funds: vec![],
-        admin: Some(factory_addr_str),
-        label: format!("{}{}", LP_NFT_LABEL_PREFIX, subdenom),
+    // Threshold-payout splits are re-validated here (belt-and-suspenders
+    // over the propose-time gate).
+    let threshold_payout = factory_cw20.threshold_payout_amounts.clone();
+    threshold_payout.validate()?;
+    let threshold_binary = to_json_binary(&threshold_payout)?;
+
+    let commit_msg = CreatePoolReplyMsg {
+        pool_id,
+        pool_token_info: pool_msg.pool_token_info.clone(),
+        used_factory_addr: env.contract.address.clone(),
+        threshold_payout: Some(threshold_binary),
+        commit_fee_info: CommitFeeInfo {
+            bluechip_wallet_address: factory_cw20.bluechip_wallet_address.clone(),
+            creator_wallet_address: creator_wallet.clone(),
+            commit_fee_bluechip: factory_cw20.commit_fee_bluechip,
+            commit_fee_creator: factory_cw20.commit_fee_creator,
+        },
+        commit_threshold_limit_usd: factory_cw20.commit_threshold_limit_usd,
+        subdenom: subdenom.clone(),
+        max_bluechip_lock_per_pool: factory_cw20.max_bluechip_lock_per_pool,
+        creator_excess_liquidity_lock_days: factory_cw20.creator_excess_liquidity_lock_days,
     };
 
-    // The creation context rides the SubMsg payload through the whole
-    // reply chain (mint_create_pool → finalize_pool) instead of being
-    // round-tripped through storage at every step. The chain is atomic —
-    // every step uses `reply_on_success`, so a failure anywhere reverts
-    // the entire tx — which means the context never needs to survive the
-    // tx and never needs to be observable outside it. Each reply handler
-    // deserializes the payload, extends it with the address it just
-    // learned, and attaches it to the next SubMsg.
+    // Forward the GAMM pool-creation fee into the pool's instantiate funds
+    // so the pool holds it when `MsgCreateBalancerPool` auto-charges it at
+    // threshold crossing (decision 3). Zero amount = collection disabled.
+    //
+    // TODO(phase2): the fee is forwarded from the factory here, but its
+    // COLLECTION from the creator's attached funds is not yet enforced
+    // (the flat-fee `must_pay` above validates a single bluechip denom
+    // only, so a second, possibly different-denom, gamm fee coin can't be
+    // folded into that check without a `may_pay`/manual-parse rework). In
+    // a deployment with a non-zero gamm fee, the factory must be pre-funded
+    // OR this path tightened to require the creator to attach the fee.
+    let mut pool_funds = vec![];
+    if !factory_cw20.gamm_pool_creation_fee.amount.is_zero() {
+        pool_funds.push(factory_cw20.gamm_pool_creation_fee.clone());
+    }
+
+    let pool_instantiate = WasmMsg::Instantiate {
+        code_id: factory_cw20.create_pool_wasm_contract_id,
+        msg: to_json_binary(&commit_msg)?,
+        funds: pool_funds,
+        admin: Some(env.contract.address.to_string()),
+        label: format!("Pool-{}", pool_id),
+    };
+
+    // Creation context rides the SubMsg payload; the reply chain is atomic
+    // (`reply_on_success`), so it never needs to survive the tx.
     let creation_payload = cosmwasm_std::to_json_binary(&TempPoolCreation {
         temp_pool_info: pool_msg,
-        temp_creator_wallet: info.sender,
+        temp_creator_wallet: creator_wallet,
         pool_id,
         subdenom,
-        nft_addr: None,
     })?;
     let sub_msg = vec![
-        SubMsg::reply_on_success(nft_msg, encode_reply_id(pool_id, MINT_CREATE_POOL))
+        SubMsg::reply_on_success(pool_instantiate, encode_reply_id(pool_id, FINALIZE_POOL))
             .with_payload(creation_payload),
     ];
 

@@ -352,9 +352,11 @@ dependencies = [
  "cw20-base",
  "easy-addr",
  "factory",
+ "osmosis-std",
  "pool-core",
  "pool-factory-interfaces",
  "proptest",
+ "prost 0.13.5",
  "semver",
  "thiserror 2.0.12",
 ]
@@ -945,6 +947,7 @@ dependencies = [
  "easy-addr",
  "osmosis-std",
  "pool-factory-interfaces",
+ "prost 0.13.5",
  "thiserror 2.0.12",
 ]
 

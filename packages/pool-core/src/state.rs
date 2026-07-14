@@ -1,11 +1,13 @@
 //! Shared state — every storage Item, struct, and constant that both
 //! pool kinds read or write.
 //!
-//! Commit-phase-only storage (COMMIT_LEDGER, DISTRIBUTION_STATE, etc.)
-//! stays in the creator-pool crate's own `state.rs`; this module only
-//! contains what the shared hot-path code in `pool_core::liquidity`,
-//! `pool_core::swap`, `pool_core::admin`, and `pool_core::query`
-//! actually touches.
+//! Phase-2 note: the pool no longer runs an INTERNAL constant-product AMM.
+//! At threshold-crossing it seeds a native Osmosis GAMM balancer pool and
+//! holds the `gamm/pool/{id}` LP shares permanently. Consequently the old
+//! reserve/liquidity-position/fee-growth machinery is gone: there are no
+//! `reserve0/reserve1`, no LP positions, no internal fee accounting.
+//! `POOL_STATE` shrinks to the pool's own address, and the native pool id
+//! learned from the `MsgCreateBalancerPool` reply lives in `POOL_ID`.
 //!
 //! The creator-pool crate glob-re-exports this module from its own
 //! `state.rs` so existing `use crate::state::X;` call sites keep
@@ -26,23 +28,9 @@ pub struct TokenMetadata {
 }
 
 #[cw_serde]
-pub struct CreatorFeePot {
-    pub amount_0: Uint128,
-    pub amount_1: Uint128,
-}
-
-impl Default for CreatorFeePot {
-    fn default() -> Self {
-        Self {
-            amount_0: Uint128::zero(),
-            amount_1: Uint128::zero(),
-        }
-    }
-}
-
-#[cw_serde]
 pub struct PoolAnalytics {
-    /// Total number of swaps executed on this pool.
+    /// Total number of swaps executed on this pool (native-pool swaps
+    /// routed through `MsgSwapExactAmountIn`, plus post-threshold commits).
     pub total_swap_count: u64,
     /// Total number of commits (pre- and post-threshold).
     pub total_commit_count: u64,
@@ -50,9 +38,10 @@ pub struct PoolAnalytics {
     pub total_volume_0: Uint128,
     /// Cumulative volume of token1 (creator token) that flowed through swaps.
     pub total_volume_1: Uint128,
-    /// Total number of liquidity deposit/add operations.
+    /// Retained for wire compatibility. The internal LP system is gone —
+    /// third-party liquidity now lives directly on the native Osmosis
+    /// pool — so these counters stay at zero.
     pub total_lp_deposit_count: u64,
-    /// Total number of liquidity removal operations.
     pub total_lp_withdrawal_count: u64,
     /// Block height of the last trade (swap or post-threshold commit).
     pub last_trade_block: u64,
@@ -75,6 +64,9 @@ impl Default for PoolAnalytics {
     }
 }
 
+/// Record written on completed emergency drain (Phase 2). Kept for the
+/// simplified native-pool emergency-withdraw path; `amount0/amount1`
+/// capture whatever the drain swept to the bluechip wallet.
 #[cw_serde]
 pub struct EmergencyWithdrawalInfo {
     pub withdrawn_at: u64,
@@ -84,91 +76,15 @@ pub struct EmergencyWithdrawalInfo {
     pub total_liquidity_at_withdrawal: Uint128,
 }
 
-/// Snapshot written by Phase-2 emergency drain. Captures the LP-owned
-/// portion of the pool's funds (reserves + fee_reserve) at the moment
-/// of drain so each position can later claim its pro-rata share via
-/// `ClaimEmergencyShare`. Funds remain in the pool's bank balance
-/// during the year-long claim window — they are NOT swept to the
-/// treasury at drain time.
+/// Mutable pool state.
 ///
-/// `total_claimed_0/1` accumulate as positions claim. After
-/// `EMERGENCY_CLAIM_DORMANCY_SECONDS` elapse, the factory admin may
-/// invoke `SweepUnclaimedEmergencyShares` to send the still-unclaimed
-/// remainder (`reserve_*_at_drain - total_claimed_*` plus floor-
-/// division dust) to the bluechip wallet — covering truly abandoned
-/// positions whose owners never returned to claim.
-///
-/// Pro-rata math intentionally uses simple `position.liquidity /
-/// total_liquidity_at_drain` weighting against both reserve and
-/// fee_reserve. A more "fair" alternative would walk fee-growth
-/// checkpoints, but that's strictly an emergency-drain situation
-/// where the pool is being shut down — equal-by-liquidity is a
-/// defensible "good enough" approximation given the savings in math
-/// complexity and edge-case surface.
-#[cw_serde]
-pub struct EmergencyDrainSnapshot {
-    /// Block time at which Phase 2 fired.
-    pub drained_at: Timestamp,
-    /// Earliest block time at which `SweepUnclaimedEmergencyShares`
-    /// may run. Equals `drained_at + EMERGENCY_CLAIM_DORMANCY_SECONDS`
-    /// pinned at drain time so a future change to the constant doesn't
-    /// retroactively shorten an existing dormancy window.
-    pub dormancy_expires_at: Timestamp,
-    /// Pool reserve0 at drain — denominator-numerator pair with
-    /// total_liquidity_at_drain for principal pro-rata.
-    pub reserve0_at_drain: Uint128,
-    pub reserve1_at_drain: Uint128,
-    /// Pool fee_reserve at drain — pending-fees pot also distributed
-    /// pro-rata by liquidity weight (see struct doc).
-    pub fee_reserve_0_at_drain: Uint128,
-    pub fee_reserve_1_at_drain: Uint128,
-    /// Total liquidity outstanding at drain — denominator for both
-    /// principal and fee shares. Snapshot here so post-drain
-    /// `pool_state.total_liquidity = 0` doesn't break claim math.
-    pub total_liquidity_at_drain: Uint128,
-    /// Running tallies of claimed amounts per asset side. Bumped on
-    /// every successful `ClaimEmergencyShare`. The dormancy sweep
-    /// transfers `reserve_*_at_drain + fee_reserve_*_at_drain -
-    /// total_claimed_*` to the bluechip wallet.
-    pub total_claimed_0: Uint128,
-    pub total_claimed_1: Uint128,
-    /// Sweep-completed flag. Flipped by
-    /// `SweepUnclaimedEmergencyShares` so a second call no-ops
-    /// rather than double-sweeping a since-bumped tally.
-    pub residual_swept: bool,
-}
-
-/// Per-position dormancy claim window. After this many seconds elapse
-/// from `EmergencyDrainSnapshot.drained_at`, the factory admin may
-/// sweep the unclaimed residual to the bluechip wallet. 1 year =
-/// `365 * 86_400` seconds. Sized to give passive LPs (set-and-forget,
-/// vacationers, custodians on quarterly review cycles, etc.) a real
-/// chance to surface and claim. Tuned narrower, the window would be as
-/// unfair to non-active LPs as the 24h drain timelock alone; tuned
-/// wider provides no further LP benefit but indefinitely defers
-/// cleanup of provably-abandoned funds.
-pub const EMERGENCY_CLAIM_DORMANCY_SECONDS: u64 = 365 * 86_400;
-
+/// Phase-2: shrunk to the pool's own contract address. The internal AMM's
+/// reserves, cumulative-price accumulators, and total-liquidity counter
+/// are gone — pricing and depth live on the native Osmosis pool now, keyed
+/// by [`POOL_ID`].
 #[cw_serde]
 pub struct PoolState {
     pub pool_contract_address: Addr,
-    pub nft_ownership_accepted: bool,
-    pub reserve0: Uint128,
-    pub reserve1: Uint128,
-    pub total_liquidity: Uint128,
-    pub block_time_last: u64,
-    pub price0_cumulative_last: Uint128,
-    pub price1_cumulative_last: Uint128,
-}
-
-#[cw_serde]
-pub struct PoolFeeState {
-    pub fee_growth_global_0: Decimal,
-    pub fee_growth_global_1: Decimal,
-    pub total_fees_collected_0: Uint128,
-    pub total_fees_collected_1: Uint128,
-    pub fee_reserve_0: Uint128,
-    pub fee_reserve_1: Uint128,
 }
 
 /// Instantiate-time self-check storage. The pool's instantiate saves
@@ -178,13 +94,7 @@ pub struct PoolFeeState {
 ///
 /// **NOT the canonical auth source post-instantiate.** Every admin-gated
 /// handler that runs after instantiate must check against
-/// `POOL_INFO.factory_addr` instead. Both are written from the same
-/// `msg.used_factory_addr` at instantiate, so they cannot drift unless a
-/// future migration writes one without the other — but if they ever do,
-/// auth checks split across the two storage slots would yield
-/// inconsistent results. Every post-instantiate read therefore uses
-/// `POOL_INFO.factory_addr` (see `creator-pool::admin::execute_recover_stuck_states`
-/// and `execute_skip_distribution_user`).
+/// `POOL_INFO.factory_addr` instead.
 #[cw_serde]
 pub struct ExpectedFactory {
     pub expected_factory_address: Addr,
@@ -192,6 +102,8 @@ pub struct ExpectedFactory {
 
 #[cw_serde]
 pub struct PoolSpecs {
+    /// LP fee. Reused as the native GAMM pool's `swap_fee` when the pool
+    /// is seeded at threshold-crossing (`create_balancer_pool_msg`).
     pub lp_fee: Decimal,
     pub min_commit_interval: u64,
 }
@@ -204,10 +116,8 @@ pub struct PoolInfo {
     /// The creator token's native TokenFactory bank denom
     /// (`factory/{pool_addr}/{subdenom}`). The pool contract is the denom
     /// admin, so it mints (threshold payout / distribution) and transfers
-    /// this denom via bank messages. (Pre-migration this was a CW20
-    /// contract address, `token_address: Addr`.)
+    /// this denom via bank messages.
     pub token_denom: String,
-    pub position_nft_address: Addr,
 }
 
 #[cw_serde]
@@ -215,33 +125,6 @@ pub struct PoolDetails {
     pub asset_infos: [TokenType; 2],
     pub contract_addr: Addr,
     pub pool_type: PoolPairType,
-}
-
-#[cw_serde]
-pub struct Position {
-    pub liquidity: Uint128,
-    pub owner: Addr,
-    pub fee_growth_inside_0_last: Decimal,
-    pub fee_growth_inside_1_last: Decimal,
-    pub created_at: u64,
-    pub last_fee_collection: u64,
-    pub fee_size_multiplier: Decimal,
-    /// Fees preserved from past partial removals so they can be collected later.
-    #[serde(default)]
-    pub unclaimed_fees_0: Uint128,
-    #[serde(default)]
-    pub unclaimed_fees_1: Uint128,
-    /// Subset of `liquidity` that the owner cannot remove. Set to
-    /// `MINIMUM_LIQUIDITY` (1000) on the first depositor's position so the
-    /// classic Uniswap-V2 inflation-attack lock is genuinely enforced
-    /// here rather than being a cosmetic accounting trick. Fees still
-    /// accrue against the FULL `liquidity` (including the locked slice),
-    /// so the depositor keeps fee rights on the locked principal — they
-    /// just can never withdraw the principal itself.
-    /// `#[serde(default)]` keeps existing positions deserializing as zero
-    /// (no lock) for backward compatibility with already-deployed pools.
-    #[serde(default)]
-    pub locked_liquidity: Uint128,
 }
 
 impl PoolDetails {
@@ -254,29 +137,22 @@ impl PoolDetails {
     }
 }
 
-/// The four state items read by every swap / commit / liquidity hot path.
-/// Bundled so handlers that touch more than one can `load` once and let the
-/// borrow checker enforce mutation vs read-only access on each field.
+/// Core state items read by the swap / commit hot paths. Bundled so
+/// handlers that touch more than one can `load` once.
 ///
-/// Only `state` and `fees` are ever mutated on the swap path; `info` and
-/// `specs` stay read-only. Callers still save the dirty items themselves —
-/// this struct is a loader, not a write-back cache.
+/// Phase-2: `fees` is gone (no internal fee accounting) and `state` no
+/// longer carries reserves — swaps route through the native pool.
 pub struct PoolCtx {
     pub info: PoolInfo,
     pub state: PoolState,
-    pub fees: PoolFeeState,
     pub specs: PoolSpecs,
 }
 
 impl PoolCtx {
-    /// Single-shot load of the four core state items in one place. Keeps
-    /// the four `.load()` calls in one spot so every new state item added
-    /// to the hot path lands here exactly once.
     pub fn load(storage: &dyn Storage) -> StdResult<Self> {
         Ok(Self {
             info: POOL_INFO.load(storage)?,
             state: POOL_STATE.load(storage)?,
-            fees: POOL_FEE_STATE.load(storage)?,
             specs: POOL_SPECS.load(storage)?,
         })
     }
@@ -284,421 +160,151 @@ impl PoolCtx {
 
 // -- Storage Items & Maps -------------------------------------------------
 
-/// Pool identity and addresses (factory, token, position NFT).
+/// Pool identity and addresses (factory, token).
 pub const POOL_INFO: Item<PoolInfo> = Item::new("pool_info");
-/// Mutable pool state: reserves, total_liquidity, price accumulators.
+/// Mutable pool state (just the pool's own address, post Phase-2).
 pub const POOL_STATE: Item<PoolState> = Item::new("pool_state");
-/// Fee accounting: global fee growth, fee reserves, totals collected.
-pub const POOL_FEE_STATE: Item<PoolFeeState> = Item::new("pool_fee_state");
-/// Tunable pool parameters (lp_fee, min_commit_interval).
+/// The native Osmosis GAMM pool id, learned from the
+/// `MsgCreateBalancerPool` reply at threshold-crossing. Unset until then.
+pub const POOL_ID: Item<u64> = Item::new("gamm_pool_id");
+/// Tunable pool parameters (lp_fee used as the gamm swap_fee, min_commit_interval).
 pub const POOL_SPECS: Item<PoolSpecs> = Item::new("pool_specs");
-/// Cumulative counters for swaps, commits, deposits, withdrawals.
+/// Cumulative counters for swaps, commits.
 pub const POOL_ANALYTICS: Item<PoolAnalytics> = Item::new("pool_analytics");
-/// All LP positions keyed by string position id.
-pub const LIQUIDITY_POSITIONS: Map<&str, Position> = Map::new("positions");
-/// Reverse index: positions owned by a given address.
-pub const OWNER_POSITIONS: Map<(&Addr, &str), bool> = Map::new("owner_positions");
-/// Monotonic counter used to mint the next Position NFT id.
-pub const NEXT_POSITION_ID: Item<u64> = Item::new("next_position_id");
 /// Top-level pause flag — true if the pool is paused for any reason.
 pub const POOL_PAUSED: Item<bool> = Item::new("pool_paused");
-/// Distinguishes "admin/emergency paused" (false) from "auto-paused
-/// because reserves dropped below MINIMUM_LIQUIDITY" (true). Only meaningful
-/// when `POOL_PAUSED == true`.
-///
-/// Wire-up:
-/// - Auto-set: after a swap or remove leaves reserves < MIN, the handler
-/// sets POOL_PAUSED + POOL_PAUSED_AUTO = true (only if no harder pause
-/// is already in place).
-/// - Auto-clear: after a deposit pushes reserves back >= MIN AND the
-/// pool was auto-paused, the deposit clears both flags.
-/// - Hard pauses (admin Pause, emergency_withdraw_initiate) explicitly
-/// set POOL_PAUSED_AUTO = false to override any prior auto-state.
-///
-/// Gating semantics:
-/// - Auto-paused (true & true): deposits allowed (recovery path);
-/// swaps / removes / collects rejected.
-/// - Hard-paused (true & false): everything rejected, including
-/// deposits — admin must Unpause or cancel emergency to resume.
-///
-/// `#[serde(default)]` keeps deployed pools that predate this flag
-/// deserializing as false; legacy paused pools therefore behave as
-/// hard-paused (the safe default), and admin Pause / Unpause continues
-/// to work unchanged.
+/// Distinguishes admin/emergency pause (false) from auto-pause (true).
+/// Retained for wire/behaviour compatibility; auto-pause-on-low-liquidity
+/// no longer fires (no internal reserves), so this is effectively always
+/// false in Phase-2.
 pub const POOL_PAUSED_AUTO: Item<bool> = Item::new("pool_paused_auto");
-/// Record written on completed emergency withdraw (Phase 2 drain).
+/// Record written on completed emergency drain (Phase 2 drain).
 pub const EMERGENCY_WITHDRAWAL: Item<EmergencyWithdrawalInfo> = Item::new("emergency_withdrawal");
 /// Effective-after timestamp armed by Phase 1 (initiate); cleared by
 /// Phase 2 (drain) or by cancel.
 pub const PENDING_EMERGENCY_WITHDRAW: Item<Timestamp> = Item::new("pending_emergency_withdraw");
 /// Permanent flag set after a successful emergency drain.
 pub const EMERGENCY_DRAINED: Item<bool> = Item::new("emergency_drained");
-
-pub const EMERGENCY_DRAIN_SNAPSHOT: Item<EmergencyDrainSnapshot> =
-    Item::new("emergency_drain_snapshot");
 /// Expected factory address pinned at instantiate for sanity checks.
 pub const EXPECTED_FACTORY: Item<ExpectedFactory> = Item::new("expected_factory");
 
 // Reentrancy lock acquired by `commit` and `simple_swap` to reject
-// re-entry within the same tx (e.g. via a malicious cw20 hook). The
-// storage key string must remain `"rate_limit_guard"` because already-
-// deployed pools persist the lock under that key. Despite the key's
-// name, this item is a reentrancy guard, not a rate limiter — rate
-// limiting is handled separately by USER_LAST_COMMIT.
+// re-entry within the same tx. The storage key string must remain
+// `"rate_limit_guard"` because already-deployed pools persist the lock
+// under that key. Despite the key's name this is a reentrancy guard, not
+// a rate limiter — rate limiting is handled by USER_LAST_COMMIT.
 pub const REENTRANCY_LOCK: Item<bool> = Item::new("rate_limit_guard");
 
-/// Transient context for SubMsg-based CW20 balance verification on
-/// deposits. The deposit handler snapshots the pool's pre-balance for
-/// every CW20 side, saves this context, and dispatches the last
-/// CW20-side `TransferFrom` as a `SubMsg::reply_on_success`. The reply
-/// handler queries the post-balance, confirms the delta matches the
-/// expected `actual_amount`, and either clears the context (success)
-/// or errors (causing the entire transaction to roll back).
-///
-/// Only set / read when `verify_balances == true` is passed into the
-/// shared deposit/add helpers. The creator pool routes its CW20
-/// deposits through this path as defense-in-depth: its factory-minted
-/// `cw20-base` token charges no transfer fee and never rebases, but
-/// verification keeps reserves honest against any future third-party
-/// CW20 integration.
-///
-/// `cw20_side*_addr == None` for non-CW20 sides; balances on those
-/// sides are not snapshotted (native bank transfers are exact).
-///
-/// `outgoing_amount_*` track CW20 outflows that are dispatched WITHIN
-/// the same Response as the deposit/add inflow (i.e., fee payouts on
-/// `add_to_position`). The reply handler's correctness invariant is
-/// `post_balance + outgoing == pre_balance + actual_amount`. Defaults
-/// to zero on the deposit-liquidity path (no in-tx outflows; the
-/// invariant simplifies to `post - pre == actual_amount`).
-/// `#[serde(default)]` lets pre-this-field contexts deserialize as
-/// zero for backwards compatibility.
-#[cw_serde]
-pub struct DepositVerifyContext {
-    pub pool_addr: Addr,
-    pub cw20_side0_addr: Option<Addr>,
-    pub cw20_side1_addr: Option<Addr>,
-    pub pre_balance0: Uint128,
-    pub pre_balance1: Uint128,
-    pub expected_delta0: Uint128,
-    pub expected_delta1: Uint128,
-    /// CW20 amount flowing OUT of the pool on side 0 during the same
-    /// Response as the inflow (`add_to_position`'s side-0 fee payout if
-    /// side 0 is CW20; zero otherwise). Subtracted from the effective
-    /// delta math so the strict equality check accounts for the net
-    /// pool-balance change rather than the inflow alone.
-    #[serde(default)]
-    pub outgoing_amount0: Uint128,
-    /// Same as `outgoing_amount0` for side 1.
-    #[serde(default)]
-    pub outgoing_amount1: Uint128,
-}
-
-/// Storage for the transient `DepositVerifyContext` used between deposit
-/// dispatch and the balance-verification reply.
-pub const DEPOSIT_VERIFY_CTX: Item<DepositVerifyContext> = Item::new("deposit_verify_ctx");
-
-/// Reply ID for `DEPOSIT_VERIFY_CTX` — emitted by the
-/// `verify_balances == true` deposit/add path on its final SubMsg, and
-/// dispatched in the consuming contract's `reply` entry point to
-/// `pool_core::balance_verify::handle_deposit_verify_reply`. Numeric
-/// value is high enough to not collide with any factory or creator-pool
-/// reply ID conventions.
-pub const DEPOSIT_VERIFY_REPLY_ID: u64 = 0xD550_0000;
-
-/// Per-user timestamp of last commit, used by rate limiting.
-///
-/// Append-only with respect to addresses: every distinct committer that
-/// has ever called `commit` gets one entry, and entries are never
-/// pruned. Long-lived pools accumulate one entry per distinct committer
-/// forever. Storage growth is bounded by the committer population —
-/// typically a few hundred to a few thousand for a healthy commit
-/// pool — and is not on any hot read path, so v1 ships without
-/// pruning. If a deployment ever shows real growth, a pool-side prune
-/// handler mirroring the factory's `PruneRateLimits` (with a
-/// timestamp-secondary-index over this map) is the right shape; the
-/// rate-limit cooldown is short, so any stamp older than ~10× the
-/// `min_commit_interval` is safe to drop.
+/// Per-user timestamp of last commit, used by swap/commit rate limiting.
 pub const USER_LAST_COMMIT: Map<&Addr, u64> = Map::new("user_last_commit");
 
-/// Liquidity-operation rate-limit cooldown (deposit / add-to-position /
-/// remove), kept in a SEPARATE map from `USER_LAST_COMMIT` (which gates
-/// swaps and commits).
-///
-/// The decoupling is load-bearing security, not cosmetic. The CW20 swap
-/// path (`pool_core::swap::execute_swap_cw20`) derives its rate-limit key
-/// from `cw20_msg.sender`, a field the *token contract* constructs in its
-/// `Receive` hook — so a hostile CW20 could set that key to any address.
-/// The pool's factory-minted CW20 is trusted today, but if swaps and
-/// liquidity ops shared one cooldown map, a hostile token
-/// could stamp a victim LP's key via spoofed swaps and indefinitely block
-/// the victim's `RemoveLiquidity` (their only exit) with
-/// `TooFrequentCommits`. Liquidity ops are always keyed on the real
-/// `info.sender` of the depositing/removing LP — never spoofable — so a
-/// separate map guarantees no swap, spoofed or not, can ever block a
-/// withdrawal or deposit.
+/// Liquidity-operation rate-limit cooldown, kept in a SEPARATE map from
+/// `USER_LAST_COMMIT`. Retained for compatibility with the shared
+/// rate-limit helper; the internal LP paths that stamped it are gone.
 pub const USER_LAST_LIQUIDITY_OP: Map<&Addr, u64> = Map::new("user_last_liquidity_op");
 
 /// Written `false` at pool instantiate; flipped `true` by the
-/// threshold-crossing commit path. Shared handlers read via
-/// `query_check_commit`.
+/// threshold-crossing commit path.
 pub const IS_THRESHOLD_HIT: Item<bool> = Item::new("threshold_hit");
-
-/// Creator-claimable pot that receives the portion of LP fees "clipped"
-/// away from small positions by `calculate_fee_size_multiplier`. The
-/// `emergency_withdraw_core_drain` sweep reads this Item unconditionally
-/// as defense-in-depth (handles unexpected records / future drift).
-pub const CREATOR_FEE_POT: Item<CreatorFeePot> = Item::new("creator_fee_pot");
 
 /// emergency_withdraw reads `bluechip_wallet_address` for the drain
 /// recipient.
 pub const COMMITFEEINFO: Item<CommitFeeInfo> = Item::new("fee_info");
 
-// Block at which post-threshold trading is allowed to resume after a
-// commit pool crosses its threshold. Set inside the threshold-crossing
-// commit handler to `env.block.height + POST_THRESHOLD_COOLDOWN_BLOCKS + 1`,
-// so the crossing block plus the next `POST_THRESHOLD_COOLDOWN_BLOCKS`
-// blocks are gated. Same-block follower trades and the next-N-blocks
-// trades are rejected. Eliminates the atomic same-block sandwich on the
-// freshly-seeded pool. The threshold-crosser's own bounded excess swap
-// (3%-of-reserve cap) still executes in the crossing tx itself, since
-// that swap runs before this storage item is read by any other path.
+// -- Reply IDs ------------------------------------------------------------
 //
-// Unset until the pool crosses its threshold;
-// `may_load(...).unwrap_or(0)` makes the gate a no-op before then.
-//
-// Read by: simple_swap, execute_swap_cw20, process_post_threshold_commit.
-// Written by: process_threshold_crossing_with_excess and the
-// "threshold hit exact" branch of execute_commit_logic.
-pub const POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK: Item<u64> =
-    Item::new("post_threshold_cooldown_until_block");
+// Kept in pool-core (rather than creator-pool) because the swap
+// orchestration in `pool_core::swap` needs `REPLY_ID_SWAP_FORWARD`, and
+// pool-core cannot depend on the creator-pool crate. Both are re-exported
+// through the creator-pool `state` glob so its `reply` dispatch and
+// threshold-payout code reach them at the usual `crate::state::` path.
+// Distinct from the creator-pool factory-notify ids (1, 2) and the
+// distribution-mint base (1_000_000).
+
+/// Reply id for the `MsgCreateBalancerPool` SubMsg emitted at
+/// threshold-crossing. The reply parses `MsgCreateBalancerPoolResponse`
+/// and stores the resulting `pool_id` in [`POOL_ID`].
+pub const REPLY_ID_CREATE_POOL: u64 = 3;
+
+/// Reply id for the `MsgSwapExactAmountIn` SubMsg emitted by a swap /
+/// post-threshold commit. The reply parses `MsgSwapExactAmountInResponse`
+/// and `BankMsg::Send`s `token_out_amount` to the receiver carried in the
+/// SubMsg `payload` (a JSON-encoded [`SwapForwardPayload`]).
+pub const REPLY_ID_SWAP_FORWARD: u64 = 4;
+
+/// Payload carried on the `REPLY_ID_SWAP_FORWARD` SubMsg so the reply
+/// handler knows where to forward the swapped-out tokens.
+#[cw_serde]
+pub struct SwapForwardPayload {
+    /// Recipient of the swapped-out tokens.
+    pub receiver: Addr,
+    /// Denom of the swapped-out tokens (the ask denom).
+    pub token_out_denom: String,
+    /// Original sender of the swap (for response attributes).
+    pub sender: Addr,
+    /// The offer amount that was swapped in (for response attributes).
+    pub offer_amount: Uint128,
+    /// The offer denom that was swapped in (for response attributes).
+    pub offer_denom: String,
+}
 
 // -- Constants ------------------------------------------------------------
 
-/// Uniswap-V2-style minimum-liquidity floor permanently locked on the
-/// first deposit, and the per-reserve floor used by auto-pause checks.
-pub const MINIMUM_LIQUIDITY: Uint128 = Uint128::new(1000);
-// The emergency-withdraw delay is admin-tunable on the factory side
-// (`FactoryInstantiate.emergency_withdraw_delay_seconds`) and queried at
-// runtime by `execute_emergency_withdraw_initiate` via
-// `FactoryQueryMsg::EmergencyWithdrawDelaySeconds`; there is deliberately
-// no pool-side constant. Range-validation lives in factory's
-// `validate_factory_config` (60s ≤ delay ≤ 7 days). The field's
-// `#[serde(default)]` is 24h, so deployments that predate the field
-// deserialize unchanged.
-
-/// Blocks of trading freeze applied immediately after a commit pool's
-/// threshold crosses. With ~6s block time on typical Cosmos chains, 2
-/// blocks ≈ 12s — long enough to break atomic same-block sandwiches
-/// targeting the freshly seeded pool, short enough to not meaningfully
-/// hurt UX for legitimate first traders.
-pub const POST_THRESHOLD_COOLDOWN_BLOCKS: u64 = 2;
-
-// ---------------------------------------------------------------------------
-// Per-tx swap cap ramp.
-//
-// After the post-threshold cooldown ends, each swap (simple_swap,
-// execute_swap_cw20, process_post_threshold_commit) is capped at a
-// fraction of the offer-side reserve. The cap ramps linearly from
-// POST_THRESHOLD_SWAP_CAP_START_BPS up to POST_THRESHOLD_SWAP_CAP_END_BPS
-// over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks. Past the ramp window the
-// helper returns `None` and no per-tx cap applies.
-//
-// Bounds per-tx MEV on the freshly-seeded pool: the first post-cooldown
-// trade can swap at most 0.5% of the offer reserve, scaling to
-// "unrestricted" over ~500s on a 5s-block chain. A sandwich attacker
-// can still extract value, but each leg of the sandwich is bounded by
-// the cap_bps × reserve product, so any single trade's price impact
-// is limited during the ramp window.
-//
-// Pre-threshold pools never reach the helper (the swap path is
-// already gated by IS_THRESHOLD_HIT), and
-// POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK is unset until the cross, so
-// the ramp helper short-circuits with `None` before then.
-// ---------------------------------------------------------------------------
-
-/// Number of blocks over which the per-tx swap cap ramps from
-/// `POST_THRESHOLD_SWAP_CAP_START_BPS` to "unrestricted" after the
-/// post-threshold cooldown ends. 100 blocks ≈ 500s on a 5s-block chain.
-pub const POST_THRESHOLD_SWAP_RAMP_BLOCKS: u64 = 100;
-
-/// Initial per-tx swap cap, expressed in basis points of the offer-side
-/// reserve, at the moment the cooldown ends (ramp block 0). 50 bps =
-/// 0.5%. Sized to bound per-tx MEV on the freshly-seeded pool while
-/// permitting modest legitimate first trades — a 0.5%-of-reserve trade
-/// moves price by ~0.5-1% on xyk math.
-pub const POST_THRESHOLD_SWAP_CAP_START_BPS: u64 = 50;
-
-/// End-of-ramp cap in basis points. 10_000 bps = 100% of reserve — xyk
-/// math can't reach that absolute amount (the pool would have zero
-/// liquidity on the ask side at 100% offer consumption), so this
-/// effectively means "unrestricted". Once the ramp passes, the helper
-/// returns `None` and skips the check entirely; the constant exists for
-/// the linear-interpolation math during the ramp window.
-pub const POST_THRESHOLD_SWAP_CAP_END_BPS: u64 = 10_000;
-
-/// Per-tx swap cap during the post-threshold ramp window. Returns
-/// `Some(cap)` (the maximum offer amount allowed for this swap) when
-/// the ramp is active, or `None` when the cap doesn't apply.
-///
-/// `cooldown_until` is the caller's already-loaded value of
-/// `POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK` (0 when unset). Both swap and
-/// post-threshold-commit handlers load that item for the cooldown gate
-/// immediately before calling this, so taking the value avoids a second
-/// storage read of the same key on every trade.
-///
-/// Returns `None` when:
-/// - the pool never crossed threshold (`cooldown_until == 0` on a
-///   pre-threshold pool)
-/// - the current block is still within the cooldown window (the
-///   separate cooldown gate handles rejection; we don't double-gate)
-/// - the ramp has fully elapsed
-///   (`blocks_since_cooldown_end >= POST_THRESHOLD_SWAP_RAMP_BLOCKS`)
-///
-/// Otherwise returns `Some(reserve * cap_bps / 10_000)` where `cap_bps`
-/// is the linear interpolation between START and END based on
-/// `blocks_since_cooldown_end`.
-///
-/// Saturating arithmetic everywhere — block-height subtractions and the
-/// interpolation product are bounded by `RAMP_BLOCKS * (END - START)`
-/// which fits in u64 for any plausible value of the three constants.
-pub fn post_threshold_swap_cap(
-    cooldown_until: u64,
-    current_block: u64,
-    offer_reserve: cosmwasm_std::Uint128,
-) -> Option<cosmwasm_std::Uint128> {
-    if cooldown_until == 0 {
-        // Never crossed threshold — the pool is still pre-crossing.
-        // No cap.
-        return None;
-    }
-    if current_block < cooldown_until {
-        // Still inside the cooldown window. The separate cooldown gate
-        // (PostThresholdCooldownActive) handles rejection; the ramp
-        // cap is for the post-cooldown ramp window only, so return
-        // None here.
-        return None;
-    }
-    let blocks_since = current_block.saturating_sub(cooldown_until);
-    if blocks_since >= POST_THRESHOLD_SWAP_RAMP_BLOCKS {
-        // Ramp fully elapsed — no per-tx cap applies.
-        return None;
-    }
-    // Linear interpolation: cap_bps = START + (END - START) * blocks / RAMP.
-    let cap_bps = POST_THRESHOLD_SWAP_CAP_START_BPS
-        + (POST_THRESHOLD_SWAP_CAP_END_BPS - POST_THRESHOLD_SWAP_CAP_START_BPS) * blocks_since
-            / POST_THRESHOLD_SWAP_RAMP_BLOCKS;
-    let cap = offer_reserve.multiply_ratio(cap_bps, 10_000u128);
-    Some(cap)
-}
-
-/// Default per-commit rate-limit floor (seconds). Pool is instantiated
-/// with this value in `PoolSpecs.min_commit_interval`. 13s is one
-/// `block_time + 1s` budget on most Cosmos chains — tight enough to
-/// deflate same-block spam, loose enough that a human-driven commit
-/// flow never sees the gate.
-///
-/// Pool instantiate seeds `PoolSpecs` with this value; kept in
-/// pool-core so a future cadence change lands in one place.
+/// Default per-commit rate-limit floor (seconds).
 pub const DEFAULT_SWAP_RATE_LIMIT_SECS: u64 = 13;
 
-/// Default LP fee charged on every swap.
-/// 30 bps = 0.3%, the canonical Uniswap-V2 default. Tunable per-pool
-/// via the factory's 48h `ProposeConfigUpdate` flow up to [`MAX_LP_FEE`].
+/// Default LP fee charged on every swap. Reused as the native GAMM
+/// pool's swap_fee at seeding time. 30 bps = 0.3%.
 pub const DEFAULT_LP_FEE: Decimal = Decimal::permille(3);
-/// Hard ceiling on `PoolSpecs.lp_fee` (`UpdateFees` migrate). 10% is
-/// well above any reasonable retail-trading fee — the cap exists to
-/// prevent admin-compromise scenarios where a malicious fee could
-/// effectively confiscate the entire swap volume into the LP pot.
+/// Hard ceiling on `PoolSpecs.lp_fee`. 10%.
 pub const MAX_LP_FEE: Decimal = Decimal::percent(10);
-/// Hard floor on `PoolSpecs.lp_fee` (`UpdateFees` migrate). 0.1% rules
-/// out a zero-fee admin attack that would drain LPs over time on every
-/// swap (no fee growth → no creator/LP rewards → infinite-loss
-/// liquidity provision).
+/// Hard floor on `PoolSpecs.lp_fee`. 0.1%.
 pub const MIN_LP_FEE: Decimal = Decimal::permille(1);
 
-/// `pool_kind` attribute value emitted in `instantiate` responses by
-/// the creator-pool wasm. Pinned here so off-chain indexers can pin
-/// against `pool_core::state::POOL_KIND_COMMIT` rather than the raw
-/// string literal; future pool kinds get added in one place.
+/// `pool_kind` attribute value emitted in `instantiate` responses.
 pub const POOL_KIND_COMMIT: &str = "commit";
 
-/// Recovery window between `LAST_THRESHOLD_ATTEMPT` and the moment
-/// `RecoverPoolStuckStates::StuckThreshold` is allowed to flip
-/// `THRESHOLD_PROCESSING` back to false. 1 hour gives operators time
-/// to investigate a stuck-true flag without blocking too long; if a
-/// real threshold-cross is in flight it would have completed within
-/// one block.
+/// Recovery window for `RecoverPoolStuckStates::StuckThreshold`.
 pub const STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS: u64 = 3_600;
 
-/// Recovery window between `DistributionState.last_updated` and the
-/// moment `recover_distribution` is allowed to restart the cursor.
-/// 1 hour mirrors the threshold-recovery window. The independent
-/// `consecutive_failures >= MAX_CONSECUTIVE_DISTRIBUTION_FAILURES`
-/// gate fires immediately for the genuine-bug path.
+/// Recovery window for `recover_distribution`.
 pub const STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS: u64 = 3_600;
 
 /// Hard cap on consecutive distribution failures before the batch
-/// processor halts the cursor and forces operators into the recovery
-/// path. Prevents an infinite-failure loop from billing keepers gas.
+/// processor halts the cursor.
 pub const MAX_CONSECUTIVE_DISTRIBUTION_FAILURES: u32 = 5;
 
-/// Seconds in a day. Used by the creator-excess unlock-time math
-/// (`creator_excess_liquidity_lock_days * SECONDS_PER_DAY`).
+/// Seconds in a day. Used by the creator-excess unlock-time math.
 pub const SECONDS_PER_DAY: u64 = 86_400;
 
-/// Default page size for `QueryMsg::PoolCommits` (per-pool committer
-/// pagination) when the caller doesn't supply `limit`.
+/// Default page size for `QueryMsg::PoolCommits`.
 pub const POOL_COMMITS_QUERY_DEFAULT_LIMIT: u32 = 30;
-/// Hard ceiling on `QueryMsg::PoolCommits.limit` so a single query
-/// can't exhaust block gas on a large committer set.
+/// Hard ceiling on `QueryMsg::PoolCommits.limit`.
 pub const POOL_COMMITS_QUERY_MAX_LIMIT: u32 = 100;
 
-/// Threshold-payout split components (bluechip base units). Total is
-/// `THRESHOLD_PAYOUT_TOTAL_BASE_UNITS`. Both
-/// `validate_pool_threshold_payments` (instantiate) and
-/// `trigger_threshold_payout` (runtime) reference these constants so
-/// the two call sites cannot silently drift apart.
+/// Threshold-payout split components (bluechip base units).
 pub const THRESHOLD_PAYOUT_CREATOR_BASE_UNITS: u128 = 325_000_000_000;
 pub const THRESHOLD_PAYOUT_BLUECHIP_BASE_UNITS: u128 = 25_000_000_000;
 pub const THRESHOLD_PAYOUT_POOL_BASE_UNITS: u128 = 350_000_000_000;
 pub const THRESHOLD_PAYOUT_COMMIT_RETURN_BASE_UNITS: u128 = 500_000_000_000;
 pub const THRESHOLD_PAYOUT_TOTAL_BASE_UNITS: u128 = 1_200_000_000_000;
 
-/// Classify the pool's current pause state. Used by the dispatch
-/// gates to allow deposits during auto-pause (recovery), permit
-/// LP exits during emergency-pending (so LPs can race the drain),
-/// and reject everything during a Hard admin pause.
+/// Classify the pool's current pause state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseKind {
     /// Pool is open. POOL_PAUSED == false.
     None,
-    /// Reserves fell below MINIMUM_LIQUIDITY after a swap or remove.
-    /// Deposits are allowed (recovery path); other ops reject.
+    /// Reserves fell below a floor after a swap or remove. Retained for
+    /// completeness; not armed in Phase-2 (no internal reserves).
     AutoLowLiquidity,
-    /// Phase-1 emergency-withdraw is armed and inside the 24h timelock
-    /// (PENDING_EMERGENCY_WITHDRAW set; POOL_PAUSED_AUTO == false).
-    /// Trades + adds reject so the drain settles against a stable
-    /// state, but LP exits (Remove*Liquidity) and CollectFees are
-    /// permitted so LPs can withdraw their principal/fees rather than
-    /// being trapped until the drain confiscates them.
+    /// Phase-1 emergency-withdraw is armed and inside the timelock.
     EmergencyPending,
     /// Explicit admin Pause (or any other non-emergency hard pause).
-    /// Everything rejects until admin Unpause.
     Hard,
 }
 
 /// Resolve POOL_PAUSED + POOL_PAUSED_AUTO + PENDING_EMERGENCY_WITHDRAW
 /// into a `PauseKind`. Reads only — does not mutate.
-/// `may_load.unwrap_or(false)` means absent storage decodes as "not
-/// set", preserving backward-compat with pools deployed before
-/// POOL_PAUSED_AUTO existed.
-///
-/// Distinction between EmergencyPending and Hard: both have
-/// POOL_PAUSED == true and POOL_PAUSED_AUTO == false. The presence of
-/// PENDING_EMERGENCY_WITHDRAW disambiguates — emergency-withdraw
-/// initiate sets it; admin Pause does not. Cancel emergency-withdraw
-/// or core-drain clears it.
 pub fn pause_kind(storage: &dyn Storage) -> StdResult<PauseKind> {
     if !POOL_PAUSED.may_load(storage)?.unwrap_or(false) {
         return Ok(PauseKind::None);
@@ -710,111 +316,4 @@ pub fn pause_kind(storage: &dyn Storage) -> StdResult<PauseKind> {
         return Ok(PauseKind::EmergencyPending);
     }
     Ok(PauseKind::Hard)
-}
-
-/// Arm the auto-pause flag after a liquidity-out operation if
-/// post-state reserves dropped below `MINIMUM_LIQUIDITY`. No-op when
-/// reserves are still healthy or when the pool is already hard-paused
-/// (admin / emergency-pending) — overriding a hard pause with an auto
-/// flag would let the next deposit unintentionally clear the admin's
-/// intent. Auto-pause only over a "None" pause state.
-///
-/// Called from `remove_all_liquidity` and `remove_partial_liquidity`
-/// after the post-remove POOL_STATE save. `swap` and `commit` paths
-/// don't need this — their own MINIMUM_LIQUIDITY checks reject any
-/// trade that would leave reserves below the floor, so post-trade
-/// reserves stay ≥ MIN by construction.
-pub fn maybe_auto_pause_on_low_liquidity(
-    storage: &mut dyn Storage,
-    pool_state: &PoolState,
-) -> StdResult<bool> {
-    let drained =
-        pool_state.reserve0 < MINIMUM_LIQUIDITY || pool_state.reserve1 < MINIMUM_LIQUIDITY;
-    if !drained {
-        return Ok(false);
-    }
-    // Don't override hard pauses. Only arm auto when the pool is
-    // currently considered "open" (not paused for any reason).
-    let already_paused = POOL_PAUSED.may_load(storage)?.unwrap_or(false);
-    if already_paused {
-        return Ok(false);
-    }
-    POOL_PAUSED.save(storage, &true)?;
-    POOL_PAUSED_AUTO.save(storage, &true)?;
-    Ok(true)
-}
-
-#[cfg(test)]
-mod post_threshold_swap_cap_tests {
-    use super::*;
-
-    /// Pre-threshold pool (cooldown_until == 0, i.e.
-    /// POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK unset) → helper returns None
-    /// regardless of reserve / block. Confirms the ramp cap has zero
-    /// impact before the threshold is crossed.
-    #[test]
-    fn returns_none_when_cooldown_unset() {
-        let cap = post_threshold_swap_cap(0, 1_000_000, Uint128::new(1_000_000_000));
-        assert!(cap.is_none(), "no cooldown → no cap");
-    }
-
-    /// During the cooldown window itself, the helper returns None
-    /// because the separate `PostThresholdCooldownActive` gate handles
-    /// rejection — we don't want to double-gate or surface a confusing
-    /// "cap exceeded" error during a window where ALL swaps are
-    /// already rejected.
-    #[test]
-    fn returns_none_during_cooldown_window() {
-        // Block 99 is still inside the cooldown window (until block 100).
-        let cap = post_threshold_swap_cap(100, 99, Uint128::new(1_000_000_000));
-        assert!(cap.is_none(), "in cooldown → no cap (separate gate)");
-    }
-
-    /// At the exact moment cooldown ends (block == cooldown_until,
-    /// blocks_since = 0), the cap is the START value (50 bps = 0.5%).
-    #[test]
-    fn cap_at_cooldown_end_equals_start_bps() {
-        let cap = post_threshold_swap_cap(100, 100, Uint128::new(1_000_000_000))
-            .expect("ramp active at cooldown_end");
-        // 0.5% of 1B = 5M.
-        assert_eq!(cap, Uint128::new(5_000_000));
-    }
-
-    /// Linear interpolation at mid-ramp. blocks_since = 50,
-    /// RAMP_BLOCKS = 100 → cap_bps = 50 + (10000-50) * 50/100 = 5025.
-    #[test]
-    fn cap_at_mid_ramp_is_linear() {
-        let cap = post_threshold_swap_cap(
-            100,
-            100 + 50, // mid-ramp
-            Uint128::new(1_000_000_000),
-        )
-        .expect("ramp active at mid-ramp");
-        // 5025 bps of 1B = 502.5M. Integer math: 1_000_000_000 * 5025 / 10_000 = 502_500_000.
-        assert_eq!(cap, Uint128::new(502_500_000));
-    }
-
-    /// Past the ramp window, the helper returns None.
-    #[test]
-    fn returns_none_past_ramp() {
-        // Block is RAMP_BLOCKS past cooldown_until — ramp fully elapsed.
-        let cap = post_threshold_swap_cap(
-            100,
-            100 + POST_THRESHOLD_SWAP_RAMP_BLOCKS,
-            Uint128::new(1_000_000_000),
-        );
-        assert!(cap.is_none(), "past ramp → no cap");
-    }
-
-    /// LP withdrawal shrinks the offer-side reserve, which shrinks the
-    /// absolute cap proportionally. Confirms the ramp is reserve-aware
-    /// and doesn't grant a fixed-dollar MEV window even if liquidity
-    /// drains.
-    #[test]
-    fn cap_scales_with_offer_reserve() {
-        let cap_high = post_threshold_swap_cap(100, 100, Uint128::new(1_000_000_000)).unwrap();
-        let cap_low = post_threshold_swap_cap(100, 100, Uint128::new(100_000_000)).unwrap();
-        // 10× the reserve → 10× the absolute cap.
-        assert_eq!(cap_high, cap_low.checked_mul(Uint128::new(10)).unwrap());
-    }
 }

@@ -31,11 +31,6 @@ enum PoolAdminMsg {
     RecoverStuckStates {
         recovery_type: crate::pool_struct::RecoveryType,
     },
-    /// post-1y-dormancy sweep of the unclaimed
-    /// emergency-drain residual. Factory forwards; the pool's handler
-    /// verifies dormancy elapsed and `info.sender == factory_addr`
-    /// before sending the residual to the bluechip wallet.
-    SweepUnclaimedEmergencyShares {},
 }
 
 fn forward_pool_admin(
@@ -144,25 +139,6 @@ pub fn execute_recover_pool_stuck_states(
         pool_id,
         "recover_pool_stuck_states",
         PoolAdminMsg::RecoverStuckStates { recovery_type },
-    )
-}
-
-/// factory-only entry point that forwards a
-/// `SweepUnclaimedEmergencyShares` to a pool whose 1-year claim
-/// dormancy has elapsed. The pool itself enforces both the dormancy
-/// gate AND the `info.sender == factory_addr` auth check; this
-/// wrapper just plumbs the admin's intent through.
-pub fn execute_sweep_unclaimed_emergency_shares_pool(
-    deps: DepsMut,
-    info: MessageInfo,
-    pool_id: u64,
-) -> Result<Response, ContractError> {
-    forward_pool_admin(
-        deps.as_ref(),
-        info,
-        pool_id,
-        "sweep_unclaimed_emergency_shares_pool",
-        PoolAdminMsg::SweepUnclaimedEmergencyShares {},
     )
 }
 
