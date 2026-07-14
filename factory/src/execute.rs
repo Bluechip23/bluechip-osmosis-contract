@@ -47,7 +47,7 @@ pub use upgrades::{
 
 use crate::error::ContractError;
 use crate::msg::ExecuteMsg;
-use crate::pool_creation_reply::{finalize_pool, mint_create_pool, set_tokens};
+use crate::pool_creation_reply::{finalize_pool, mint_create_pool};
 use crate::state::FACTORYINSTANTIATEINFO;
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -56,7 +56,11 @@ use cosmwasm_std::{Deps, DepsMut, Env, MessageInfo, Reply, Response};
 use crate::{CONTRACT_NAME, CONTRACT_VERSION};
 
 // Reply step constants (stored in low 8 bits of reply ID).
-pub const SET_TOKENS: u64 = 1;
+//
+// The CW20-instantiate step (`SET_TOKENS`) was removed with the
+// TokenFactory migration — the creator token is now a pool-owned native
+// denom, so the reply chain is NFT-instantiate -> pool-instantiate ->
+// finalize. `MINT_CREATE_POOL` now handles the NFT-created reply.
 pub const MINT_CREATE_POOL: u64 = 2;
 pub const FINALIZE_POOL: u64 = 3;
 
@@ -263,7 +267,6 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractEr
 pub fn pool_creation_reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractError> {
     let (pool_id, step) = decode_reply_id(msg.id);
     match step {
-        SET_TOKENS => set_tokens(deps, env, msg, pool_id),
         MINT_CREATE_POOL => mint_create_pool(deps, env, msg, pool_id),
         FINALIZE_POOL => finalize_pool(deps, env, msg, pool_id),
         _ => Err(ContractError::UnknownReplyId { id: msg.id }),

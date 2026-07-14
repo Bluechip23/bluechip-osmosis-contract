@@ -31,7 +31,7 @@ use crate::state::{
     REPLY_ID_FACTORY_NOTIFY_RETRY, THRESHOLD_PAYOUT_AMOUNTS, USD_RAISED_FROM_COMMIT,
 };
 // Swap orchestration lives in pool_core::swap; re-exported via swap_helper.
-use crate::swap_helper::{execute_swap_cw20, simple_swap};
+use crate::swap_helper::simple_swap;
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, CosmosMsg, Decimal, DepsMut, Env, MessageInfo,
     Reply, Response, StdError, StdResult, Storage, SubMsg, SubMsgResult, Uint128, WasmMsg,
@@ -67,46 +67,77 @@ pub fn instantiate(
         return Err(ContractError::Unauthorized {});
     }
 
-    msg.pool_token_info[0].check(deps.api)?;
-    msg.pool_token_info[1].check(deps.api)?;
-    if msg.pool_token_info[0] == msg.pool_token_info[1] {
-        return Err(ContractError::DoublingAssets {});
-    }
-
     // Enforce strict pair shape AND ordering: index 0 = Bluechip
-    // (Native), index 1 = CreatorToken matching `msg.token_address`.
-    // Every downstream piece of commit/swap/threshold-payout code
-    // hard-codes `reserve0 == bluechip, reserve1 == creator-token`,
-    // so a reversed pair would silently produce wrong-direction swaps.
-    // Defense-in-depth — the factory's validate_pool_token_info enforces
-    // the same invariant — but rejecting again here means a buggy
-    // factory migration or a directly-instantiated pool (e.g. via a raw
-    // Wasm instantiate bypassing the factory entirely) can't silently
-    // produce a pool whose reserve accounting disagrees with its
-    // holdings.
-    match (&msg.pool_token_info[0], &msg.pool_token_info[1]) {
-        (TokenType::Native { denom }, TokenType::CreatorToken { contract_addr }) => {
-            if denom.trim().is_empty() {
-                return Err(ContractError::InvalidPairShape {
-                    reason: "Bluechip denom must be non-empty".to_string(),
-                });
-            }
-            if *contract_addr != msg.token_address {
-                return Err(ContractError::InvalidPairShape {
-                    reason: "CreatorToken.contract_addr in pool_token_info must equal \
-                             msg.token_address"
-                        .to_string(),
-                });
-            }
+    // (Native), index 1 = CreatorToken. Every downstream piece of
+    // commit/swap/threshold-payout code hard-codes `reserve0 == bluechip,
+    // reserve1 == creator-token`, so a reversed pair would silently
+    // produce wrong-direction swaps.
+    //
+    // The creator token is now a native TokenFactory denom that THIS POOL
+    // owns: the factory passes index 1 as a `CreatorToken` PLACEHOLDER
+    // (its denom is ignored) plus a `subdenom`, and the pool constructs
+    // the real denom `factory/{env.contract.address}/{subdenom}` — the
+    // pool contract is the denom admin (mint/burn authority). Building the
+    // denom here (rather than trusting a factory-supplied value) keeps the
+    // pool the sole source of truth for its own creator denom even if a
+    // buggy factory migration or a raw direct-instantiate bypasses the
+    // factory.
+    let bluechip_side = msg.pool_token_info[0].clone();
+    match &bluechip_side {
+        TokenType::Native { denom } if !denom.trim().is_empty() => {}
+        TokenType::Native { .. } => {
+            return Err(ContractError::InvalidPairShape {
+                reason: "Bluechip denom must be non-empty".to_string(),
+            });
         }
         _ => {
             return Err(ContractError::InvalidPairShape {
-                reason: "pool_token_info must be [Bluechip(Native), CreatorToken] — order \
+                reason: "pool_token_info[0] must be the Bluechip(Native) side — order \
                          matters: bluechip at index 0, creator-token at index 1."
                     .to_string(),
             });
         }
     }
+    if !matches!(msg.pool_token_info[1], TokenType::CreatorToken { .. }) {
+        return Err(ContractError::InvalidPairShape {
+            reason: "pool_token_info[1] must be the CreatorToken placeholder — order \
+                     matters: bluechip at index 0, creator-token at index 1."
+                .to_string(),
+        });
+    }
+    if msg.subdenom.trim().is_empty() {
+        return Err(ContractError::InvalidPairShape {
+            reason: "subdenom must be non-empty".to_string(),
+        });
+    }
+
+    // Deterministic creator-token denom: the pool is `admin`, so it knows
+    // its denom the moment it knows its own address + subdenom, without
+    // waiting for the MsgCreateDenom reply.
+    let creator_denom = pool_core::osmosis_msgs::full_denom(&env.contract.address, &msg.subdenom);
+    let creator_side = TokenType::CreatorToken {
+        denom: creator_denom.clone(),
+    };
+    let pool_token_info: [TokenType; 2] = [bluechip_side, creator_side];
+    pool_token_info[0].check(deps.api)?;
+    pool_token_info[1].check(deps.api)?;
+    if pool_token_info[0] == pool_token_info[1] {
+        return Err(ContractError::DoublingAssets {});
+    }
+
+    // Register the TokenFactory denom with the pool as admin. Fire-and-
+    // forget `add_message`: the denom is deterministic (already computed
+    // above) so we don't need the reply, and if MsgCreateDenom fails the
+    // whole instantiate tx reverts — the correct outcome, since a pool
+    // without its creator denom is unusable.
+    //
+    // TODO(phase1-migration): MsgCreateDenom may charge a creation fee /
+    // gas from the pool's own balance on mainnet. The test env has no
+    // fee, so this is left unfunded for now; if funds-forwarding is
+    // required, thread the fee coin from the factory create flow into the
+    // pool instantiate funds and attach it here.
+    let create_denom = pool_core::osmosis_msgs::create_denom_msg(&env.contract.address, &msg.subdenom);
+
     if (msg.commit_fee_info.commit_fee_bluechip + msg.commit_fee_info.commit_fee_creator)
         > Decimal::one()
     {
@@ -129,11 +160,11 @@ pub fn instantiate(
         pool_id: msg.pool_id,
         pool_info: PoolDetails {
             contract_addr: env.contract.address.clone(),
-            asset_infos: msg.pool_token_info.clone(),
+            asset_infos: pool_token_info.clone(),
             pool_type: PoolPairType::Xyk {},
         },
         factory_addr: msg.used_factory_addr.clone(),
-        token_address: msg.token_address.clone(),
+        token_denom: creator_denom.clone(),
         position_nft_address: msg.position_nft_address.clone(),
     };
 
@@ -203,9 +234,11 @@ pub fn instantiate(
     POOL_ANALYTICS.save(deps.storage, &PoolAnalytics::default())?;
 
     Ok(Response::new()
+        .add_message(create_denom)
         .add_attribute("action", "instantiate")
         .add_attribute("pool_kind", crate::state::POOL_KIND_COMMIT)
-        .add_attribute("pool_contract", env.contract.address.to_string()))
+        .add_attribute("pool_contract", env.contract.address.to_string())
+        .add_attribute("token_denom", creator_denom))
 }
 
 // ---------------------------------------------------------------------------
@@ -368,8 +401,6 @@ pub fn execute(
                 None,
             )
         }
-        ExecuteMsg::Receive(cw20_msg) => execute_swap_cw20(deps, env, info, cw20_msg),
-
         // --- Liquidity ---
         // Pause checks are applied to EVERY liquidity-touching path. If
         // deposits and removes ran unchecked while the pool was paused

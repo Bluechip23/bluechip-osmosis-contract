@@ -201,7 +201,12 @@ pub struct PoolInfo {
     pub pool_id: u64,
     pub pool_info: PoolDetails,
     pub factory_addr: Addr,
-    pub token_address: Addr,
+    /// The creator token's native TokenFactory bank denom
+    /// (`factory/{pool_addr}/{subdenom}`). The pool contract is the denom
+    /// admin, so it mints (threshold payout / distribution) and transfers
+    /// this denom via bank messages. (Pre-migration this was a CW20
+    /// contract address, `token_address: Addr`.)
+    pub token_denom: String,
     pub position_nft_address: Addr,
 }
 

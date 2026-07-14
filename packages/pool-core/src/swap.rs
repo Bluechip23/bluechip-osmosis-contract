@@ -4,33 +4,36 @@
 //! - Pure AMM math: `compute_swap`, `compute_offer_amount`,
 //! `assert_max_spread`, `update_price_accumulator`. No storage; may
 //! mutate a caller-provided `PoolState` ref.
-//! - Swap orchestration: `execute_swap_cw20` (CW20 `Receive` hook),
-//! `simple_swap` (reentrancy + rate-limit wrapper), and
-//! `execute_simple_swap` (the actual swap handler). All
+//! - Swap orchestration: `simple_swap` (reentrancy + rate-limit wrapper)
+//! and `execute_simple_swap` (the actual swap handler). All
 //! shape-agnostic — no commit-phase logic; `query_check_commit` is
 //! the only gate.
+//!
+//! Selling the creator token is now a NATIVE swap: the creator token is a
+//! TokenFactory bank denom, so a seller attaches it as funds to a
+//! `SimpleSwap` and the offer is processed through the same native path
+//! as the bluechip side (offer detection via `equal()`, fund verification
+//! via `confirm_sent_native_balance`). The old CW20 `Receive`-hook sell
+//! path (`execute_swap_cw20`) has been removed.
 //!
 //! USD conversion helpers — which query the factory's x/twap-backed
 //! pricing and are only needed by the commit flow — stay in
 //! `creator-pool::swap_helper`.
 
-use crate::asset::{TokenInfo, TokenInfoPoolExt, TokenType};
+use crate::asset::{TokenInfo, TokenInfoPoolExt};
 use crate::error::ContractError;
 use crate::generic::{
     check_rate_limit, decimal2decimal256, enforce_transaction_deadline, update_pool_fee_growth,
     with_reentrancy_guard,
 };
-use crate::msg::Cw20HookMsg;
 use crate::state::{
-    PoolCtx, PoolState, CREATOR_FEE_POT, IS_THRESHOLD_HIT, MINIMUM_LIQUIDITY,
-    POOL_ANALYTICS, POOL_FEE_STATE, POOL_PAUSED, POOL_STATE,
-    POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK,
+    PoolCtx, PoolState, IS_THRESHOLD_HIT, MINIMUM_LIQUIDITY, POOL_ANALYTICS, POOL_FEE_STATE,
+    POOL_PAUSED, POOL_STATE, POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK,
 };
 use cosmwasm_std::{
-    from_json, Addr, Decimal, Decimal256, DepsMut, Env, Fraction, MessageInfo, Response, StdError,
-    StdResult, Uint128, Uint256,
+    Addr, Decimal, Decimal256, DepsMut, Env, Fraction, MessageInfo, Response, StdError, StdResult,
+    Uint128, Uint256,
 };
-use cw20::Cw20ReceiveMsg;
 use std::str::FromStr;
 
 pub const DEFAULT_SLIPPAGE: &str = "0.005";
@@ -270,137 +273,14 @@ pub fn assert_max_spread(
 }
 
 // ---------------------------------------------------------------------------
-// Swap orchestration (CW20 hook + reentrancy/rate-limit wrapper + handler)
+// Swap orchestration (reentrancy/rate-limit wrapper + handler)
+//
+// Selling the creator token no longer needs a bespoke CW20 `Receive`
+// hook: the creator token is a native TokenFactory denom, so it is
+// attached as funds to a `SimpleSwap` and flows through the standard
+// native offer path (`confirm_sent_native_balance` +
+// `execute_simple_swap`) exactly like the bluechip side.
 // ---------------------------------------------------------------------------
-
-pub fn execute_swap_cw20(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    cw20_msg: Cw20ReceiveMsg,
-) -> Result<Response, ContractError> {
-    // Gate: IS_THRESHOLD_HIT is set at threshold-crossing time, so
-    // pre-threshold swaps are rejected here.
-    if !IS_THRESHOLD_HIT.load(deps.storage)? {
-        return Err(ContractError::ShortOfThreshold {});
-    }
-    if cw20_msg.amount.is_zero() {
-        return Err(ContractError::ZeroAmount {});
-    }
-    let contract_addr = info.sender.clone();
-    match from_json(&cw20_msg.msg) {
-        Ok(Cw20HookMsg::Swap {
-            belief_price,
-            max_spread,
-            allow_high_max_spread,
-            to,
-            transaction_deadline,
-        }) => {
-            // Enforce the transaction deadline BEFORE the cross-contract
-            // balance query so an expired Receive-hook tx fails fast
-            // instead of paying for a `query_token_balance_strict`
-            // round-trip before reverting. `simple_swap` re-checks the
-            // deadline as defense-in-depth so any future entry point
-            // that bypasses this gate still rejects.
-            enforce_transaction_deadline(env.block.time, transaction_deadline)?;
-
-            // Single-shot load of the four core state items. The same
-            // `PoolCtx` is handed to `simple_swap` below so the swap
-            // handler doesn't re-read POOL_INFO / POOL_STATE /
-            // POOL_FEE_STATE — nothing writes between here and there,
-            // so the values are guaranteed identical.
-            let ctx = PoolCtx::load(deps.storage)?;
-            // Authorisation + offer-side lookup in one pass, so the
-            // balance-verify step below can use the same index without
-            // re-scanning the pair.
-            let offer_index = ctx
-                .info
-                .pool_info
-                .asset_infos
-                .iter()
-                .position(|t| {
-                    matches!(t, TokenType::CreatorToken { contract_addr } if *contract_addr == info.sender)
-                })
-                .ok_or(ContractError::Unauthorized {})?;
-            // confirm the CW20 actually transferred the
-            // claimed `cw20_msg.amount` before letting `simple_swap`
-            // credit the offer side. The pool's CW20 is factory-minted
-            // and trusted today, but a hostile CW20 could dispatch
-            // Receive hooks with fabricated amounts and drain the
-            // opposite reserve at AMM rates, so we verify as
-            // defense-in-depth. We
-            // verify by comparing the pool's actual CW20 balance to the
-            // pre-Receive invariant
-            // balance == reserve_X + fee_reserve_X + creator_pot.X
-            // plus the claimed `cw20_msg.amount`. A SHORTFALL means
-            // either no real transfer, a fee-on-transfer skim, or a
-            // negative rebase — all attacks/edges we want to reject.
-            // We use `<` (not `!=`) so unsolicited donations to the pool
-            // (`balance > expected`) don't block legitimate swaps; that
-            // surplus is benign orphan liquidity and doesn't enable an
-            // exploit beyond letting the attacker swap their own
-            // donation at market rate.
-            //
-            // Creator pools also benefit defensively: although their
-            // CW20 is auto-minted by the pool itself (no malicious
-            // admin), folding the check in at the shared entry point
-            // closes any future regression vector — same posture as
-            // creator-pool's deposit/add paths already routing through
-            // `*_with_verify`.
-            let creator_pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
-            let (reserve_offer, fee_reserve_offer, pot_offer) = if offer_index == 0 {
-                (
-                    ctx.state.reserve0,
-                    ctx.fees.fee_reserve_0,
-                    creator_pot.amount_0,
-                )
-            } else {
-                (
-                    ctx.state.reserve1,
-                    ctx.fees.fee_reserve_1,
-                    creator_pot.amount_1,
-                )
-            };
-            let expected_min = reserve_offer
-                .checked_add(fee_reserve_offer)?
-                .checked_add(pot_offer)?
-                .checked_add(cw20_msg.amount)?;
-            let actual_balance = pool_factory_interfaces::asset::query_token_balance_strict(
-                &deps.querier,
-                &info.sender,
-                &env.contract.address,
-            )?;
-            if actual_balance < expected_min {
-                return Err(ContractError::Cw20SwapBalanceMismatch {
-                    cw20: info.sender.to_string(),
-                    expected_min,
-                    actual: actual_balance,
-                    claimed_amount: cw20_msg.amount,
-                });
-            }
-
-            let to_addr = to.map(|a| deps.api.addr_validate(&a)).transpose()?;
-            let validated_sender = deps.api.addr_validate(&cw20_msg.sender)?;
-            simple_swap(
-                deps,
-                env,
-                info,
-                validated_sender,
-                TokenInfo {
-                    info: TokenType::CreatorToken { contract_addr },
-                    amount: cw20_msg.amount,
-                },
-                belief_price,
-                max_spread,
-                allow_high_max_spread,
-                to_addr,
-                transaction_deadline,
-                Some(ctx),
-            )
-        }
-        Err(err) => Err(ContractError::Std(err)),
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 pub fn simple_swap(
@@ -426,8 +306,8 @@ pub fn simple_swap(
     with_reentrancy_guard(deps, move |mut deps| {
         // defense-in-depth threshold gate. The current entry points
         // already gate on IS_THRESHOLD_HIT (creator-pool dispatcher via
-        // query_check_commit, CW20 hook at the top of execute_swap_cw20),
-        // so this check is idempotent against existing call sites. The
+        // query_check_commit), so this check is idempotent against
+        // existing call sites. The
         // point is to close the future-regression vector where a new
         // entry point (router-friendly variant, batch swap, etc.) might
         // forget the gate. Checked before the PoolCtx load so a

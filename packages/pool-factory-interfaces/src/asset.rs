@@ -26,8 +26,15 @@ impl TokenInfo {
 
 #[cw_serde]
 pub enum TokenType {
+    /// The creator token. Post-Osmosis-migration this is a native
+    /// TokenFactory bank denom (`factory/{pool_addr}/{subdenom}`) minted
+    /// and burned by the pool contract (the denom admin), NOT a CW20
+    /// contract. It is kept as a SEPARATE variant from `Native` — even
+    /// though both are now bank coins — so all "which side is bluechip vs
+    /// creator" routing (index 0 = bluechip, index 1 = creator) keeps
+    /// working structurally rather than by string-matching denoms.
     CreatorToken {
-        contract_addr: Addr,
+        denom: String,
     },
     /// Any native bank denom on the chain — bluechip itself (`ubluechip`),
     /// IBC-wrapped remote assets (e.g. `ibc/...` for ATOM), tokenfactory
@@ -45,49 +52,58 @@ impl fmt::Display for TokenType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             TokenType::Native { denom } => write!(f, "{}", denom),
-            TokenType::CreatorToken { contract_addr } => write!(f, "{}", contract_addr),
+            TokenType::CreatorToken { denom } => write!(f, "{}", denom),
         }
     }
 }
 
 impl TokenType {
+    /// Whether this side is a native bank coin (funds are ATTACHED to the
+    /// message rather than pulled via a CW20 allowance).
+    ///
+    /// Post-migration BOTH variants are bank denoms, so this returns
+    /// `true` for both. Callers historically used this to mean "is a bank
+    /// coin so `info.funds` carries it" — that meaning now covers the
+    /// creator token too (a `SimpleSwap` selling the creator denom, a
+    /// deposit attaching the creator denom, etc.), so treating
+    /// `CreatorToken` as native here is correct.
+    ///
+    /// NOTE: this method must NOT be used to decide "is this the bluechip
+    /// side" — that routing is done by matching the `Native` variant
+    /// explicitly or by the fixed pair index (bluechip @ 0, creator @ 1).
     pub fn is_native_token(&self) -> bool {
         match self {
             TokenType::Native { .. } => true,
-            TokenType::CreatorToken { .. } => false,
+            // The creator token is a TokenFactory bank denom now, so it is
+            // a native coin for funds-handling purposes.
+            TokenType::CreatorToken { .. } => true,
         }
     }
 
     pub fn query_pool(&self, querier: &QuerierWrapper, pool_addr: Addr) -> StdResult<Uint128> {
         match self {
-            TokenType::CreatorToken { contract_addr, .. } => {
-                query_token_balance(querier, contract_addr.clone(), pool_addr)
+            // Both sides are bank denoms now — a plain balance query.
+            TokenType::CreatorToken { denom, .. } => {
+                query_balance(querier, pool_addr, denom.to_string())
             }
             TokenType::Native { denom, .. } => query_balance(querier, pool_addr, denom.to_string()),
         }
     }
 
-    /// Strict variant of `query_pool`: propagates the underlying CW20
-    /// query error instead of swallowing it as a zero balance.
-    ///
-    /// Used by callers where a silent zero on a failed CW20 balance
-    /// query would corrupt downstream accounting — e.g. the router's
-    /// slippage assertion (`router::execution`), where pre/post balance
-    /// reads of the recipient's CW20 holdings need to fail-closed: a
-    /// swallowed pre-balance error would let the user's pre-existing
-    /// CW20 holdings count toward the post-route "received" total and
-    /// silently weaken slippage protection by up to that amount.
-    /// Native bank queries already propagate via the `?` in
-    /// `query_balance`, so the only behavioural difference is on the
-    /// CW20 side.
+    /// Strict variant of `query_pool`. Both sides are native bank denoms
+    /// now, so both propagate the underlying bank-query error via the `?`
+    /// in `query_balance` (no swallow-to-zero). Retained as a distinct
+    /// method so callers that documented a fail-closed requirement (e.g.
+    /// the router's slippage assertion in `router::execution`) keep an
+    /// explicit strict entry point.
     pub fn query_pool_strict(
         &self,
         querier: &QuerierWrapper,
         pool_addr: Addr,
     ) -> StdResult<Uint128> {
         match self {
-            TokenType::CreatorToken { contract_addr, .. } => {
-                query_token_balance_strict(querier, contract_addr, &pool_addr)
+            TokenType::CreatorToken { denom, .. } => {
+                query_balance(querier, pool_addr, denom.to_string())
             }
             TokenType::Native { denom, .. } => query_balance(querier, pool_addr, denom.to_string()),
         }
@@ -95,10 +111,7 @@ impl TokenType {
 
     pub fn equal(&self, asset: &TokenType) -> bool {
         match (self, asset) {
-            (
-                TokenType::CreatorToken { contract_addr: a },
-                TokenType::CreatorToken { contract_addr: b },
-            ) => a == b,
+            (TokenType::CreatorToken { denom: a }, TokenType::CreatorToken { denom: b }) => a == b,
             (TokenType::Native { denom: a }, TokenType::Native { denom: b }) => a == b,
             _ => false,
         }
@@ -107,39 +120,34 @@ impl TokenType {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             TokenType::Native { denom } => denom.as_bytes(),
-            TokenType::CreatorToken { contract_addr } => contract_addr.as_bytes(),
+            TokenType::CreatorToken { denom } => denom.as_bytes(),
         }
     }
 
     /// Validate the per-side shape of a `pool_token_info` entry.
     ///
-    /// - `Native { denom }`: rejects empty / whitespace-only denoms. The
-    ///   bank module on-chain would reject the same shape later, but
-    ///   doing the check here surfaces operator typos at the contract
-    ///   boundary rather than 48h later when an apply lands a malformed
-    ///   denom and every subsequent BankMsg reverts inside the bank
-    ///   module with an error nobody is watching for. (Cosmos-SDK's
-    ///   stricter `^[a-zA-Z][a-zA-Z0-9/:._-]{2,127}$` regex is enforced
-    ///   by the factory's `validate_pool_token_info`;
-    ///   here we only check the lowest bar so this trait method stays
-    ///   meaningful for any consuming entry point.)
-    /// - `CreatorToken { contract_addr }`: rejects malformed bech32 via
-    ///   `api.addr_validate`.
+    /// Both variants are bank denoms now, so both reject empty /
+    /// whitespace-only denoms. The bank module on-chain would reject the
+    /// same shape later, but doing the check here surfaces operator typos
+    /// at the contract boundary rather than 48h later when an apply lands
+    /// a malformed denom and every subsequent BankMsg reverts inside the
+    /// bank module with an error nobody is watching for. (Cosmos-SDK's
+    /// stricter `^[a-zA-Z][a-zA-Z0-9/:._-]{2,127}$` regex is enforced by
+    /// the factory's `validate_pool_token_info`; here we only check the
+    /// lowest bar so this trait method stays meaningful for any consuming
+    /// entry point.)
     ///
     /// Centralized here so every caller (e.g. creator-pool
     /// `instantiate`) gets the same guard set without an asymmetric
     /// inline empty-denom check at one call site only.
-    pub fn check(&self, api: &dyn Api) -> StdResult<()> {
+    pub fn check(&self, _api: &dyn Api) -> StdResult<()> {
         match self {
-            TokenType::Native { denom } => {
+            TokenType::Native { denom } | TokenType::CreatorToken { denom } => {
                 if denom.trim().is_empty() {
                     return Err(cosmwasm_std::StdError::generic_err(
-                        "Native denom must be non-empty",
+                        "Token denom must be non-empty",
                     ));
                 }
-            }
-            TokenType::CreatorToken { contract_addr } => {
-                api.addr_validate(contract_addr.as_str())?;
             }
         }
         Ok(())
@@ -168,9 +176,9 @@ pub fn native_asset(denom: String, amount: Uint128) -> TokenInfo {
     }
 }
 
-pub fn token_asset(contract_addr: Addr, amount: Uint128) -> TokenInfo {
+pub fn token_asset(denom: String, amount: Uint128) -> TokenInfo {
     TokenInfo {
-        info: TokenType::CreatorToken { contract_addr },
+        info: TokenType::CreatorToken { denom },
         amount,
     }
 }

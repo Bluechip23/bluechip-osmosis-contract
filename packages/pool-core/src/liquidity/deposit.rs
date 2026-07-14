@@ -3,10 +3,12 @@
 //!
 //! `prepare_deposit` runs the checks common to any liquidity-in
 //! operation: ratio matching, slippage bounds, per-asset fund
-//! collection (Native -> BankMsg refund on overpayment,
-//! CW20 -> Cw20ExecuteMsg::TransferFrom), and returns a `DepositPrep`
-//! bundle for the caller. `execute_deposit_liquidity` then uses that
-//! bundle to mint a fresh position NFT + credit the LP.
+//! collection, and returns a `DepositPrep` bundle for the caller.
+//! Post-migration BOTH pool sides are native bank denoms (bluechip +
+//! the creator TokenFactory denom), so every side is collected the same
+//! way: verify attached `info.funds` and BankMsg-refund any overpayment.
+//! `execute_deposit_liquidity` then uses that bundle to mint a fresh
+//! position NFT + credit the LP.
 //!
 //! Both `DepositPrep` and `prepare_deposit` are `pub(crate)` so
 //! `super::add::add_to_position` can reuse them without re-implementing
@@ -16,7 +18,6 @@ use cosmwasm_std::{
     to_json_binary, Addr, BankMsg, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Response,
     StdError, StdResult, SubMsg, Timestamp, Uint128, WasmMsg,
 };
-use pool_factory_interfaces::asset::query_token_balance_strict;
 use pool_factory_interfaces::cw721_msgs::{Action, Cw721ExecuteMsg};
 
 use crate::asset::TokenType;
@@ -43,9 +44,9 @@ use crate::swap::update_price_accumulator;
 /// sides).
 ///
 /// `collect_msgs` is pair-shape agnostic: for each of the two asset
-/// positions we dispatch on `TokenType` and emit the appropriate
-/// collection/refund message. Native/CW20, Native/Native, and CW20/CW20
-/// pools all produce a correct list.
+/// positions we emit the appropriate overpayment-refund message. Both
+/// sides are native bank denoms now, so the list is at most two BankMsg
+/// refunds (one per over-paid side).
 pub(crate) struct DepositPrep {
     pub pool_info: PoolInfo,
     /// POOL_STATE as loaded once for the deposit-amount math. Nothing
@@ -67,61 +68,50 @@ pub(crate) struct DepositPrep {
 }
 
 /// For a single asset position, emit the CosmosMsgs needed to pull
-/// `amount` into the pool contract and return the over-payment refund:
-/// - `Native`: verify `info.funds` covers at least `amount` of the
-/// denom; emit a BankMsg refund for the overpayment (if any) back
-/// to the sender; returns the refunded amount.
-/// - `CreatorToken`: emit a `Cw20ExecuteMsg::TransferFrom` so the pool
-/// pulls exactly `amount` from the sender (requires prior allowance);
-/// always returns 0 (no refund concept for CW20 TransferFrom).
+/// `amount` into the pool contract and return the over-payment refund.
+///
+/// Post-migration BOTH sides are native bank denoms — the bluechip side
+/// AND the creator TokenFactory denom — so both use the identical
+/// attached-funds path: verify `info.funds` covers at least `amount` of
+/// the denom; emit a BankMsg refund for the overpayment (if any) back to
+/// the sender; return the refunded amount. (Pre-migration the
+/// `CreatorToken` arm pulled a CW20 via `Cw20ExecuteMsg::TransferFrom`;
+/// now the depositor ATTACHES the creator denom just like the bluechip
+/// side.) `pool_contract` is no longer needed for the (retired) CW20
+/// pull path but is kept in the signature for call-site stability.
 fn collect_deposit_side(
     asset_info: &TokenType,
     amount: Uint128,
     info: &MessageInfo,
-    pool_contract: &Addr,
+    _pool_contract: &Addr,
     out_msgs: &mut Vec<CosmosMsg>,
 ) -> Result<Uint128, ContractError> {
-    match asset_info {
-        TokenType::Native { denom } => {
-            let paid = info
-                .funds
-                .iter()
-                .find(|c| c.denom == *denom)
-                .map(|c| c.amount)
-                .unwrap_or_default();
-            if paid < amount {
-                return Err(ContractError::InvalidNativeAmount {
-                    expected: amount,
-                    actual: paid,
-                });
-            }
-            let refund = paid.checked_sub(amount).unwrap_or(Uint128::zero());
-            if !refund.is_zero() {
-                out_msgs.push(CosmosMsg::Bank(BankMsg::Send {
-                    to_address: info.sender.to_string(),
-                    amount: vec![Coin {
-                        denom: denom.clone(),
-                        amount: refund,
-                    }],
-                }));
-            }
-            Ok(refund)
-        }
-        TokenType::CreatorToken { contract_addr } => {
-            if !amount.is_zero() {
-                out_msgs.push(CosmosMsg::Wasm(WasmMsg::Execute {
-                    contract_addr: contract_addr.to_string(),
-                    msg: to_json_binary(&cw20::Cw20ExecuteMsg::TransferFrom {
-                        owner: info.sender.to_string(),
-                        recipient: pool_contract.to_string(),
-                        amount,
-                    })?,
-                    funds: vec![],
-                }));
-            }
-            Ok(Uint128::zero())
-        }
+    let denom = match asset_info {
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom,
+    };
+    let paid = info
+        .funds
+        .iter()
+        .find(|c| c.denom == *denom)
+        .map(|c| c.amount)
+        .unwrap_or_default();
+    if paid < amount {
+        return Err(ContractError::InvalidNativeAmount {
+            expected: amount,
+            actual: paid,
+        });
     }
+    let refund = paid.checked_sub(amount).unwrap_or(Uint128::zero());
+    if !refund.is_zero() {
+        out_msgs.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: info.sender.to_string(),
+            amount: vec![Coin {
+                denom: denom.clone(),
+                amount: refund,
+            }],
+        }));
+    }
+    Ok(refund)
 }
 
 pub(crate) fn prepare_deposit(
@@ -158,18 +148,17 @@ pub(crate) fn prepare_deposit(
     // tokenfactory tokens) in the pool's bank balance — orphaned forever
     // because no handler emits outgoing transfers in those denoms.
     //
-    // The valid set is the set of `Native { denom }` entries in the
-    // pool's `asset_infos`. CW20 sides don't accept native funds, so
-    // they don't contribute. For Native/CW20 pools (the creator pool)
-    // only one denom is valid; for Native/Native pools two denoms are
-    // valid.
+    // The valid set is every bank denom in the pool's `asset_infos`.
+    // Post-migration both the bluechip `Native` side AND the creator
+    // `CreatorToken` (TokenFactory) side are bank denoms attached as
+    // funds, so BOTH contribute — the creator pool now has two valid
+    // attach denoms just like a native/native pool.
     let valid_denoms: Vec<&str> = pool_info
         .pool_info
         .asset_infos
         .iter()
-        .filter_map(|ai| match ai {
-            TokenType::Native { denom } => Some(denom.as_str()),
-            TokenType::CreatorToken { .. } => None,
+        .map(|ai| match ai {
+            TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom.as_str(),
         })
         .collect();
     if let Some(extra) = info
@@ -579,27 +568,21 @@ pub(crate) type PreBalanceSnapshot = (Option<Uint128>, Option<Uint128>);
 /// silently mask exactly the fee-on-transfer corruption this
 /// verification is designed to catch.
 pub(crate) fn snapshot_pool_cw20_balances(
-    deps: Deps,
-    pool_addr: &Addr,
-    asset_infos: &[TokenType; 2],
+    _deps: Deps,
+    _pool_addr: &Addr,
+    _asset_infos: &[TokenType; 2],
 ) -> StdResult<PreBalanceSnapshot> {
-    let bal0 = match &asset_infos[0] {
-        TokenType::CreatorToken { contract_addr } => Some(query_token_balance_strict(
-            &deps.querier,
-            contract_addr,
-            pool_addr,
-        )?),
-        TokenType::Native { .. } => None,
-    };
-    let bal1 = match &asset_infos[1] {
-        TokenType::CreatorToken { contract_addr } => Some(query_token_balance_strict(
-            &deps.querier,
-            contract_addr,
-            pool_addr,
-        )?),
-        TokenType::Native { .. } => None,
-    };
-    Ok((bal0, bal1))
+    // Post-migration there are no CW20 sides: the bluechip side is a
+    // native bank denom and the creator token is a TokenFactory native
+    // bank denom. Bank transfers are exact (no fee-on-transfer / rebase
+    // possible), so there is nothing to snapshot — both sides return
+    // `None` and the deposit balance-verify SubMsg is never wired.
+    //
+    // The function and the `DepositVerifyContext` machinery are retained
+    // (dormant) so re-introducing a third-party CW20 side in a later
+    // phase only requires re-populating these snapshots rather than
+    // re-plumbing the reply path.
+    Ok((None, None))
 }
 
 /// Builds the final `Response`. When `pre_snapshot.is_none()` (creator-
@@ -648,17 +631,18 @@ pub(crate) fn finalize_deposit_response(
         }
     };
 
-    let cw20_side0_addr = match &asset_infos[0] {
-        TokenType::CreatorToken { contract_addr } => Some(contract_addr.clone()),
-        TokenType::Native { .. } => None,
+    // Post-migration every pool side is a native bank denom, so there is
+    // no CW20 address to verify against. Both are always `None`, so the
+    // native+native fast path below always returns.
+    let cw20_side0_addr: Option<Addr> = match &asset_infos[0] {
+        TokenType::CreatorToken { .. } | TokenType::Native { .. } => None,
     };
-    let cw20_side1_addr = match &asset_infos[1] {
-        TokenType::CreatorToken { contract_addr } => Some(contract_addr.clone()),
-        TokenType::Native { .. } => None,
+    let cw20_side1_addr: Option<Addr> = match &asset_infos[1] {
+        TokenType::CreatorToken { .. } | TokenType::Native { .. } => None,
     };
 
     if cw20_side0_addr.is_none() && cw20_side1_addr.is_none() {
-        // Native+Native shape: nothing to verify.
+        // All-native shape: nothing to verify.
         return Ok(Response::new().add_messages(messages).add_attributes(attrs));
     }
 

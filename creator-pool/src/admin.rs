@@ -434,7 +434,8 @@ pub fn execute_claim_failed_distribution(
     let pool_info = POOL_INFO.load(deps.storage)?;
     let submsg: SubMsg = crate::commit::distribution_batch::build_distribution_mint_submsg(
         deps.storage,
-        &pool_info.token_address,
+        &pool_info.pool_info.contract_addr,
+        &pool_info.token_denom,
         &recipient_addr,
         // accounting key stays the original committer (info.sender) so
         // a re-failure reaccumulates back to them, not to the alternate

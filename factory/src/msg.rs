@@ -11,9 +11,11 @@ use crate::state::FactoryInstantiate;
 #[cw_serde]
 pub struct CreatePoolReplyMsg {
     pub pool_id: u64,
+    /// Pool pair. Index 0 = bluechip `Native`. Index 1 = `CreatorToken`
+    /// PLACEHOLDER — the pool creates its own TokenFactory denom from
+    /// `subdenom` and overwrites the slot. Must be wire-compatible with
+    /// the pool's `PoolInstantiateMsg`.
     pub pool_token_info: [TokenType; 2],
-    // The token contract code ID used for the tokens in the pool
-    pub cw20_token_contract_id: u64,
     pub used_factory_addr: Addr,
     //gets populated inside reply
     pub threshold_payout: Option<Binary>,
@@ -21,7 +23,11 @@ pub struct CreatePoolReplyMsg {
     pub commit_fee_info: CommitFeeInfo,
     /// Commit threshold, USD-denominated (6 decimals).
     pub commit_threshold_limit_usd: Uint128,
-    pub token_address: Addr,
+    /// TokenFactory subdenom for the creator token. The pool creates
+    /// `factory/{pool_addr}/{subdenom}` and becomes its denom admin.
+    /// Replaces the old `token_address` (CW20 contract) and
+    /// `cw20_token_contract_id`.
+    pub subdenom: String,
     //address called by the pool to mint new liquidity position NFTs.
     pub position_nft_address: Addr,
     pub max_bluechip_lock_per_pool: Uint128,

@@ -18,10 +18,7 @@
 //! CosmosMsg) so a failure on the factory side is recoverable via
 //! `RetryFactoryNotify` rather than reverting the whole crossing tx.
 
-use cosmwasm_std::{
-    to_json_binary, Addr, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128, WasmMsg,
-};
-use cw20::Cw20ExecuteMsg;
+use cosmwasm_std::{Addr, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128};
 
 use crate::asset::{get_native_denom, TokenInfo};
 use crate::error::ContractError;
@@ -122,8 +119,8 @@ pub(crate) fn process_threshold_crossing_with_excess(
 
     // Arm the post-threshold cooldown. The crosser's own bounded excess
     // swap (capped at 3% of seeded reserve below) executes in this same
-    // tx — the gate sits on simple_swap / execute_swap_cw20 /
-    // process_post_threshold_commit, none of which run inside the
+    // tx — the gate sits on simple_swap / process_post_threshold_commit,
+    // none of which run inside the
     // crossing tx. So the crosser's privileged excess is unaffected,
     // while every follower trade in this block plus the next
     // POST_THRESHOLD_COOLDOWN_BLOCKS blocks is rejected with
@@ -248,17 +245,13 @@ pub(crate) fn process_threshold_crossing_with_excess(
         POOL_STATE.save(deps.storage, pool_state)?;
 
         if !return_amt.is_zero() {
-            messages.push(
-                WasmMsg::Execute {
-                    contract_addr: pool_info.token_address.to_string(),
-                    msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                        recipient: sender.to_string(),
-                        amount: return_amt,
-                    })?,
-                    funds: vec![],
-                }
-                .into(),
-            );
+            // Creator tokens out are a native bank send of the TokenFactory
+            // denom now (pre-migration this was a Cw20ExecuteMsg::Transfer).
+            messages.push(get_bank_transfer_to_msg(
+                &sender,
+                &pool_info.token_denom,
+                return_amt,
+            )?);
         }
 
         // Refund the capped portion back to the sender

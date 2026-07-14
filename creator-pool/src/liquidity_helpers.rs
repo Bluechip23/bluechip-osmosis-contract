@@ -7,9 +7,7 @@ use crate::error::ContractError;
 use crate::state::{
     CreatorFeePot, COMMITFEEINFO, CREATOR_EXCESS_POSITION, CREATOR_FEE_POT, POOL_INFO,
 };
-use cosmwasm_std::{
-    to_json_binary, CosmosMsg, DepsMut, Env, MessageInfo, Response, Timestamp, Uint128, WasmMsg,
-};
+use cosmwasm_std::{CosmosMsg, DepsMut, Env, MessageInfo, Response, Timestamp, Uint128};
 
 /// Empties the CREATOR_FEE_POT to the creator wallet configured at pool
 /// instantiation. Only the creator wallet can call this. Clip-slice fees
@@ -56,13 +54,11 @@ fn execute_claim_creator_fees_inner(
         }));
     }
     if !pot.amount_1.is_zero() {
-        messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: pool_info.token_address.to_string(),
-            msg: to_json_binary(&cw20::Cw20ExecuteMsg::Transfer {
-                recipient: fee_info.creator_wallet_address.to_string(),
-                amount: pot.amount_1,
-            })?,
-            funds: vec![],
+        // Creator-token leg is a native bank send of the TokenFactory
+        // denom now (pre-migration this was a Cw20ExecuteMsg::Transfer).
+        messages.push(CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+            to_address: fee_info.creator_wallet_address.to_string(),
+            amount: cosmwasm_std::coins(pot.amount_1.u128(), &pool_info.token_denom),
         }));
     }
 
@@ -139,13 +135,11 @@ fn execute_claim_creator_excess_inner(
     }
 
     if !excess_position.token_amount.is_zero() {
-        messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: pool_info.token_address.to_string(),
-            msg: to_json_binary(&cw20::Cw20ExecuteMsg::Transfer {
-                recipient: excess_position.creator.to_string(),
-                amount: excess_position.token_amount,
-            })?,
-            funds: vec![],
+        // Creator-token leg is a native bank send of the TokenFactory
+        // denom now (pre-migration this was a Cw20ExecuteMsg::Transfer).
+        messages.push(CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+            to_address: excess_position.creator.to_string(),
+            amount: cosmwasm_std::coins(excess_position.token_amount.u128(), &pool_info.token_denom),
         }));
     }
 

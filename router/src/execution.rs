@@ -116,21 +116,20 @@ pub fn execute_receive_cw20(
             recipient,
         } => {
             let first_op = operations.first().ok_or(RouterError::EmptyRoute)?;
+            // Post-migration both pool sides are native bank denoms (the
+            // bluechip side AND the creator TokenFactory denom), so no
+            // first-hop offer arrives via a CW20 `Send` envelope anymore —
+            // native offers must use `ExecuteMultiHop` with attached funds.
+            // This CW20-receive entry is therefore a dead path; reject it.
             match &first_op.offer_asset_info {
-                TokenType::CreatorToken { contract_addr } => {
-                    if *contract_addr != info.sender {
-                        return Err(RouterError::Std(StdError::generic_err(format!(
-                            "first hop offer cw20 ({}) does not match sender ({})",
-                            contract_addr, info.sender
-                        ))));
-                    }
-                }
-                TokenType::Native { .. } => {
+                TokenType::CreatorToken { .. } | TokenType::Native { .. } => {
                     return Err(RouterError::Std(StdError::generic_err(
-                        "first hop is native; do not call cw20::Send for native offers",
+                        "creator tokens are native TokenFactory denoms now; route offers via \
+                         ExecuteMultiHop with attached funds, not cw20::Send",
                     )));
                 }
             }
+            #[allow(unreachable_code)]
             let user = deps.api.addr_validate(&cw20_msg.sender)?;
             start_multi_hop(
                 deps,
@@ -505,8 +504,12 @@ fn build_pool_swap_msg(
     offer_amount: Uint128,
     to: String,
 ) -> Result<CosmosMsg, RouterError> {
+    // Both the bluechip side and the creator TokenFactory side are native
+    // bank denoms now, so every hop is a `SimpleSwap` with the offer denom
+    // attached as funds. (Pre-migration the `CreatorToken` arm routed
+    // through a CW20 `Send` + `PoolSwapCw20HookMsg::Swap`.)
     match &operation.offer_asset_info {
-        TokenType::Native { denom } => {
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => {
             let exec = PoolSwapExecuteMsg::SimpleSwap {
                 offer_asset: TokenInfo {
                     info: operation.offer_asset_info.clone(),
@@ -524,24 +527,6 @@ fn build_pool_swap_msg(
                     denom: denom.clone(),
                     amount: offer_amount,
                 }],
-            }))
-        }
-        TokenType::CreatorToken { contract_addr } => {
-            let hook = PoolSwapCw20HookMsg::Swap {
-                belief_price: None,
-                max_spread: Some(per_hop_max_spread()),
-                to: Some(to),
-                transaction_deadline: None,
-            };
-            let send = Cw20ExecuteMsg::Send {
-                contract: operation.pool_addr.clone(),
-                amount: offer_amount,
-                msg: to_json_binary(&hook)?,
-            };
-            Ok(CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: contract_addr.to_string(),
-                msg: to_json_binary(&send)?,
-                funds: vec![],
             }))
         }
     }

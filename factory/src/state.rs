@@ -285,7 +285,9 @@ pub struct PoolUpgrade {
 fn token_fingerprint(t: &TokenType) -> String {
     match t {
         TokenType::Native { denom } => format!("n:{}", denom),
-        TokenType::CreatorToken { contract_addr } => format!("c:{}", contract_addr),
+        // The creator token is a TokenFactory bank denom now; still tagged
+        // `c:` so it stays in a disjoint namespace from plain natives.
+        TokenType::CreatorToken { denom } => format!("c:{}", denom),
     }
 }
 
@@ -344,8 +346,7 @@ pub fn register_pool(
         .pool_token_info
         .iter()
         .map(|t| match t {
-            TokenType::Native { denom } => denom.clone(),
-            TokenType::CreatorToken { contract_addr } => contract_addr.to_string(),
+            TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom.clone(),
         })
         .collect();
 

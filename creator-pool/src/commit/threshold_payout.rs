@@ -16,10 +16,9 @@
 //! the situation is retryable via `RetryFactoryNotify`.
 
 use cosmwasm_std::{
-    to_json_binary, Addr, CosmosMsg, Decimal, Env, Order, StdError, StdResult, Storage, SubMsg,
-    Uint128, WasmMsg,
+    to_json_binary, Addr, CosmosMsg, Decimal, Env, Order, StdError, Storage, SubMsg, Uint128,
+    WasmMsg,
 };
-use cw20::Cw20ExecuteMsg;
 
 use crate::error::ContractError;
 use crate::msg::CommitFeeInfo;
@@ -222,13 +221,15 @@ pub fn trigger_threshold_payout(
     }
 
     other_msgs.push(mint_tokens(
-        &pool_info.token_address,
+        &pool_info.pool_info.contract_addr,
+        &pool_info.token_denom,
         &fee_info.creator_wallet_address,
         payout.creator_reward_amount,
-    )?);
+    ));
 
     other_msgs.push(mint_tokens(
-        &pool_info.token_address,
+        &pool_info.pool_info.contract_addr,
+        &pool_info.token_denom,
         // LIVE bluechip protocol-wallet, threaded down from
         // `execute_commit_logic`. Snapshot value remains accessible
         // via `fee_info.bluechip_wallet_address` for callers that
@@ -237,13 +238,14 @@ pub fn trigger_threshold_payout(
         // redirects this 25k-base-unit reward to the new wallet.
         bluechip_wallet,
         payout.bluechip_reward_amount,
-    )?);
+    ));
 
     other_msgs.push(mint_tokens(
-        &pool_info.token_address,
+        &pool_info.pool_info.contract_addr,
+        &pool_info.token_denom,
         &env.contract.address,
         payout.pool_seed_amount,
-    )?);
+    ));
 
     // Snapshot the committer count at threshold-crossing time. Post-threshold
     // commits never enter COMMIT_LEDGER (they swap directly), so this number
@@ -350,16 +352,11 @@ pub fn trigger_threshold_payout(
     })
 }
 
-pub fn mint_tokens(token_addr: &Addr, recipient: &Addr, amount: Uint128) -> StdResult<CosmosMsg> {
-    let mint_msg = Cw20ExecuteMsg::Mint {
-        recipient: recipient.to_string(),
-        amount,
-    };
-    let exec = WasmMsg::Execute {
-        contract_addr: token_addr.to_string(),
-        msg: to_json_binary(&mint_msg)?,
-        funds: vec![],
-    };
-
-    Ok(exec.into())
+/// Build a TokenFactory `MsgMint` that mints `amount` of the creator
+/// token `denom` and credits `recipient`. `pool_addr` is the pool
+/// contract — the denom admin — which is the required `sender` of the
+/// mint. (Pre-migration this built a `Cw20ExecuteMsg::Mint` against the
+/// CW20 token contract.)
+pub fn mint_tokens(pool_addr: &Addr, denom: &str, recipient: &Addr, amount: Uint128) -> CosmosMsg {
+    pool_core::osmosis_msgs::mint_msg(pool_addr, denom, amount, recipient)
 }

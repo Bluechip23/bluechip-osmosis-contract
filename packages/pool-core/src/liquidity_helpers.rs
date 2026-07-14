@@ -232,22 +232,17 @@ pub fn build_transfer_msg(
     recipient: &Addr,
     amount: Uint128,
 ) -> Result<CosmosMsg, ContractError> {
+    // Both sides are native bank denoms now (bluechip + the creator
+    // TokenFactory denom), so every outgoing transfer is a BankMsg::Send.
+    // (Pre-migration the CreatorToken arm built a Cw20ExecuteMsg::Transfer.)
     match asset_info {
-        TokenType::Native { denom } => Ok(CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
-            to_address: recipient.to_string(),
-            amount: vec![cosmwasm_std::Coin {
-                denom: denom.clone(),
-                amount,
-            }],
-        })),
-        TokenType::CreatorToken { contract_addr } => {
-            Ok(CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute {
-                contract_addr: contract_addr.to_string(),
-                msg: cosmwasm_std::to_json_binary(&cw20::Cw20ExecuteMsg::Transfer {
-                    recipient: recipient.to_string(),
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => {
+            Ok(CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+                to_address: recipient.to_string(),
+                amount: vec![cosmwasm_std::Coin {
+                    denom: denom.clone(),
                     amount,
-                })?,
-                funds: vec![],
+                }],
             }))
         }
     }

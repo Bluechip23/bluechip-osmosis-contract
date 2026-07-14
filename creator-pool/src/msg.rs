@@ -20,7 +20,6 @@ use crate::state::{CreatorFeePot, RecoveryType};
 // on `TokenInfo` / `RecoveryType` would still get reported).
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Binary, Decimal, Timestamp, Uint128};
-use cw20::Cw20ReceiveMsg;
 #[allow(unused_imports)]
 use {
     crate::state::{Committing, PoolDetails},
@@ -29,7 +28,9 @@ use {
 
 #[cw_serde]
 pub enum ExecuteMsg {
-    Receive(Cw20ReceiveMsg),
+    // The creator token is a native TokenFactory denom now, so selling it
+    // is a normal `SimpleSwap` with the creator denom attached as funds —
+    // there is no CW20 `Receive(Cw20ReceiveMsg)` sell hook anymore.
     SimpleSwap {
         offer_asset: TokenInfo,
         belief_price: Option<Decimal>,
@@ -374,15 +375,22 @@ pub struct FactoryNotifyStatusResponse {
 #[cw_serde]
 pub struct PoolInstantiateMsg {
     pub pool_id: u64,
+    /// The pool pair. Index 0 MUST be the bluechip `Native` side. Index 1
+    /// is a `CreatorToken` PLACEHOLDER (its denom is ignored) — the pool
+    /// creates its own TokenFactory denom at instantiate from `subdenom`
+    /// and overwrites this slot with `CreatorToken { denom }`.
     pub pool_token_info: [TokenType; 2],
-    pub cw20_token_contract_id: u64,
     pub used_factory_addr: Addr,
     pub threshold_payout: Option<Binary>,
     pub commit_fee_info: CommitFeeInfo,
     /// Commit threshold, USD-denominated (6 decimals).
     pub commit_threshold_limit_usd: Uint128,
     pub position_nft_address: Addr,
-    pub token_address: Addr,
+    /// TokenFactory subdenom for the creator token. The pool creates
+    /// `factory/{pool_contract_addr}/{subdenom}` at instantiate and
+    /// becomes its denom admin. Replaces the old `token_address: Addr`
+    /// (the CW20 contract) and `cw20_token_contract_id`.
+    pub subdenom: String,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
 }

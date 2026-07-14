@@ -9,10 +9,7 @@
 //! `POOL_STATE`, `POOL_FEE_STATE`) are threaded in from `execute_commit_logic`
 //! via references — see `super::execute_commit_logic` for the outer load.
 
-use cosmwasm_std::{
-    to_json_binary, Addr, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128, WasmMsg,
-};
-use cw20::Cw20ExecuteMsg;
+use cosmwasm_std::{coins, Addr, BankMsg, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128};
 
 use crate::asset::TokenInfo;
 use crate::error::ContractError;
@@ -146,17 +143,12 @@ pub(super) fn process_post_threshold_commit(
     POOL_STATE.save(deps.storage, &*pool_state)?;
 
     if !return_amt.is_zero() {
-        messages.push(
-            WasmMsg::Execute {
-                contract_addr: pool_info.token_address.to_string(),
-                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                    recipient: sender.to_string(),
-                    amount: return_amt,
-                })?,
-                funds: vec![],
-            }
-            .into(),
-        );
+        // Creator tokens out are a native bank send of the TokenFactory
+        // denom now (pre-migration this was a Cw20ExecuteMsg::Transfer).
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: sender.to_string(),
+            amount: coins(return_amt.u128(), &pool_info.token_denom),
+        }));
     }
 
     update_commit_info(
