@@ -144,6 +144,12 @@ pub const PENDING_FACTORY_NOTIFY: Item<bool> = Item::new("pending_factory_notify
 /// slot in without renumbering.
 pub const REPLY_ID_FACTORY_NOTIFY_INITIAL: u64 = 1;
 pub const REPLY_ID_FACTORY_NOTIFY_RETRY: u64 = 2;
+/// Reply id for the `MsgSetDenomMetadata` dispatched at instantiate (M-01).
+/// Wired as `reply_on_error` and swallowed in the reply handler: denom
+/// metadata is cosmetic (explorer/wallet display), so a failure to register
+/// it must NEVER revert pool creation. 5 slots in below the swap/create
+/// ids (3, 4) and well under the distribution-mint base.
+pub const REPLY_ID_SET_DENOM_METADATA: u64 = 5;
 
 /// Distribution-mint reply IDs occupy `[REPLY_ID_DISTRIBUTION_MINT_BASE,
 /// u64::MAX]`. Each mint dispatched from `process_distribution_batch` (or

@@ -897,9 +897,14 @@ fn commit_phase_pool_rejected_in_execution() {
         )
         .unwrap_err();
     let msg = err.root_cause().to_string();
+    // L-02 — execution now rejects a pre-threshold pool UP FRONT with the
+    // same actionable `PoolInCommitPhase` error the simulation path returns,
+    // instead of dispatching the hop and surfacing an opaque wrapped
+    // `HopFailed` from the pool's swap rejection. Keeps simulate and execute
+    // in agreement.
     assert!(
-        msg.contains("Hop 0") && msg.contains("commit phase"),
-        "expected HopFailed wrapping commit phase, got: {msg}"
+        msg.contains("hop 0") && msg.contains("commit phase"),
+        "expected PoolInCommitPhase early rejection, got: {msg}"
     );
 }
 

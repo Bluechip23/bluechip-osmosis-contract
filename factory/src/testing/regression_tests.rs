@@ -1527,6 +1527,95 @@ mod pair_uniqueness_tests {
         );
     }
 
+    /// L-01 — register_pool must fail closed on EVERY registry key, not just
+    /// PAIRS: a duplicate pool_id, a duplicate pool address, and a
+    /// pool_address that disagrees with pool_details.creator_pool_addr are
+    /// each rejected (with a distinct pair each time so the PAIRS guard is
+    /// not what trips). Guards the four-map invariant against a future
+    /// id/address-assignment regression silently clobbering a prior entry.
+    #[test]
+    fn register_pool_guards_every_registry_key() {
+        let mut deps = mock_deps_with_querier(&[]);
+        setup_factory(&mut deps);
+
+        let pair_a = [
+            TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            TokenType::Native {
+                denom: "uatom".to_string(),
+            },
+        ];
+        let pool1 = pool_details_for(pair_a.clone(), 1);
+        register_pool(
+            deps.as_mut().storage,
+            1,
+            &pool1.creator_pool_addr.clone(),
+            &pool1,
+        )
+        .expect("first registration must succeed");
+
+        // (1) Same pool_id, DIFFERENT pair + DIFFERENT address → the pair
+        // guard passes, so the pool_id guard must be what rejects.
+        let pair_b = [
+            TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            TokenType::Native {
+                denom: "uusdc".to_string(),
+            },
+        ];
+        let mut pool_dupe_id = pool_details_for(pair_b.clone(), 1);
+        // Give it a distinct address so only the pool_id collides.
+        pool_dupe_id.creator_pool_addr = make_addr("distinct_addr_for_dupe_id");
+        let err = register_pool(
+            deps.as_mut().storage,
+            1,
+            &pool_dupe_id.creator_pool_addr.clone(),
+            &pool_dupe_id,
+        )
+        .expect_err("duplicate pool_id must be rejected");
+        assert!(
+            err.to_string().contains("duplicate pool_id"),
+            "expected duplicate pool_id error, got: {}",
+            err
+        );
+
+        // (2) DIFFERENT pair + DIFFERENT pool_id but SAME address as pool 1 →
+        // the address guard must reject.
+        let mut pool_dupe_addr = pool_details_for(pair_b.clone(), 2);
+        pool_dupe_addr.creator_pool_addr = pool1.creator_pool_addr.clone();
+        let err = register_pool(
+            deps.as_mut().storage,
+            2,
+            &pool_dupe_addr.creator_pool_addr.clone(),
+            &pool_dupe_addr,
+        )
+        .expect_err("duplicate pool address must be rejected");
+        assert!(
+            err.to_string().contains("duplicate pool address"),
+            "expected duplicate pool address error, got: {}",
+            err
+        );
+
+        // (3) pool_address parameter disagrees with
+        // pool_details.creator_pool_addr → the consistency guard must reject
+        // before any map is touched.
+        let pool_mismatch = pool_details_for(pair_b, 3);
+        let err = register_pool(
+            deps.as_mut().storage,
+            3,
+            &make_addr("some_other_address"),
+            &pool_mismatch,
+        )
+        .expect_err("address mismatch must be rejected");
+        assert!(
+            err.to_string().contains("does not match"),
+            "expected address-mismatch error, got: {}",
+            err
+        );
+    }
+
     /// Migrate back-fill: after instantiating the factory and seeding
     /// `POOLS_BY_ID` directly with two distinct pools (different pairs),
     /// migrate must populate `PAIRS` with one entry per pair.
@@ -1575,6 +1664,11 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Simulate a genuine pre-index legacy contract: it predates
+        // REGISTRY_BACKFILL_DONE, so the one-time gate (M-05) is unset and
+        // the back-fill must run. (`setup_factory`'s modern instantiate set
+        // the flag; clear it to model the legacy scenario faithfully.)
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
 
         assert_eq!(
@@ -1633,6 +1727,9 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Model a pre-index legacy contract (see M-05): clear the one-time
+        // back-fill gate so the walk runs.
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
 
         // First-seen (lowest pool_id) wins.
@@ -1693,6 +1790,11 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Model a pre-index legacy contract (see M-05): clear the gate so the
+        // FIRST migrate runs the back-fill. The first migrate then SETS the
+        // gate, so the second migrate below must skip the walk (backfilled=0)
+        // — which is exactly the idempotency this test pins.
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("first migrate ok");
         // Second migrate: stored version was just written to CONTRACT_VERSION
         // (current). Reset to an older value so the migrate handler accepts

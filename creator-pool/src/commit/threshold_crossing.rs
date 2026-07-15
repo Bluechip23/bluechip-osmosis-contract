@@ -89,6 +89,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // SubMsg that seeds the native pool. IS_THRESHOLD_HIT is flipped inside.
     let payout_msgs = trigger_threshold_payout(
         deps.storage,
+        &deps.querier,
         pool_info,
         commit_config,
         threshold_payout,
@@ -187,6 +188,7 @@ pub(crate) fn process_threshold_hit_exact(
 
     let payout = trigger_threshold_payout(
         deps.storage,
+        &deps.querier,
         pool_info,
         commit_config,
         threshold_payout,

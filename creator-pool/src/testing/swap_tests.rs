@@ -372,6 +372,7 @@ fn test_threshold_payout_integrity_check() {
 
     let result = trigger_threshold_payout(
         &mut deps.storage,
+        &cosmwasm_std::QuerierWrapper::new(&deps.querier),
         &pool_info,
         &commit_config,
         &bad_payout,
@@ -1181,6 +1182,9 @@ fn test_factory_impersonation_prevented() {
         creator_excess_liquidity_lock_days: 7,
         commit_threshold_limit_usd: Uint128::new(350_000_000_000),
         subdenom: "ucreator".to_string(),
+        token_name: "Creator Token".to_string(),
+        token_symbol: "UCREATOR".to_string(),
+        token_decimals: 6,
         gamm_pool_creation_fee_amount: Uint128::zero(),
     };
     let info = message_info(&Addr::unchecked("fake_factory"), &[]); // Wrong sender!
@@ -1999,6 +2003,7 @@ fn test_fix_e_crossing_seed_math_normal_and_shortfall() {
         let env = mock_env();
         let msgs = trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
             &commit_config,
             &payout,

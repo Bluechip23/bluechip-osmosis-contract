@@ -100,6 +100,11 @@ pub fn instantiate(
     config::validate_factory_config(deps.as_ref(), &env, &msg)?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &msg)?;
+    // M-05 — a fresh deployment maintains PAIRS / POOL_ID_BY_ADDRESS through
+    // `register_pool` from the first pool onward, so the legacy registry
+    // back-fill in `migrate` is never needed. Mark it done up front so
+    // `migrate` skips the O(N) walk entirely for this deployment.
+    crate::state::REGISTRY_BACKFILL_DONE.save(deps.storage, &true)?;
     Ok(Response::new().add_attribute("action", "init_contract"))
 }
 

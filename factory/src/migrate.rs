@@ -1,6 +1,6 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{DepsMut, Empty, Env, Response};
+use cosmwasm_std::{DepsMut, Empty, Env, Response, StdError};
 use cw2::{get_contract_version, set_contract_version};
 use semver::Version;
 
@@ -10,6 +10,21 @@ use crate::{CONTRACT_NAME, CONTRACT_VERSION};
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, ContractError> {
     let stored_version = get_contract_version(deps.storage)?;
+
+    // M-04 — refuse to migrate onto a DIFFERENT contract's storage. Without
+    // this cw2 contract-name check, migrating this code id over another
+    // contract instance whose stored version merely parses as an
+    // `<=`-current semver would pass the downgrade gate below, overwrite the
+    // cw2 name, and reinterpret foreign storage as factory state (the
+    // registry back-fill would then walk arbitrary bytes). Fail closed.
+    if stored_version.contract != CONTRACT_NAME {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "migrate: contract name mismatch — stored \"{}\", expected \"{}\"; \
+             refusing to migrate onto foreign storage",
+            stored_version.contract, CONTRACT_NAME
+        ))));
+    }
+
     let current: Version = CONTRACT_VERSION.parse()?;
     let stored_semver: Version = stored_version.version.parse()?;
 
@@ -41,18 +56,30 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
     // `range(..)` already iterates in ascending pool_id order, so the
     // first-seen pool wins naturally without a sort.
     //
-    // Idempotent: if PAIRS is already populated (re-run migrate), the
-    // `may_load` check below short-circuits each entry as a no-op.
-    let pool_ids: Vec<u64> = crate::state::POOLS_BY_ID
-        .keys(deps.storage, None, None, cosmwasm_std::Order::Ascending)
-        .collect::<cosmwasm_std::StdResult<Vec<u64>>>()?;
+    // M-05 — one-time gate. The back-fill exists only to index pools that
+    // predate the uniqueness/reverse-index maps. Once it has run (or on any
+    // fresh deployment, which sets the flag at instantiate), skip the O(N)
+    // registry walk entirely so a growing registry can never make `migrate`
+    // exceed the block gas limit and brick the contract's upgradeability.
+    // Pools created after this point self-index through `register_pool`.
+    let backfill_done = crate::state::REGISTRY_BACKFILL_DONE
+        .may_load(deps.storage)?
+        .unwrap_or(false);
+
     let mut backfilled: u32 = 0;
     let mut legacy_duplicates: u32 = 0;
-    // POOL_ID_BY_ADDRESS reverse-index back-fill. Same walk as PAIRS,
-    // no extra IO. Idempotent — `may_load`-then-save short-circuits if
-    // already populated by a prior migrate or a fresh register_pool.
     let mut addr_index_backfilled: u32 = 0;
-    for pool_id in pool_ids {
+
+    if !backfill_done {
+        // Idempotent within this single run: if PAIRS is already populated,
+        // the `may_load` check below short-circuits each entry as a no-op.
+        let pool_ids: Vec<u64> = crate::state::POOLS_BY_ID
+            .keys(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+            .collect::<cosmwasm_std::StdResult<Vec<u64>>>()?;
+        // POOL_ID_BY_ADDRESS reverse-index back-fill. Same walk as PAIRS,
+        // no extra IO. Idempotent — `may_load`-then-save short-circuits if
+        // already populated by a prior migrate or a fresh register_pool.
+        for pool_id in pool_ids {
         let details = crate::state::POOLS_BY_ID.load(deps.storage, pool_id)?;
         let key = crate::state::canonical_pair_key(&details.pool_token_info);
         if crate::state::PAIRS
@@ -75,6 +102,10 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
             )?;
             addr_index_backfilled += 1;
         }
+        }
+        // Mark the one-time back-fill complete so future migrations skip
+        // the registry walk (M-05).
+        crate::state::REGISTRY_BACKFILL_DONE.save(deps.storage, &true)?;
     }
 
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;

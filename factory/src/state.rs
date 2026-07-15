@@ -31,6 +31,16 @@ pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config")
 pub const PENDING_CONFIG: Item<PendingConfig> = Item::new("pending_config");
 pub const POOL_COUNTER: Item<u64> = Item::new("pool_counter");
 
+/// M-05 — one-time gate for the legacy registry back-fill in `migrate`.
+/// Fresh deployments set this `true` at instantiate (they maintain PAIRS /
+/// POOL_ID_BY_ADDRESS through `register_pool` from day one, so no back-fill
+/// is ever needed), which makes `migrate` skip the O(N) registry walk
+/// entirely. A genuinely-legacy contract upgraded from pre-index code has
+/// this unset, so its FIRST `migrate` runs the back-fill once and then sets
+/// the flag; every subsequent `migrate` skips it. This removes the
+/// "unbounded walk re-run on every migration" upgrade-liveness hazard.
+pub const REGISTRY_BACKFILL_DONE: Item<bool> = Item::new("registry_backfill_done");
+
 // Three coupled pool-registry maps. They MUST stay in sync — every pool
 // that exists must appear in all three. Always go through `register_pool`
 // rather than touching them individually.
@@ -348,6 +358,30 @@ pub fn register_pool(
     pool_address: &Addr,
     pool_details: &PoolDetails,
 ) -> StdResult<()> {
+    // L-01 — the four registry maps must agree, so guard EVERY key against
+    // pre-existence, not just `PAIRS`. Today `pool_id` comes from a monotonic
+    // counter and `pool_address` is deterministic, so these can't collide in
+    // the current create flow — but a `save` is a blind overwrite, and a
+    // future change to how ids/addresses are assigned (or a mistaken second
+    // call for the same pool) would otherwise silently clobber a prior pool's
+    // registry entry with no error. Fail closed on any pre-existing key so
+    // the "one entry per pool in all maps" invariant is hard-locked here
+    // rather than assumed by call sites.
+    //
+    // Also pin the address invariant the reverse index depends on: the
+    // `pool_address` parameter MUST equal the address embedded in
+    // `pool_details`. If they diverged, `POOL_ID_BY_ADDRESS` (keyed by the
+    // parameter) and consumers reading `pool_details.creator_pool_addr`
+    // would disagree about the pool's address — and the migrate back-fill,
+    // which keys the reverse index off `pool_details.creator_pool_addr`,
+    // would produce a second, divergent entry.
+    if pool_address != &pool_details.creator_pool_addr {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "register_pool: pool_address {} does not match pool_details.creator_pool_addr {}",
+            pool_address, pool_details.creator_pool_addr
+        )));
+    }
+
     let pair_key = canonical_pair_key(&pool_details.pool_token_info);
     if let Some(existing) = PAIRS.may_load(storage, pair_key.clone())? {
         return Err(cosmwasm_std::StdError::generic_err(format!(
@@ -355,6 +389,19 @@ pub fn register_pool(
             existing, pair_key.0, pair_key.1
         )));
     }
+    if POOLS_BY_ID.has(storage, pool_id) {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "duplicate pool_id: {} is already registered",
+            pool_id
+        )));
+    }
+    if POOL_ID_BY_ADDRESS.has(storage, pool_address.clone()) {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "duplicate pool address: {} is already registered",
+            pool_address
+        )));
+    }
+
     PAIRS.save(storage, pair_key, &pool_id)?;
 
     POOLS_BY_ID.save(storage, pool_id, pool_details)?;

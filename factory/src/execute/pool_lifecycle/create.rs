@@ -316,6 +316,12 @@ pub(crate) fn execute_create_creator_pool(
         },
         commit_threshold_limit_usd: factory_cw20.commit_threshold_limit_usd,
         subdenom: subdenom.clone(),
+        // M-01 — forward the creator's chosen name/symbol/decimals so the
+        // pool can register bank denom Metadata at instantiate. Already
+        // validated by `validate_creator_token_info` above.
+        token_name: token_info.name.clone(),
+        token_symbol: token_info.symbol.clone(),
+        token_decimals: token_info.decimal,
         max_bluechip_lock_per_pool: factory_cw20.max_bluechip_lock_per_pool,
         creator_excess_liquidity_lock_days: factory_cw20.creator_excess_liquidity_lock_days,
         // FIX E — thread only the AMOUNT of the GAMM pool-creation fee to the

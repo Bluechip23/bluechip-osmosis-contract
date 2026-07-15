@@ -262,6 +262,18 @@ pub struct PoolInstantiateMsg {
     /// becomes its denom admin. Replaces the old `token_address: Addr`
     /// (the CW20 contract) and `cw20_token_contract_id`.
     pub subdenom: String,
+    /// Creator-chosen token display name / ticker / decimals. Used at
+    /// instantiate to register bank denom `Metadata` (`MsgSetDenomMetadata`)
+    /// so explorers/wallets render the creator's name and the 6-decimal
+    /// scaling instead of the raw `factory/{addr}/{sub}` micro-denom (M-01).
+    /// `#[serde(default)]` keeps pre-this-field create messages valid; when
+    /// `token_symbol` is empty the pool skips metadata registration.
+    #[serde(default)]
+    pub token_name: String,
+    #[serde(default)]
+    pub token_symbol: String,
+    #[serde(default)]
+    pub token_decimals: u8,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
     /// FIX E — uosmo amount of the native GAMM pool-creation fee, set by the
