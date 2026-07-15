@@ -92,6 +92,28 @@ pub const CREATOR_EXCESS_POSITION: Item<CreatorExcessLiquidity> = Item::new("cre
 /// Timestamp of the most recent threshold-crossing attempt; used by stuck-state recovery.
 pub const LAST_THRESHOLD_ATTEMPT: Item<Timestamp> = Item::new("last_threshold_attempt");
 
+/// FIX E — target uosmo amount of the native GAMM pool-creation fee that
+/// the `x/gamm` module auto-charges when `MsgCreateBalancerPool` runs at
+/// threshold-crossing. Threaded in from the factory config's
+/// `gamm_pool_creation_fee.amount` via `PoolInstantiateMsg` and pinned at
+/// instantiate. This is the ceiling for [`BLUECHIP_FEE_RESERVED`]: the
+/// pool retains bluechip out of the protocol's 1% commit fee up to this
+/// amount, so the creation fee is funded from the protocol's own fee
+/// stream — NOT from the creator, and NOT from the AMM seed. Zero means the
+/// gamm fee is waived (e.g. test environments) and no bluechip is retained.
+pub const CREATION_FEE_RESERVE_TARGET: Item<Uint128> = Item::new("creation_fee_reserve_target");
+
+/// FIX E — running total of bluechip (uosmo) retained IN THE POOL out of
+/// the protocol's 1% commit fee toward [`CREATION_FEE_RESERVE_TARGET`].
+/// Initialised to zero at instantiate. On every commit the 1% bluechip fee
+/// is split: the portion needed to reach the target is added here and STAYS
+/// in the pool (never bank-sent), the remainder flows to the live bluechip
+/// wallet as before. At threshold-crossing this retained OSMO covers the
+/// gamm creation fee; any leftover (`reserved - creation_fee`) is remitted
+/// to the bluechip wallet. Bounded above by the target, so the retained
+/// amount is always `<= CREATION_FEE_RESERVE_TARGET`.
+pub const BLUECHIP_FEE_RESERVED: Item<Uint128> = Item::new("bluechip_fee_reserved");
+
 /// `env.block.time` snapshotted at the moment threshold flipped (set
 /// inside `trigger_threshold_payout` immediately after
 /// `IS_THRESHOLD_HIT.save(true)`). Threaded into the

@@ -28,8 +28,8 @@
 //! pool's threshold-crossing state (retryable via `RetryFactoryNotify`).
 
 use cosmwasm_std::{
-    to_json_binary, Addr, Coin, CosmosMsg, Decimal, Env, StdError, Storage, SubMsg, Uint128,
-    WasmMsg,
+    to_json_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, Env, StdError, Storage, SubMsg,
+    Uint128, WasmMsg,
 };
 
 use crate::asset::get_native_denom;
@@ -110,6 +110,16 @@ pub struct ThresholdPayoutMsgs {
     pub factory_notify: SubMsg,
     pub create_pool: SubMsg,
     pub other_msgs: Vec<CosmosMsg>,
+    /// FIX E — bank-send of any creation-fee reserve LEFTOVER
+    /// (`reserved - creation_fee`) back to the bluechip wallet. `Some` only
+    /// when the retained reserve exceeded the actual gamm creation fee (the
+    /// common case, since the reserve fills to the target during funding).
+    /// The caller MUST emit this AFTER `create_pool` so the gamm module has
+    /// already charged the fee from the pool's OSMO balance; remitting the
+    /// surplus earlier would still be arithmetically safe (only the strict
+    /// surplus is remitted) but sequencing it post-creation keeps the intent
+    /// obvious and leaves the full reserve available during pool creation.
+    pub reserve_remit: Option<CosmosMsg>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -216,6 +226,20 @@ pub fn trigger_threshold_payout(
     // NATIVE_RAISED_FROM_COMMIT is stored net-of-fees; read directly.
     let pools_bluechip_seed = crate::state::NATIVE_RAISED_FROM_COMMIT.load(storage)?;
 
+    // FIX E — creation-fee reserve context. The pool's ACTUAL OSMO bank
+    // balance at this point is `pools_bluechip_seed + reserved` (net commits
+    // plus the bluechip fee retained toward the gamm creation fee). When
+    // `MsgCreateBalancerPool` runs, the `x/gamm` module auto-charges
+    // `creation_fee` from that balance IN ADDITION to the coins seeded into
+    // the pool, so the pool must hold `>= seed_osmo + creation_fee` OSMO or
+    // the create bricks the tx. `reserved` is the OSMO earmarked to cover it.
+    let reserved = crate::state::BLUECHIP_FEE_RESERVED
+        .may_load(storage)?
+        .unwrap_or_default();
+    let creation_fee = crate::state::CREATION_FEE_RESERVE_TARGET
+        .may_load(storage)?
+        .unwrap_or_default();
+
     // Compute the coins seeding the native pool. The bluechip side is
     // capped at `max_bluechip_lock_per_pool`; the creator side is reduced
     // proportionally so the seeded ratio matches the retired internal-AMM
@@ -233,7 +257,7 @@ pub fn trigger_threshold_payout(
     //     to `MsgCreateBalancerPool`, so `excess_creator_tokens` stays put.
     // Neither is sent anywhere at crossing; the creator claims the raw
     // coins after `unlock_time` via `ClaimCreatorExcessLiquidity`.
-    let (seed_osmo, seed_creator) = if pools_bluechip_seed
+    let (base_seed_osmo, seed_creator) = if pools_bluechip_seed
         > commit_config.max_bluechip_lock_per_pool
     {
         let excess_bluechip = pools_bluechip_seed
@@ -270,6 +294,31 @@ pub fn trigger_threshold_payout(
         (pools_bluechip_seed, payout.pool_seed_amount)
     };
 
+    // FIX E — the SEED always yields the uncovered creation-fee shortfall,
+    // so both the brick invariant and the creator earmark stay consistent.
+    // The pool holds `pools_bluechip_seed + reserved` OSMO and the gamm
+    // module auto-charges `creation_fee` ON TOP of the seeded coins. Whatever
+    // the retained `reserved` does not cover — `shortfall = creation_fee -
+    // reserved`, which is ZERO in the normal case where the reserve filled to
+    // the fee — is subtracted from `seed_osmo` unconditionally:
+    //   - `seed_osmo + creation_fee <= balance` always holds ⇒ no brick; and
+    //   - in the over-cap case the earmarked `excess_bluechip` is left FULLY
+    //     backed by the contract's post-crossing OSMO balance, so the
+    //     creator's later raw claim can always be paid.
+    // The protocol bears any shortfall via a smaller seed contribution — it
+    // is NEVER drawn from the creator's earmarked excess. (Applying the
+    // subtraction only when it would otherwise brick was subtly wrong: on a
+    // large over-raise the fee could be silently covered by the excess OSMO,
+    // over-recording the earmark and stranding the creator's claim.)
+    let shortfall = creation_fee.saturating_sub(reserved);
+    let seed_osmo = base_seed_osmo.saturating_sub(shortfall);
+
+    // FIX G — snapshot the per-side liquidity ACTUALLY seeded (post the FIX-E
+    // adjustment above) as the breaker's reference point. A later swap trips
+    // the breaker if either live side falls below BREAKER_FLOOR_PERCENT% of
+    // the amount recorded here.
+    crate::state::SEED_LIQUIDITY.save(storage, &(seed_osmo, seed_creator))?;
+
     // Build the MsgCreateBalancerPool SubMsg. asset_infos[0] is the
     // bluechip Native side, [1] the creator TokenFactory side.
     let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
@@ -291,6 +340,35 @@ pub fn trigger_threshold_payout(
         REPLY_ID_CREATE_POOL,
     );
 
+    // FIX E — remit any creation-fee reserve LEFTOVER back to the bluechip
+    // wallet. After the gamm module charges `creation_fee`, the retained
+    // `reserved` has `reserved - creation_fee` to spare (zero in the
+    // shortfall edge); that surplus is the protocol's fee income and is
+    // returned to the live bluechip wallet. Emitted by the caller AFTER the
+    // create-pool SubMsg (see `ThresholdPayoutMsgs::reserve_remit`).
+    let leftover = reserved.saturating_sub(creation_fee);
+    let reserve_remit = if leftover.is_zero() {
+        None
+    } else {
+        Some(CosmosMsg::Bank(BankMsg::Send {
+            to_address: bluechip_wallet.to_string(),
+            amount: vec![Coin {
+                denom: get_native_denom(&pool_info.pool_info.asset_infos)?,
+                amount: leftover,
+            }],
+        }))
+    };
+
+    // FIX E — mark the reserve complete. The creation fee has now been
+    // handled (covered at creation + any surplus remitted), so post-threshold
+    // commits must NOT keep retaining bluechip toward the target. Pinning
+    // `BLUECHIP_FEE_RESERVED` at the target makes `room == 0` in
+    // `reserve_bluechip_fee` from here on, so every post-threshold commit
+    // sends its full 1% bluechip fee to the wallet. (In the shortfall edge
+    // `reserved < target`; pinning to the target still correctly stops
+    // further retention — no funds move here, this is a bookkeeping flag.)
+    crate::state::BLUECHIP_FEE_RESERVED.save(storage, &creation_fee)?;
+
     // Set IS_THRESHOLD_HIT only after all mint + seed work is scheduled.
     IS_THRESHOLD_HIT.save(storage, &true)?;
     crate::state::THRESHOLD_CROSSED_AT.save(storage, &env.block.time)?;
@@ -299,6 +377,7 @@ pub fn trigger_threshold_payout(
         factory_notify,
         create_pool,
         other_msgs,
+        reserve_remit,
     })
 }
 

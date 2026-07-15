@@ -264,6 +264,15 @@ pub struct PoolInstantiateMsg {
     pub subdenom: String,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
+    /// FIX E — uosmo amount of the native GAMM pool-creation fee, set by the
+    /// factory from its `gamm_pool_creation_fee.amount` config. Pinned at
+    /// instantiate into `CREATION_FEE_RESERVE_TARGET`; the pool retains this
+    /// much bluechip out of the protocol's 1% commit fee to cover the fee the
+    /// `x/gamm` module auto-charges at threshold-crossing. Zero disables the
+    /// reserve (gamm fee waived). `#[serde(default)]` keeps pre-this-field
+    /// factory create messages deserializing with a zero (disabled) reserve.
+    #[serde(default)]
+    pub gamm_pool_creation_fee_amount: Uint128,
 }
 
 #[cw_serde]

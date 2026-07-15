@@ -280,11 +280,26 @@ fn execute_commit_logic(
                 return Err(ContractError::InvalidFee {});
             }
 
+            // FIX E — the creator 5% fee is bank-sent immediately as before.
+            // The bluechip 1% fee is SPLIT: the portion still needed to reach
+            // the gamm creation-fee reserve target STAYS in the pool (added to
+            // BLUECHIP_FEE_RESERVED, never bank-sent), and only the remainder
+            // is bank-sent to the live bluechip wallet. Applied here in the
+            // dispatcher so it holds UNIFORMLY across every commit path — the
+            // reserved OSMO must be retained regardless of phase (pre-,
+            // post-, and both crossing handlers all consume `messages` built
+            // below). `amount_after_fees` is unchanged: the full 1%+5% is
+            // still deducted from the commit, the reserve only redirects where
+            // the bluechip fee lands (pool vs wallet). Once the target is met
+            // `to_reserve == 0` and the full 1% flows to the wallet as before.
+            let bluechip_fee_to_wallet =
+                reserve_bluechip_fee(deps.storage, commit_fee_bluechip_amt)?;
+
             let messages = build_fee_messages(
                 &fee_info,
                 &live_bluechip_wallet,
                 denom,
-                commit_fee_bluechip_amt,
+                bluechip_fee_to_wallet,
                 commit_fee_creator_amt,
             )?;
 
@@ -450,6 +465,39 @@ fn execute_commit_logic(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// FIX E — split the 1% bluechip commit fee between the in-pool
+/// creation-fee reserve and the live bluechip wallet.
+///
+/// Reads the `CREATION_FEE_RESERVE_TARGET` ceiling and the running
+/// `BLUECHIP_FEE_RESERVED`, then:
+/// - `room       = target.saturating_sub(reserved)`
+/// - `to_reserve = min(room, commit_fee_bluechip)` — added to
+///   `BLUECHIP_FEE_RESERVED` and RETAINED in the pool (never bank-sent);
+/// - `to_wallet  = commit_fee_bluechip - to_reserve` — returned to the
+///   caller to bank-send to the live bluechip wallet.
+///
+/// Once `reserved == target` the room is zero, `to_reserve == 0`, and the
+/// full fee flows to the wallet exactly as before this fix. `to_reserve` is
+/// bounded by `room`, so `BLUECHIP_FEE_RESERVED` never exceeds the target —
+/// the retained OSMO is always `<= CREATION_FEE_RESERVE_TARGET`.
+fn reserve_bluechip_fee(
+    storage: &mut dyn cosmwasm_std::Storage,
+    commit_fee_bluechip: Uint128,
+) -> Result<Uint128, ContractError> {
+    use crate::state::{BLUECHIP_FEE_RESERVED, CREATION_FEE_RESERVE_TARGET};
+    let target = CREATION_FEE_RESERVE_TARGET
+        .may_load(storage)?
+        .unwrap_or_default();
+    let reserved = BLUECHIP_FEE_RESERVED.may_load(storage)?.unwrap_or_default();
+    let room = target.saturating_sub(reserved);
+    let to_reserve = room.min(commit_fee_bluechip);
+    let to_wallet = commit_fee_bluechip.checked_sub(to_reserve)?;
+    if !to_reserve.is_zero() {
+        BLUECHIP_FEE_RESERVED.save(storage, &reserved.checked_add(to_reserve)?)?;
+    }
+    Ok(to_wallet)
+}
 
 /// Calculate both fee portions for a commit. Returns (bluechip_fee, creator_fee).
 fn calculate_commit_fees(

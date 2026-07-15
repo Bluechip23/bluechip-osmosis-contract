@@ -162,6 +162,14 @@ pub fn instantiate(
     USD_RAISED_FROM_COMMIT.save(deps.storage, &Uint128::zero())?;
     COMMITFEEINFO.save(deps.storage, &msg.commit_fee_info)?;
     NATIVE_RAISED_FROM_COMMIT.save(deps.storage, &Uint128::zero())?;
+    // FIX E — pin the gamm creation-fee reserve target from the factory-
+    // supplied amount and start the running reserve at zero. The pool retains
+    // bluechip out of the protocol's 1% commit fee up to this target so the
+    // fee the gamm module auto-charges at threshold-crossing is paid from
+    // protocol revenue, not the creator or the AMM seed. Zero = fee waived.
+    crate::state::CREATION_FEE_RESERVE_TARGET
+        .save(deps.storage, &msg.gamm_pool_creation_fee_amount)?;
+    crate::state::BLUECHIP_FEE_RESERVED.save(deps.storage, &Uint128::zero())?;
     // O(1) distinct-committer counter (FIX B): starts at zero, bumped once
     // per newly-seen committer in `COMMIT_LEDGER`.
     crate::state::COMMITTER_COUNT.save(deps.storage, &0u32)?;

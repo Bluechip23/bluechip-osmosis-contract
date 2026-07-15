@@ -1269,7 +1269,11 @@ mod distribution_liveness_tests {
         DISTRIBUTION_STATE.save(&mut deps.storage, &dist).unwrap();
 
         // Seed two committers so the recovery path lands in the
-        // "remaining > 0 → restart" branch.
+        // "remaining > 0 → restart" branch. CARRY-OVER 1: the restart's
+        // informational `distributions_remaining` now reads the O(1)
+        // `COMMITTER_COUNT` instead of an O(N) ledger scan, so mirror the
+        // ledger population into the counter (production maintains it via
+        // `record_committer`).
         for label in ["committer_a", "committer_b"] {
             COMMIT_LEDGER
                 .save(
@@ -1279,6 +1283,9 @@ mod distribution_liveness_tests {
                 )
                 .unwrap();
         }
+        crate::state::COMMITTER_COUNT
+            .save(&mut deps.storage, &2u32)
+            .unwrap();
 
         let mut env = mock_env();
         env.block.time = started.plus_seconds(PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS + 1);

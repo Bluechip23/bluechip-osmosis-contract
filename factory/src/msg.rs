@@ -30,6 +30,14 @@ pub struct CreatePoolReplyMsg {
     pub subdenom: String,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
+    /// FIX E — uosmo amount of the native GAMM pool-creation fee, forwarded
+    /// from the factory config's `gamm_pool_creation_fee.amount`. The pool
+    /// pins it as `CREATION_FEE_RESERVE_TARGET` and funds the fee from the
+    /// protocol's retained 1% commit fee rather than the seed or the creator.
+    /// Must stay wire-compatible with the pool's `PoolInstantiateMsg`.
+    /// `#[serde(default)]` keeps old serialized create messages valid.
+    #[serde(default)]
+    pub gamm_pool_creation_fee_amount: Uint128,
 }
 
 #[cw_serde]

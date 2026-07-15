@@ -296,12 +296,17 @@ fn test_commit_crosses_threshold() {
 
 #[test]
 fn test_commit_post_threshold_swap() {
-    let mut deps = mock_dependencies_with_balance(&[Coin {
+    // Estimate-answering querier so the post-threshold commit's swap leg
+    // derives a non-zero slippage floor (CARRY-OVER 2). `set_factory_oracle`
+    // replaces `with_factory_oracle` for the PoolMockQuerier.
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[Coin {
         denom: "ubluechip".to_string(),
         amount: Uint128::new(1_000_000_000), // Give contract 1000 tokens
     }]);
     setup_pool_post_threshold(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
+    deps.querier
+        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury"); // $1 per token
 
     let env = mock_env();
     let commit_amount = Uint128::new(100_000_000); // 100 bluechip
@@ -941,7 +946,10 @@ fn test_commit_with_deadline() {
 
 #[test]
 fn test_simple_swap_bluechip_to_cw20() {
-    let mut deps = mock_dependencies_with_balance(&[Coin {
+    // Uses the estimate-answering querier so the non-belief-price swap derives
+    // a NON-ZERO `token_out_min_amount` (CARRY-OVER 2 rejects a zero floor).
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[Coin {
         denom: "ubluechip".to_string(),
         amount: Uint128::new(1_000_000_000),
     }]);
@@ -1030,7 +1038,8 @@ fn test_swap_sell_creator_token_native() {
     // funds (the old CW20 `Receive`/hook path is gone). The swap emits the
     // native-pool SubMsg; the bluechip payout to the trader is produced when
     // the swap-forward reply is driven.
-    let mut deps = mock_dependencies();
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[]); // estimate mock ⇒ non-zero floor (CARRY-OVER 2)
     setup_pool_post_threshold(&mut deps);
 
     let env = mock_env();
@@ -1172,6 +1181,7 @@ fn test_factory_impersonation_prevented() {
         creator_excess_liquidity_lock_days: 7,
         commit_threshold_limit_usd: Uint128::new(350_000_000_000),
         subdenom: "ucreator".to_string(),
+        gamm_pool_creation_fee_amount: Uint128::zero(),
     };
     let info = message_info(&Addr::unchecked("fake_factory"), &[]); // Wrong sender!
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
@@ -1422,7 +1432,8 @@ fn test_belief_price_with_zero_price() {
 fn test_swap_cw20_to_bluechip_direct() {
     // Native sell of the creator token: attach the creator denom as funds
     // and swap it for bluechip via `SimpleSwap`.
-    let mut deps = mock_dependencies();
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[]); // estimate mock ⇒ non-zero floor (CARRY-OVER 2)
     setup_pool_post_threshold(&mut deps);
 
     let env = mock_env();
@@ -1475,7 +1486,8 @@ fn test_swap_cw20_to_bluechip_direct() {
 #[test]
 fn test_swap_cw20_with_custom_recipient() {
     // Native sell routed to a custom recipient via `SimpleSwap { to }`.
-    let mut deps = mock_dependencies();
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[]); // estimate mock ⇒ non-zero floor (CARRY-OVER 2)
     setup_pool_post_threshold(&mut deps);
 
     let env = mock_env();
@@ -1774,5 +1786,422 @@ fn test_committer_count_exact_across_repeat_committers() {
             .unwrap(),
         Uint128::new(20_000_000),
         "user1 ledger value accumulates across repeat commits"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CARRY-OVER 2 — a zero slippage floor is rejected at the swap sites.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_swap_zero_floor_rejected() {
+    // Stock querier answers no estimate Stargate query (⇒ estimate = 0) AND
+    // no belief_price is supplied ⇒ the derived `token_out_min_amount` floor
+    // collapses to zero. `compute_token_out_min` now rejects that rather than
+    // dispatching an unprotected `MsgSwapExactAmountIn`.
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_post_threshold(&mut deps);
+
+    let env = mock_env();
+    let swap_amount = Uint128::new(100_000_000);
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None,
+        max_spread: None,
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+    match err {
+        ContractError::MaxSpreadAssertion {} => {}
+        other => panic!("expected MaxSpreadAssertion for zero floor, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FIX E — the 1% bluechip commit fee funds the gamm creation-fee reserve.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_fix_e_bluechip_fee_reserve_split_and_spillover() {
+    // Target BELOW the per-commit bluechip fee, so ONE commit both fills the
+    // reserve to the target and spills the remainder to the wallet.
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1/token
+
+    crate::state::CREATION_FEE_RESERVE_TARGET
+        .save(&mut deps.storage, &Uint128::new(30_000))
+        .unwrap();
+    crate::state::BLUECHIP_FEE_RESERVED
+        .save(&mut deps.storage, &Uint128::zero())
+        .unwrap();
+
+    let commit_amount = Uint128::new(10_000_000); // $10; 1% = 100_000, 5% = 500_000
+    let info = message_info(
+        &Addr::unchecked("user1"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: commit_amount,
+        }],
+    );
+    let msg = ExecuteMsg::Commit {
+        asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: commit_amount,
+        },
+        transaction_deadline: None,
+        belief_price: None,
+        max_spread: None,
+    };
+    let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // reserved caps at the target (30_000); the remaining 70_000 of the
+    // 100_000 bluechip fee is bank-sent to the live bluechip wallet.
+    assert_eq!(
+        crate::state::BLUECHIP_FEE_RESERVED
+            .load(&deps.storage)
+            .unwrap(),
+        Uint128::new(30_000),
+        "reserve fills exactly to the target"
+    );
+    let to_treasury: Option<Uint128> = res.messages.iter().find_map(|m| match &m.msg {
+        CosmosMsg::Bank(BankMsg::Send { to_address, amount })
+            if to_address == "bluechip_treasury" =>
+        {
+            Some(amount[0].amount)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        to_treasury,
+        Some(Uint128::new(70_000)),
+        "spillover bluechip fee (100_000 - 30_000) is bank-sent to the wallet"
+    );
+    // Creator 5% fee is bank-sent immediately as before.
+    let to_creator: Option<Uint128> = res.messages.iter().find_map(|m| match &m.msg {
+        CosmosMsg::Bank(BankMsg::Send { to_address, amount }) if to_address == "creator_wallet" => {
+            Some(amount[0].amount)
+        }
+        _ => None,
+    });
+    assert_eq!(to_creator, Some(Uint128::new(500_000)));
+}
+
+#[test]
+fn test_fix_e_bluechip_fee_fully_retained_below_target() {
+    // Target ABOVE the per-commit bluechip fee: the entire 1% is retained in
+    // the pool and NOTHING is bank-sent to the bluechip wallet this commit.
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+
+    crate::state::CREATION_FEE_RESERVE_TARGET
+        .save(&mut deps.storage, &Uint128::new(1_000_000))
+        .unwrap();
+    crate::state::BLUECHIP_FEE_RESERVED
+        .save(&mut deps.storage, &Uint128::zero())
+        .unwrap();
+
+    let commit_amount = Uint128::new(10_000_000); // 1% = 100_000 < target 1_000_000
+    let info = message_info(
+        &Addr::unchecked("user1"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: commit_amount,
+        }],
+    );
+    let msg = ExecuteMsg::Commit {
+        asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: commit_amount,
+        },
+        transaction_deadline: None,
+        belief_price: None,
+        max_spread: None,
+    };
+    let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    assert_eq!(
+        crate::state::BLUECHIP_FEE_RESERVED
+            .load(&deps.storage)
+            .unwrap(),
+        Uint128::new(100_000),
+        "the full 1% bluechip fee is retained (still below target)"
+    );
+    // No bluechip fee reaches the wallet this commit.
+    let treasury_send = res.messages.iter().any(|m| matches!(
+        &m.msg,
+        CosmosMsg::Bank(BankMsg::Send { to_address, .. }) if to_address == "bluechip_treasury"
+    ));
+    assert!(
+        !treasury_send,
+        "no bluechip fee is bank-sent while the reserve is below target"
+    );
+}
+
+#[test]
+fn test_fix_e_crossing_seed_math_normal_and_shortfall() {
+    use crate::state::{
+        BLUECHIP_FEE_RESERVED, CREATION_FEE_RESERVE_TARGET, NATIVE_RAISED_FROM_COMMIT,
+        SEED_LIQUIDITY,
+    };
+
+    // Run `trigger_threshold_payout` with the given reserve context on fresh
+    // storage; return (seed_osmo, seed_creator, remit_is_some, reserved_after).
+    fn run(
+        native_raised: u128,
+        reserved: u128,
+        creation_fee: u128,
+    ) -> (Uint128, Uint128, bool, Uint128, Uint128) {
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        NATIVE_RAISED_FROM_COMMIT
+            .save(&mut deps.storage, &Uint128::new(native_raised))
+            .unwrap();
+        BLUECHIP_FEE_RESERVED
+            .save(&mut deps.storage, &Uint128::new(reserved))
+            .unwrap();
+        CREATION_FEE_RESERVE_TARGET
+            .save(&mut deps.storage, &Uint128::new(creation_fee))
+            .unwrap();
+
+        let pool_info = POOL_INFO.load(&deps.storage).unwrap();
+        let commit_config = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
+        let payout = THRESHOLD_PAYOUT_AMOUNTS.load(&deps.storage).unwrap();
+        let fee_info = COMMITFEEINFO.load(&deps.storage).unwrap();
+        let env = mock_env();
+        let msgs = trigger_threshold_payout(
+            &mut deps.storage,
+            &pool_info,
+            &commit_config,
+            &payout,
+            &fee_info,
+            &fee_info.bluechip_wallet_address,
+            Decimal::permille(3),
+            &env,
+        )
+        .unwrap();
+        let (so, sc) = SEED_LIQUIDITY.load(&deps.storage).unwrap();
+        let earmark = crate::state::CREATOR_EXCESS_POSITION
+            .may_load(&deps.storage)
+            .unwrap()
+            .map(|p| p.bluechip_amount)
+            .unwrap_or_default();
+        (
+            so,
+            sc,
+            msgs.reserve_remit.is_some(),
+            BLUECHIP_FEE_RESERVED.load(&deps.storage).unwrap(),
+            earmark,
+        )
+    }
+
+    // Normal: reserved (50k) == creation_fee (50k) covers the gamm fee. The
+    // pool holds native_raised + reserved = 5_050_000; seeding 5_000_000
+    // leaves exactly the 50_000 fee. Seed unchanged; no leftover to remit.
+    let (so, sc, remit, reserved_after, _) = run(5_000_000, 50_000, 50_000);
+    assert_eq!(so, Uint128::new(5_000_000), "normal: seed_osmo unchanged");
+    assert_eq!(sc, Uint128::new(350_000_000_000), "creator seed unchanged");
+    assert!(!remit, "reserved == fee ⇒ no leftover remit");
+    assert_eq!(
+        reserved_after,
+        Uint128::new(50_000),
+        "reserve pinned at target post-crossing so post-threshold commits stop retaining"
+    );
+
+    // Shortfall: reserved (20k) < creation_fee (50k). Pool holds
+    // 5_000_000 + 20_000 = 5_020_000; seeding base 5_000_000 + 50_000 fee =
+    // 5_050_000 would brick, so the seed shrinks by the uncovered
+    // shortfall (50k - 20k = 30k) to 4_970_000, making seed + fee ==
+    // balance. Creator seed side is left as-is.
+    let (so2, sc2, remit2, _, _) = run(5_000_000, 20_000, 50_000);
+    assert_eq!(
+        so2,
+        Uint128::new(4_970_000),
+        "shortfall: seed_osmo shrinks by (fee - reserved)"
+    );
+    assert_eq!(
+        so2 + Uint128::new(50_000),
+        Uint128::new(5_020_000),
+        "seed_osmo + creation_fee == pool balance (no brick)"
+    );
+    assert_eq!(sc2, Uint128::new(350_000_000_000), "creator seed side untouched");
+    assert!(!remit2);
+
+    // Over-cap + shortfall regression: native_raised (12B) > max_lock (10B)
+    // ⇒ a 2B creator earmark, AND reserved (20k) < creation_fee (50k). The
+    // uncovered 30k fee shortfall must come from the SEED, never the
+    // earmark — otherwise the pool would hold less OSMO than the recorded
+    // earmark and the creator's later raw claim would fail. Seed = max_lock
+    // - shortfall = 9_999_970_000, and the contract's residual OSMO
+    // (balance - seed - fee) must equal the FULL 2B earmark.
+    let (so3, _sc3, _remit3, _res3, earmark3) = run(12_000_000_000, 20_000, 50_000);
+    assert_eq!(
+        so3,
+        Uint128::new(9_999_970_000),
+        "over-cap shortfall: seed shrinks by (fee - reserved), earmark untouched"
+    );
+    assert_eq!(
+        earmark3,
+        Uint128::new(2_000_000_000),
+        "earmark records the full over-raise (raised - max_lock)"
+    );
+    let balance = Uint128::new(12_000_000_000 + 20_000);
+    assert_eq!(
+        balance - so3 - Uint128::new(50_000),
+        earmark3,
+        "creator earmark is fully backed by the contract's post-crossing OSMO residual"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FIX G — native relative circuit breaker (pause below 25% of seeded).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_fix_g_breaker_pauses_below_floor() {
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_post_threshold(&mut deps);
+    // Seeded per-side reference: 1_000_000 each.
+    crate::state::SEED_LIQUIDITY
+        .save(
+            &mut deps.storage,
+            &(Uint128::new(1_000_000), Uint128::new(1_000_000)),
+        )
+        .unwrap();
+    // Live bluechip side at 200_000 (20% < 25% floor); creator side healthy.
+    deps.querier.set_pool_liquidity(vec![
+        Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(200_000),
+        },
+        Coin {
+            denom: CREATOR_DENOM.to_string(),
+            amount: Uint128::new(1_000_000),
+        },
+    ]);
+
+    let env = mock_env();
+    let swap_amount = Uint128::new(100_000_000);
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None,
+        max_spread: None,
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+    match err {
+        ContractError::PoolPausedLowLiquidity {} => {}
+        other => panic!("expected breaker low-liquidity pause, got {:?}", other),
+    }
+    assert!(
+        crate::state::POOL_PAUSED.load(&deps.storage).unwrap(),
+        "breaker sets POOL_PAUSED"
+    );
+    assert!(
+        crate::state::POOL_PAUSED_AUTO.load(&deps.storage).unwrap(),
+        "breaker sets POOL_PAUSED_AUTO"
+    );
+}
+
+#[test]
+fn test_fix_g_breaker_allows_healthy_pool() {
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_post_threshold(&mut deps);
+    crate::state::SEED_LIQUIDITY
+        .save(
+            &mut deps.storage,
+            &(Uint128::new(1_000_000), Uint128::new(1_000_000)),
+        )
+        .unwrap();
+    // Both sides at 50% of seed (>= 25% floor) — healthy, no pause.
+    deps.querier.set_pool_liquidity(vec![
+        Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(500_000),
+        },
+        Coin {
+            denom: CREATOR_DENOM.to_string(),
+            amount: Uint128::new(500_000),
+        },
+    ]);
+
+    let env = mock_env();
+    let swap_amount = Uint128::new(100_000_000);
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None,
+        max_spread: None,
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let res = execute(deps.as_mut(), env, info, msg).unwrap();
+    assert_eq!(action_attr(&res), "swap");
+    expect_single_swap_forward(&res);
+    assert!(
+        !crate::state::POOL_PAUSED.load(&deps.storage).unwrap_or(false),
+        "healthy pool is not paused by the breaker"
     );
 }

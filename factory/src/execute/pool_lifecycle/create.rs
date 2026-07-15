@@ -318,28 +318,25 @@ pub(crate) fn execute_create_creator_pool(
         subdenom: subdenom.clone(),
         max_bluechip_lock_per_pool: factory_cw20.max_bluechip_lock_per_pool,
         creator_excess_liquidity_lock_days: factory_cw20.creator_excess_liquidity_lock_days,
+        // FIX E — thread only the AMOUNT of the GAMM pool-creation fee to the
+        // pool, NOT the coin itself. The pool no longer receives the fee as
+        // instantiate funds; instead it retains this much bluechip out of the
+        // protocol's own 1% commit fee (into CREATION_FEE_RESERVE_TARGET) so
+        // the fee the `x/gamm` module auto-charges at threshold-crossing is
+        // paid from protocol revenue — not from the creator, and not from the
+        // AMM seed. This also removes the old collect-from-creator TODO: with
+        // no coin forwarded there is nothing extra to collect at `Create`.
+        gamm_pool_creation_fee_amount: factory_cw20.gamm_pool_creation_fee.amount,
     };
 
-    // Forward the GAMM pool-creation fee into the pool's instantiate funds
-    // so the pool holds it when `MsgCreateBalancerPool` auto-charges it at
-    // threshold crossing (decision 3). Zero amount = collection disabled.
-    //
-    // TODO(phase2): the fee is forwarded from the factory here, but its
-    // COLLECTION from the creator's attached funds is not yet enforced
-    // (the flat-fee `must_pay` above validates a single bluechip denom
-    // only, so a second, possibly different-denom, gamm fee coin can't be
-    // folded into that check without a `may_pay`/manual-parse rework). In
-    // a deployment with a non-zero gamm fee, the factory must be pre-funded
-    // OR this path tightened to require the creator to attach the fee.
-    let mut pool_funds = vec![];
-    if !factory_cw20.gamm_pool_creation_fee.amount.is_zero() {
-        pool_funds.push(factory_cw20.gamm_pool_creation_fee.clone());
-    }
-
+    // The pool is instantiated with NO funds. The gamm creation fee is
+    // funded post-hoc from the retained commit-fee reserve (FIX E), so the
+    // factory neither pre-funds the pool nor collects the fee from the
+    // creator here.
     let pool_instantiate = WasmMsg::Instantiate {
         code_id: factory_cw20.create_pool_wasm_contract_id,
         msg: to_json_binary(&commit_msg)?,
-        funds: pool_funds,
+        funds: vec![],
         admin: Some(env.contract.address.to_string()),
         label: format!("Pool-{}", pool_id),
     };

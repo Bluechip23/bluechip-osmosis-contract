@@ -25,14 +25,19 @@ use cosmwasm_std::{
     from_json, to_json_binary, Addr, Coin, ContractResult, Empty, OwnedDeps, Querier, QuerierResult,
     QueryRequest, SystemError, SystemResult, Uint128, WasmQuery,
 };
+use osmosis_std::types::cosmos::base::v1beta1::Coin as OsmoCoin;
 use osmosis_std::types::osmosis::poolmanager::v1beta1::{
-    EstimateSwapExactAmountInRequest, EstimateSwapExactAmountInResponse,
+    EstimateSwapExactAmountInRequest, EstimateSwapExactAmountInResponse, TotalPoolLiquidityResponse,
 };
 use prost::Message;
 
 /// Stargate path osmosis-std emits for `EstimateSwapExactAmountIn`.
 pub const ESTIMATE_QUERY_PATH: &str =
     "/osmosis.poolmanager.v1beta1.Query/EstimateSwapExactAmountIn";
+
+/// Stargate path osmosis-std emits for `TotalPoolLiquidity` (FIX G breaker).
+pub const TOTAL_POOL_LIQUIDITY_QUERY_PATH: &str =
+    "/osmosis.poolmanager.v1beta1.Query/TotalPoolLiquidity";
 
 pub struct PoolMockQuerier {
     base: MockQuerier<Empty>,
@@ -44,6 +49,12 @@ pub struct PoolMockQuerier {
     factory_rate: Option<Uint128>,
     /// Live bluechip wallet returned in the `CommitContext` response.
     bluechip_wallet: Addr,
+    /// FIX G — per-side liquidity returned for the poolmanager
+    /// `TotalPoolLiquidity` query. Defaults to a healthy (well-above-floor)
+    /// pair on the standard fixture denoms so swaps aren't spuriously paused;
+    /// breaker tests override it via [`set_pool_liquidity`] to drive a side
+    /// below 25% of the seeded amount.
+    pool_liquidity: Vec<Coin>,
 }
 
 impl Querier for PoolMockQuerier {
@@ -69,7 +80,28 @@ impl PoolMockQuerier {
             estimate_den: Uint128::one(),
             factory_rate: None,
             bluechip_wallet: Addr::unchecked("bluechip_treasury"),
+            // Healthy default: far above any plausible 25%-of-seed floor for
+            // the standard fixture denoms. Matches `fixtures::CREATOR_DENOM`
+            // (kept as a literal so this test-querier has no cross-module dep).
+            pool_liquidity: vec![
+                Coin {
+                    denom: "ubluechip".to_string(),
+                    amount: Uint128::new(1_000_000_000_000),
+                },
+                Coin {
+                    denom: "factory/pool_contract/ucreator".to_string(),
+                    amount: Uint128::new(1_000_000_000_000),
+                },
+            ],
         }
+    }
+
+    /// Configure the per-side liquidity the `TotalPoolLiquidity` query
+    /// returns (FIX G breaker). Pass amounts below 25% of the seeded side to
+    /// drive the breaker; omit a denom entirely to simulate a fully-drained
+    /// side (reads as zero → trips the breaker).
+    pub fn set_pool_liquidity(&mut self, coins: Vec<Coin>) {
+        self.pool_liquidity = coins;
     }
 
     /// Set the estimate ratio: `estimated_out = token_in * num / den`.
@@ -113,6 +145,20 @@ impl PoolMockQuerier {
                 let resp = EstimateSwapExactAmountInResponse {
                     token_out_amount: out.to_string(),
                 };
+                SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+            }
+            QueryRequest::Stargate { path, .. } if path == TOTAL_POOL_LIQUIDITY_QUERY_PATH => {
+                // FIX G — echo the configured per-side liquidity. The breaker
+                // matches these coins by denom against SEED_LIQUIDITY.
+                let liquidity: Vec<OsmoCoin> = self
+                    .pool_liquidity
+                    .iter()
+                    .map(|c| OsmoCoin {
+                        denom: c.denom.clone(),
+                        amount: c.amount.to_string(),
+                    })
+                    .collect();
+                let resp = TotalPoolLiquidityResponse { liquidity };
                 SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
             }
             QueryRequest::Wasm(WasmQuery::Smart { msg, .. }) => {

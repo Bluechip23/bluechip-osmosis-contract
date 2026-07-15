@@ -30,12 +30,12 @@ use crate::error::ContractError;
 use crate::generic::{check_rate_limit, enforce_transaction_deadline, with_reentrancy_guard};
 use crate::osmosis_msgs::swap_exact_amount_in_msg;
 use crate::state::{
-    PoolCtx, SwapForwardPayload, IS_THRESHOLD_HIT, POOL_ANALYTICS, POOL_ID, POOL_PAUSED,
-    REPLY_ID_SWAP_FORWARD,
+    PoolCtx, SwapForwardPayload, BREAKER_FLOOR_PERCENT, IS_THRESHOLD_HIT, POOL_ANALYTICS, POOL_ID,
+    POOL_PAUSED, POOL_PAUSED_AUTO, REPLY_ID_SWAP_FORWARD, SEED_LIQUIDITY,
 };
 use cosmwasm_std::{
     to_json_binary, Addr, BankMsg, Coin, CustomQuery, Decimal, DepsMut, Env, Fraction, MessageInfo,
-    QuerierWrapper, Reply, Response, StdError, StdResult, SubMsg, SubMsgResult, Uint128,
+    QuerierWrapper, Reply, Response, StdError, StdResult, Storage, SubMsg, SubMsgResult, Uint128,
 };
 use osmosis_std::types::osmosis::poolmanager::v1beta1::{
     MsgSwapExactAmountInResponse, PoolmanagerQuerier, SwapAmountInRoute,
@@ -185,13 +185,100 @@ pub fn compute_token_out_min<C: CustomQuery>(
     allow_high_max_spread: Option<bool>,
 ) -> Result<Uint128, ContractError> {
     let estimated_out = estimate_swap_out(querier, pool_id, token_in, ask_denom);
-    derive_token_out_min(
+    let token_out_min = derive_token_out_min(
         token_in.amount,
         estimated_out,
         belief_price,
         max_spread,
         allow_high_max_spread,
-    )
+    )?;
+    // CARRY-OVER 2 — reject a zero slippage floor. `derive_token_out_min`
+    // stays fail-soft (a failed estimate query contributes a zero estimate
+    // floor, and a caller may legitimately pass no `belief_price`), but the
+    // COMBINATION of `estimated_out == 0` AND no `belief_price` collapses the
+    // floor to zero, which would dispatch `MsgSwapExactAmountIn` with
+    // `token_out_min_amount = 0` — an unprotected swap with no
+    // sandwich/slippage guard. Both swap sites route through this helper, so
+    // rejecting here closes that residual at a single choke point. On a
+    // functioning Osmosis pool the estimate always resolves non-zero, so this
+    // only fires when the estimate is genuinely unavailable and the caller
+    // supplied no belief price.
+    if token_out_min.is_zero() {
+        return Err(ContractError::MaxSpreadAssertion {});
+    }
+    Ok(token_out_min)
+}
+
+/// FIX G — native relative circuit breaker.
+///
+/// Queries the LIVE per-side liquidity of the native GAMM pool (`pool_id`)
+/// via the poolmanager `total_pool_liquidity` query and compares each side
+/// against the amount seeded at threshold-crossing ([`SEED_LIQUIDITY`]). If
+/// EITHER side has fallen below [`BREAKER_FLOOR_PERCENT`]% of its seeded
+/// amount, the pool is auto-paused (`POOL_PAUSED` + `POOL_PAUSED_AUTO` set
+/// to `true`) and the current call is rejected with
+/// [`ContractError::PoolPausedLowLiquidity`]. Manual admin `Unpause` clears
+/// both flags. Replaces the retired absolute `MINIMUM_LIQUIDITY` guard,
+/// which is meaningless on a native pool.
+///
+/// Called at the START of swap routing on BOTH swap sites (SimpleSwap here,
+/// and the post-threshold commit path), before dispatching the swap.
+///
+/// Two fail-soft short-circuits (return `Ok`, breaker not applied):
+/// - `SEED_LIQUIDITY` unset — a pre-breaker or pre-threshold pool has no
+///   snapshot to compare against.
+/// - the `total_pool_liquidity` query errors — a transient/unavailable query
+///   must not brick every swap; the per-swap `token_out_min_amount` floor
+///   still protects the individual trade.
+///
+/// A side missing entirely from the query response reads as zero liquidity
+/// and therefore trips the breaker — the correct, conservative behaviour if
+/// the pool has been drained of one side.
+pub fn enforce_liquidity_breaker<C: CustomQuery>(
+    storage: &mut dyn Storage,
+    querier: &QuerierWrapper<C>,
+    pool_id: u64,
+    bluechip_denom: &str,
+    creator_denom: &str,
+) -> Result<(), ContractError> {
+    let (seed_osmo, seed_creator) = match SEED_LIQUIDITY.may_load(storage)? {
+        Some(seed) => seed,
+        None => return Ok(()),
+    };
+
+    let liquidity = match PoolmanagerQuerier::new(querier).total_pool_liquidity(pool_id) {
+        Ok(resp) => resp.liquidity,
+        Err(_) => return Ok(()),
+    };
+
+    // Resolve each side's current amount by denom; a side absent from the
+    // response reads as zero (drained), which trips the breaker.
+    let current_of = |denom: &str| -> Uint128 {
+        liquidity
+            .iter()
+            .find(|c| c.denom == denom)
+            .and_then(|c| Uint128::from_str(&c.amount).ok())
+            .unwrap_or_default()
+    };
+    let current_osmo = current_of(bluechip_denom);
+    let current_creator = current_of(creator_denom);
+
+    // `current < BREAKER_FLOOR_PERCENT% of seed`  ⇔
+    // `current * 100 < seed * BREAKER_FLOOR_PERCENT`.
+    // `saturating_mul` keeps the comparison well-defined for huge balances:
+    // a saturated `current * 100` is enormous, so a healthy side never trips.
+    let floor_pct = Uint128::new(BREAKER_FLOOR_PERCENT);
+    let hundred = Uint128::new(100);
+    let below_floor = |current: Uint128, seed: Uint128| -> bool {
+        current.saturating_mul(hundred) < seed.saturating_mul(floor_pct)
+    };
+
+    if below_floor(current_osmo, seed_osmo) || below_floor(current_creator, seed_creator) {
+        POOL_PAUSED.save(storage, &true)?;
+        POOL_PAUSED_AUTO.save(storage, &true)?;
+        return Err(ContractError::PoolPausedLowLiquidity {});
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +402,23 @@ fn execute_simple_swap_with_ctx(
     let pool_id = POOL_ID
         .may_load(deps.storage)?
         .ok_or(ContractError::ShortOfThreshold {})?;
+
+    // FIX G — trip the native relative circuit breaker BEFORE dispatching
+    // the swap: if either side of the live pool has fallen below
+    // BREAKER_FLOOR_PERCENT% of its seeded liquidity, this auto-pauses the
+    // pool and rejects. Shares the exact helper with the post-threshold
+    // commit swap path so the protection can't drift between the two sites.
+    // The breaker keys on the CANONICAL pair sides ([0] = bluechip Native,
+    // [1] = creator) so it matches `SEED_LIQUIDITY = (seed_osmo, seed_creator)`
+    // regardless of the swap DIRECTION (`offer_denom`/`ask_denom` flip on a
+    // sell).
+    enforce_liquidity_breaker(
+        deps.storage,
+        &deps.querier,
+        pool_id,
+        &denom_of(&pool_info.pool_info.asset_infos[0]),
+        &denom_of(&pool_info.pool_info.asset_infos[1]),
+    )?;
 
     let token_in = Coin {
         denom: offer_denom.clone(),

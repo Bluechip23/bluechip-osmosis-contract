@@ -78,6 +78,7 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
         subdenom: "ucreator".to_string(),
         max_bluechip_lock_per_pool: Uint128::new(10000),
         creator_excess_liquidity_lock_days: 7,
+        gamm_pool_creation_fee_amount: Uint128::zero(),
     }
 }
 
@@ -134,6 +135,58 @@ fn test_pause_unpause() {
 
     let is_paused = POOL_PAUSED.load(&deps.storage).unwrap();
     assert!(!is_paused);
+}
+
+#[test]
+fn test_claim_failed_distribution_rejected_when_paused() {
+    // FIX F — a paused pool must reject the distribution-recovery mint path
+    // (`ClaimFailedDistribution`), matching the pause gate that
+    // `ContinueDistribution` already enforces.
+    let mut deps = mock_dependencies();
+    let msg = mock_instantiate_msg();
+    let info = message_info(&Addr::unchecked("factory_addr"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Seed a claimable failed-mint entry so, absent the pause, the claim
+    // would proceed — isolating the pause as the sole cause of rejection.
+    crate::state::FAILED_MINTS
+        .save(
+            &mut deps.storage,
+            &Addr::unchecked("claimant"),
+            &Uint128::new(1_000),
+        )
+        .unwrap();
+
+    // Paused ⇒ rejected with the pause error.
+    POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
+    let claimant = message_info(&Addr::unchecked("claimant"), &[]);
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        claimant.clone(),
+        ExecuteMsg::ClaimFailedDistribution { recipient: None },
+    )
+    .unwrap_err();
+    match err {
+        crate::error::ContractError::PoolPausedLowLiquidity {} => {}
+        other => panic!("expected PoolPausedLowLiquidity, got {:?}", other),
+    }
+
+    // Unpausing lets the same claim proceed (dispatches the mint SubMsg),
+    // proving the pause was the sole blocker.
+    POOL_PAUSED.save(&mut deps.storage, &false).unwrap();
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        claimant,
+        ExecuteMsg::ClaimFailedDistribution { recipient: None },
+    )
+    .unwrap();
+    assert_eq!(
+        res.messages.len(),
+        1,
+        "unpaused claim dispatches exactly one mint SubMsg"
+    );
 }
 
 #[test]

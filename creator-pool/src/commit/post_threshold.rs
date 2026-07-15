@@ -18,7 +18,7 @@ use crate::generic_helpers::update_commit_info;
 use crate::state::{
     PoolAnalytics, PoolInfo, PoolSpecs, POOL_ID, POOL_PAUSED, REPLY_ID_SWAP_FORWARD,
 };
-use crate::swap_helper::compute_token_out_min;
+use crate::swap_helper::{compute_token_out_min, enforce_liquidity_breaker};
 use pool_core::osmosis_msgs::swap_exact_amount_in_msg;
 use pool_core::state::SwapForwardPayload;
 
@@ -54,6 +54,19 @@ pub(super) fn process_post_threshold_commit(
 
     let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
     let creator_denom = pool_info.token_denom.clone();
+
+    // FIX G — trip the native relative circuit breaker BEFORE dispatching
+    // the swap leg, matching the `SimpleSwap` site (both share the helper).
+    // If either side of the live pool has fallen below BREAKER_FLOOR_PERCENT%
+    // of its seeded liquidity, this auto-pauses the pool and rejects the
+    // commit. Pre-threshold commits never reach here (no pool yet).
+    enforce_liquidity_breaker(
+        deps.storage,
+        &deps.querier,
+        pool_id,
+        &bluechip_denom,
+        &creator_denom,
+    )?;
 
     let token_in = Coin {
         denom: bluechip_denom.clone(),

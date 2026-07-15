@@ -132,9 +132,16 @@ pub(crate) fn process_threshold_crossing_with_excess(
         analytics.total_commit_count,
         &env,
     );
-    Ok(Response::new()
+    // Order matters: create the native pool FIRST (the gamm module charges
+    // the creation fee from the pool's OSMO balance), THEN remit any
+    // creation-fee reserve leftover to the bluechip wallet (FIX E).
+    let mut response = Response::new()
         .add_messages(messages)
-        .add_submessage(payout_msgs.create_pool)
+        .add_submessage(payout_msgs.create_pool);
+    if let Some(remit) = payout_msgs.reserve_remit {
+        response = response.add_message(remit);
+    }
+    Ok(response
         .add_submessage(payout_msgs.factory_notify)
         .add_attributes(base)
         .add_attribute("total_amount_bluechip", asset.amount.to_string())
@@ -206,9 +213,15 @@ pub(crate) fn process_threshold_hit_exact(
         analytics.total_commit_count,
         &env,
     );
-    Ok(Response::new()
+    // Order matters: create the native pool FIRST (the gamm module charges
+    // the creation fee), THEN remit any creation-fee reserve leftover (FIX E).
+    let mut response = Response::new()
         .add_messages(messages)
-        .add_submessage(payout.create_pool)
+        .add_submessage(payout.create_pool);
+    if let Some(remit) = payout.reserve_remit {
+        response = response.add_message(remit);
+    }
+    Ok(response
         .add_submessage(payout.factory_notify)
         .add_attributes(base)
         .add_attribute("commit_amount_bluechip", asset.amount.to_string())
