@@ -18,7 +18,7 @@ use crate::generic_helpers::update_commit_info;
 use crate::state::{
     PoolAnalytics, PoolInfo, PoolSpecs, POOL_ID, POOL_PAUSED, REPLY_ID_SWAP_FORWARD,
 };
-use crate::swap_helper::derive_token_out_min;
+use crate::swap_helper::compute_token_out_min;
 use pool_core::osmosis_msgs::swap_exact_amount_in_msg;
 use pool_core::state::SwapForwardPayload;
 
@@ -55,13 +55,23 @@ pub(super) fn process_post_threshold_commit(
     let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
     let creator_denom = pool_info.token_denom.clone();
 
-    // Slippage floor from the caller's belief_price / max_spread.
-    let token_out_min_amount = derive_token_out_min(swap_amount, belief_price, max_spread, None)?;
-
     let token_in = Coin {
         denom: bluechip_denom.clone(),
         amount: swap_amount,
     };
+
+    // Slippage floor = max(on-chain-estimate floor, belief-price floor).
+    // Shares the exact orchestration used by `SimpleSwap` (pool_core::swap)
+    // so the sandwich/slippage protection is identical at both sites.
+    let token_out_min_amount = compute_token_out_min(
+        &deps.querier,
+        pool_id,
+        &token_in,
+        &creator_denom,
+        belief_price,
+        max_spread,
+        None,
+    )?;
     let payload = SwapForwardPayload {
         receiver: sender.clone(),
         token_out_denom: creator_denom.clone(),

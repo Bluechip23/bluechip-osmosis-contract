@@ -286,8 +286,8 @@ fn test_query_creator_earnings_locked_excess() {
             &mut deps.storage,
             &CreatorExcessLiquidity {
                 creator: Addr::unchecked("creator_wallet"),
-                excess_bluechip: Uint128::new(15_000_000_000),
-                total_seeded_bluechip: Uint128::new(30_000_000_000),
+                bluechip_amount: Uint128::new(15_000_000_000),
+                token_amount: Uint128::new(30_000_000_000),
                 unlock_time: unlock,
             },
         )
@@ -301,8 +301,8 @@ fn test_query_creator_earnings_locked_excess() {
     let resp: CreatorEarningsResponse = from_json(res).unwrap();
 
     let excess = resp.excess.expect("excess position should be reported");
-    assert_eq!(excess.excess_bluechip, Uint128::new(15_000_000_000));
-    assert_eq!(excess.total_seeded_bluechip, Uint128::new(30_000_000_000));
+    assert_eq!(excess.bluechip_amount, Uint128::new(15_000_000_000));
+    assert_eq!(excess.token_amount, Uint128::new(30_000_000_000));
     assert_eq!(excess.unlock_time, unlock);
     assert!(!excess.claimable_now);
     assert_eq!(

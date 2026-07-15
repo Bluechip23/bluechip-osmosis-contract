@@ -162,6 +162,9 @@ pub fn instantiate(
     USD_RAISED_FROM_COMMIT.save(deps.storage, &Uint128::zero())?;
     COMMITFEEINFO.save(deps.storage, &msg.commit_fee_info)?;
     NATIVE_RAISED_FROM_COMMIT.save(deps.storage, &Uint128::zero())?;
+    // O(1) distinct-committer counter (FIX B): starts at zero, bumped once
+    // per newly-seen committer in `COMMIT_LEDGER`.
+    crate::state::COMMITTER_COUNT.save(deps.storage, &0u32)?;
     IS_THRESHOLD_HIT.save(deps.storage, &false)?;
     POOL_INFO.save(deps.storage, &pool_info)?;
     POOL_STATE.save(deps.storage, &pool_state)?;
@@ -190,7 +193,13 @@ fn check_pool_not_paused(storage: &dyn Storage) -> Result<(), ContractError> {
 }
 
 /// Strict gate: hard-rejects whenever the pool is paused for ANY reason
-/// and rejects when permanently drained. Used by the creator claim path.
+/// and rejects when permanently drained.
+///
+/// Retained as the canonical "pool must be live and writable" gate for
+/// fund-touching handlers. The creator-excess claim intentionally does
+/// NOT use it (FIX D — that claim must survive a drain); kept here so the
+/// strict-gate helper stays available and documented.
+#[allow(dead_code)]
 fn check_pool_writable(storage: &dyn Storage) -> Result<(), ContractError> {
     ensure_not_drained(storage)?;
     check_pool_not_paused(storage)
@@ -274,7 +283,14 @@ pub fn execute(
         ExecuteMsg::ClaimCreatorExcessLiquidity {
             transaction_deadline,
         } => {
-            check_pool_writable(deps.storage)?;
+            // FIX D: the creator-excess earmark is the creator's OWN
+            // time-locked coins, and an emergency drain deliberately
+            // preserves it (see pool_core::admin core drain). So this claim
+            // must remain reachable even after a drain (which also leaves
+            // the pool paused). We therefore do NOT gate on
+            // `check_pool_writable` (ensure_not_drained + not-paused) here;
+            // the handler itself still enforces creator-only + unlock-time,
+            // and runs under the reentrancy guard.
             execute_claim_creator_excess(deps, env, info, transaction_deadline)
         }
 

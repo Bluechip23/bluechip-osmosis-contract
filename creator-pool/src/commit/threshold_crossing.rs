@@ -23,7 +23,7 @@ use crate::generic_helpers::{
 };
 use crate::msg::CommitFeeInfo;
 use crate::state::{
-    CommitLimitInfo, PoolAnalytics, PoolInfo, PoolSpecs, ThresholdPayoutAmounts, COMMIT_LEDGER,
+    CommitLimitInfo, PoolAnalytics, PoolInfo, PoolSpecs, ThresholdPayoutAmounts,
     IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
 use crate::swap_helper::usd_to_native_at_rate;
@@ -72,10 +72,12 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // swap). Third-party trades happen on the native pool after seeding.
     let effective_bluechip_excess = amount_after_fees.checked_sub(threshold_portion_after_fees)?;
 
-    // Update commit ledger with only the threshold portion.
-    COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
-        Ok(v.unwrap_or_default().checked_add(value_to_threshold)?)
-    })?;
+    // Update commit ledger with only the threshold portion, bumping the
+    // O(1) distinct-committer counter if the crosser is new (FIX B). The
+    // counter is read by `trigger_threshold_payout` below to size the
+    // initial `distributions_remaining`, so it MUST reflect the crosser
+    // before the payout runs — hence the insert-and-count happens here.
+    super::record_committer(deps.storage, &sender, value_to_threshold)?;
     USD_RAISED_FROM_COMMIT.save(deps.storage, &commit_config.commit_amount_for_threshold_usd)?;
     // NATIVE_RAISED_FROM_COMMIT stores the NET bluechip entering the pool
     // for the threshold portion. The excess is refunded, not seeded.
@@ -168,9 +170,9 @@ pub(crate) fn process_threshold_hit_exact(
         return Err(ContractError::StuckThresholdProcessing);
     }
 
-    COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
-        Ok(v.unwrap_or_default().checked_add(commit_value)?)
-    })?;
+    // Insert the crosser into the ledger + bump COMMITTER_COUNT if new
+    // (FIX B) before `trigger_threshold_payout` reads it below.
+    super::record_committer(deps.storage, &sender, commit_value)?;
     let final_raised = new_total.min(commit_config.commit_amount_for_threshold_usd);
     USD_RAISED_FROM_COMMIT.save(deps.storage, &final_raised)?;
     NATIVE_RAISED_FROM_COMMIT

@@ -11,4 +11,6 @@ pub mod state;
 pub mod swap_helper;
 
 #[cfg(test)]
+mod mock_querier;
+#[cfg(test)]
 mod testing;

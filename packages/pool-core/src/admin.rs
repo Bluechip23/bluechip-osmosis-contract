@@ -7,9 +7,11 @@
 //! `EmergencyDrainSnapshot`) was removed with it. Emergency withdraw is now
 //! a simple two-phase pause+timelock followed by a drain that sweeps the
 //! pool's held `gamm/pool/{id}` LP shares (and any residual bluechip /
-//! creator-token bank balance) to the bluechip wallet.
+//! creator-token bank balance) to the bluechip wallet — EXCLUDING the
+//! time-locked creator-excess earmark, which is preserved so the creator
+//! can still claim it after a drain (FIX D).
 
-use crate::asset::query_balance;
+use crate::asset::{get_native_denom, query_balance, TokenType};
 use crate::error::ContractError;
 use crate::msg::PoolConfigUpdate;
 use crate::state::{
@@ -131,20 +133,24 @@ pub fn execute_emergency_withdraw_initiate(
 ///
 /// Phase-2 semantics: the pool holds `gamm/pool/{id}` LP shares (its seed
 /// liquidity on the native Osmosis pool) plus whatever residual bluechip /
-/// creator-token bank balance remains. This drain sweeps the LP shares to
-/// the (live-queried) bluechip wallet and flips `EMERGENCY_DRAINED`.
+/// creator-token bank balance remains. This drain sweeps the LP shares AND
+/// the residual bank balances of both pool denoms to the (live-queried)
+/// bluechip wallet and flips `EMERGENCY_DRAINED`.
 ///
-/// `accumulation_drain_*` are additional coin amounts the caller's
-/// contract-specific bookkeeping wants folded into the drain (creator-pool
-/// forwards zero now that the creator-excess entitlement is LP-share-based
-/// and released on its own timelock). They are recorded in the drain
-/// totals but not otherwise transferred here.
+/// FIX D — the creator-excess earmark is PRESERVED across a drain. The
+/// caller passes the earmarked amounts (from `CREATOR_EXCESS_POSITION`) as
+/// `earmark_bluechip` / `earmark_creator`; the drain EXCLUDES them from the
+/// residual-bank sweep (saturating), so the time-locked excess stays in the
+/// contract's bank balance for the creator's later
+/// `ClaimCreatorExcessLiquidity`. A pool with no earmark passes zero and
+/// the full residual is swept. The earmark record itself is NOT deleted
+/// here (the creator-pool wrapper leaves `CREATOR_EXCESS_POSITION` intact).
 pub fn execute_emergency_withdraw_core_drain(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    _accumulation_drain_0: Uint128,
-    _accumulation_drain_1: Uint128,
+    earmark_bluechip: Uint128,
+    earmark_creator: Uint128,
 ) -> Result<CoreDrainResult, ContractError> {
     let pool_info = POOL_INFO.load(deps.storage)?;
     if info.sender != pool_info.factory_addr {
@@ -182,8 +188,16 @@ pub fn execute_emergency_withdraw_core_drain(
         Err(_) => fee_info.bluechip_wallet_address.clone(),
     };
 
-    // Sweep the pool's held native LP shares (`gamm/pool/{id}`), if any.
+    // Resolve the two pool denoms. [0] = bluechip Native, [1] = creator
+    // TokenFactory denom.
+    let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
+    let creator_denom = match &pool_info.pool_info.asset_infos[1] {
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom.clone(),
+    };
+
     let mut messages: Vec<CosmosMsg> = vec![];
+
+    // (1) Sweep the pool's held native LP shares (`gamm/pool/{id}`), if any.
     let mut lp_shares = Uint128::zero();
     if let Some(pool_id) = POOL_ID.may_load(deps.storage)? {
         let lp_denom = format!("gamm/pool/{}", pool_id);
@@ -204,11 +218,55 @@ pub fn execute_emergency_withdraw_core_drain(
         }
     }
 
+    // (2) Sweep residual bank balances of BOTH pool denoms MINUS the
+    // creator-excess earmark. `saturating_sub` guarantees the earmark is
+    // never overdrawn even if the queried balance is (defensively) smaller
+    // than the earmark. If the creator token and bluechip share a denom
+    // (they never do — one is Native, one is TokenFactory — but defend
+    // anyway), the two earmarks would double-count; the denoms differ by
+    // construction so each residual is computed once.
+    let bluechip_bal = query_balance(
+        &deps.querier,
+        env.contract.address.clone(),
+        bluechip_denom.clone(),
+    )
+    .unwrap_or_default();
+    let bluechip_residual = bluechip_bal.saturating_sub(earmark_bluechip);
+    if !bluechip_residual.is_zero() {
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: recipient.to_string(),
+            amount: vec![Coin {
+                denom: bluechip_denom.clone(),
+                amount: bluechip_residual,
+            }],
+        }));
+    }
+
+    let creator_bal = query_balance(
+        &deps.querier,
+        env.contract.address.clone(),
+        creator_denom.clone(),
+    )
+    .unwrap_or_default();
+    let creator_residual = creator_bal.saturating_sub(earmark_creator);
+    if !creator_residual.is_zero() {
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: recipient.to_string(),
+            amount: vec![Coin {
+                denom: creator_denom.clone(),
+                amount: creator_residual,
+            }],
+        }));
+    }
+
+    // `total_0` / `total_1` report the residual bank amounts SWEPT (the
+    // earmark is excluded); LP shares are reported separately via
+    // `total_liquidity_at_withdrawal`.
     let withdrawal_info = EmergencyWithdrawalInfo {
         withdrawn_at: env.block.time.seconds(),
         recipient: recipient.clone(),
-        amount0: lp_shares,
-        amount1: Uint128::zero(),
+        amount0: bluechip_residual,
+        amount1: creator_residual,
         total_liquidity_at_withdrawal: lp_shares,
     };
     EMERGENCY_WITHDRAWAL.save(deps.storage, &withdrawal_info)?;
@@ -217,8 +275,8 @@ pub fn execute_emergency_withdraw_core_drain(
 
     Ok(CoreDrainResult {
         messages,
-        total_0: lp_shares,
-        total_1: Uint128::zero(),
+        total_0: bluechip_residual,
+        total_1: creator_residual,
         recipient,
         total_liquidity_at_withdrawal: lp_shares,
     })

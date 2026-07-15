@@ -62,6 +62,22 @@ pub const NATIVE_RAISED_FROM_COMMIT: Item<Uint128> = Item::new("bluechip_raised"
 /// Per-committer USD ledger; drained during post-threshold distribution.
 pub const COMMIT_LEDGER: cw_storage_plus::Map<&Addr, Uint128> =
     cw_storage_plus::Map::new("commit_usd");
+/// Incrementally-maintained count of DISTINCT committers ever recorded in
+/// `COMMIT_LEDGER` toward the threshold. Bumped by exactly one the first
+/// time each address appears in the ledger (pre-threshold funding commits
+/// and the threshold-crossing commit alike); repeat commits from an
+/// already-recorded address do NOT bump it. Initialised to `0` at
+/// instantiate.
+///
+/// This replaces the O(n) `COMMIT_LEDGER.keys(..).count()` scan that used
+/// to run inside the atomic threshold-crossing tx (and the admin recovery
+/// path) purely to seed the INFORMATIONAL
+/// `DistributionState.distributions_remaining`. Distribution TERMINATION is
+/// still driven by ledger-emptiness — this counter is informational and is
+/// read O(1) to size the initial `distributions_remaining`. It is not
+/// decremented as the distribution drains the ledger; the ledger itself is
+/// the ground truth for what remains.
+pub const COMMITTER_COUNT: Item<u32> = Item::new("committer_count");
 /// Re-entrancy/inflight flag set while a threshold-crossing commit is mid-execution.
 pub const THRESHOLD_PROCESSING: Item<bool> = Item::new("threshold_processing");
 /// Fixed split of creator-token amounts paid out at threshold crossing.
@@ -376,24 +392,29 @@ pub struct CommitLimitInfo {
     pub min_commit_usd_post_threshold: Uint128,
 }
 
-/// Time-locked creator entitlement to a portion of the pool's seed LP.
+/// Time-locked creator entitlement to the RAW excess coins parked in the
+/// contract at threshold crossing (FIX C — restores the original model).
 ///
-/// Phase-2: when the raised bluechip exceeds `max_bluechip_lock_per_pool`,
-/// the excess no longer parks raw tokens. Instead the creator becomes
-/// entitled to a proportional slice of the `gamm/pool/{id}` LP shares the
-/// pool holds. The slice is `total_seed_lp * excess_bluechip /
-/// total_seeded_bluechip`, computed at CLAIM time by reading the pool's
-/// current `gamm/pool/{id}` bank balance (its permanently-held seed LP).
+/// When the raised bluechip exceeds `max_bluechip_lock_per_pool`, the pool
+/// is seeded with only `max_bluechip_lock` OSMO + the non-earmarked
+/// creator tokens; the excess bluechip and the proportional excess creator
+/// tokens REMAIN in the contract's bank balance, earmarked here. After
+/// `unlock_time` the creator claims these exact raw amounts via
+/// `ClaimCreatorExcessLiquidity` — a `BankMsg::Send` of `bluechip_amount`
+/// (bluechip denom) + `token_amount` (creator denom). No LP-share math is
+/// involved.
 #[cw_serde]
 pub struct CreatorExcessLiquidity {
     /// Creator wallet entitled to claim the excess once unlocked.
     pub creator: Addr,
-    /// Bluechip raised above `max_bluechip_lock_per_pool` — the numerator
-    /// of the LP-share proportion.
-    pub excess_bluechip: Uint128,
-    /// Total net bluechip raised toward threshold — the denominator of the
-    /// LP-share proportion (`excess_bluechip / total_seeded_bluechip`).
-    pub total_seeded_bluechip: Uint128,
+    /// Raw bluechip earmarked for the creator (`raised -
+    /// max_bluechip_lock_per_pool`). Held in the contract's bank balance.
+    pub bluechip_amount: Uint128,
+    /// Raw creator tokens earmarked for the creator
+    /// (`pool_seed_amount * excess_bluechip / raised`). Held in the
+    /// contract's bank balance (minted to the contract in full, only the
+    /// non-earmarked remainder was seeded into the pool).
+    pub token_amount: Uint128,
     /// Earliest block time at which the creator may claim this excess.
     pub unlock_time: Timestamp,
 }

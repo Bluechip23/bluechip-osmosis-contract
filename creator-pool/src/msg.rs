@@ -54,10 +54,10 @@ pub enum ExecuteMsg {
         belief_price: Option<Decimal>,
         max_spread: Option<Decimal>,
     },
-    // Time-locked release of the creator's proportional slice of the
-    // pool-held `gamm/pool/{id}` seed LP shares (see decision 5 /
-    // `CreatorExcessLiquidity`). Sends LP shares to the creator once
-    // `unlock_time` has passed.
+    // Time-locked release of the creator's RAW excess coins earmarked at
+    // threshold crossing (see `CreatorExcessLiquidity`). Sends the raw
+    // `bluechip_amount` + `token_amount` to the creator once `unlock_time`
+    // has passed (FIX C). Claimable even after an emergency drain (FIX D).
     ClaimCreatorExcessLiquidity {
         #[serde(default)]
         transaction_deadline: Option<Timestamp>,
@@ -197,10 +197,10 @@ pub struct CreatorEarningsResponse {
 
 #[cw_serde]
 pub struct CreatorExcessEarningsResponse {
-    /// Bluechip raised above the cap (numerator of the LP-share proportion).
-    pub excess_bluechip: Uint128,
-    /// Total net bluechip raised (denominator of the LP-share proportion).
-    pub total_seeded_bluechip: Uint128,
+    /// Raw bluechip earmarked for the creator (claimed as-is after unlock).
+    pub bluechip_amount: Uint128,
+    /// Raw creator tokens earmarked for the creator (claimed as-is after unlock).
+    pub token_amount: Uint128,
     pub unlock_time: Timestamp,
     /// True once block time has reached `unlock_time`.
     pub claimable_now: bool,

@@ -129,12 +129,13 @@ fn test_threshold_with_excess_creates_position() {
         USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap()
     );
 
-    // Phase-2: the over-cap bluechip no longer seeds internal reserves — it
-    // is recorded as a time-locked creator entitlement to a slice of the
-    // native GAMM seed LP shares.
+    // FIX C: the over-cap bluechip is recorded as a time-locked creator
+    // entitlement to the RAW excess coins (bluechip + creator tokens),
+    // which remain parked in the contract's bank balance.
     match CREATOR_EXCESS_POSITION.load(&deps.storage) {
         Ok(excess_position) => {
-            assert!(excess_position.excess_bluechip > Uint128::zero());
+            assert!(excess_position.bluechip_amount > Uint128::zero());
+            assert!(excess_position.token_amount > Uint128::zero());
 
             let fee_info = COMMITFEEINFO.load(&deps.storage).unwrap();
             assert_eq!(excess_position.creator, fee_info.creator_wallet_address);
@@ -166,8 +167,8 @@ fn test_claim_excess_before_unlock_fails() {
             &mut deps.storage,
             &CreatorExcessLiquidity {
                 creator: Addr::unchecked("creator"),
-                excess_bluechip: Uint128::new(50_000_000_000),
-                total_seeded_bluechip: Uint128::new(175_000_000_000),
+                bluechip_amount: Uint128::new(50_000_000_000),
+                token_amount: Uint128::new(175_000_000_000),
                 unlock_time: env.block.time.plus_seconds(14 * 86400), // 14 days from now
             },
         )
@@ -203,31 +204,22 @@ fn test_claim_excess_after_unlock_succeeds() {
 
     let unlock_time = env.block.time.minus_seconds(100);
 
-    // Phase-2 LP-share claim model: the creator is entitled to a slice of
-    // the pool's `gamm/pool/{id}` seed LP shares, proportional to
-    // excess_bluechip / total_seeded_bluechip.
-    let excess_bluechip = Uint128::new(50_000_000_000);
-    let total_seeded_bluechip = Uint128::new(100_000_000_000);
+    // FIX C: the creator claims the RAW earmarked coins — `bluechip_amount`
+    // (bluechip denom) + `token_amount` (creator denom) — that were parked
+    // in the contract at crossing. No LP-share proportion / query anymore.
+    let bluechip_amount = Uint128::new(50_000_000_000);
+    let token_amount = Uint128::new(175_000_000_000);
     CREATOR_EXCESS_POSITION
         .save(
             &mut deps.storage,
             &CreatorExcessLiquidity {
                 creator: Addr::unchecked("creator"),
-                excess_bluechip,
-                total_seeded_bluechip,
+                bluechip_amount,
+                token_amount,
                 unlock_time,
             },
         )
         .unwrap();
-
-    // Mock the pool's permanently-held seed LP balance so the claim has
-    // shares to distribute. setup_pool_post_threshold pins POOL_ID = 1 and
-    // the pool contract addr as "pool_contract".
-    let total_seed_lp = Uint128::new(1_000_000);
-    deps.querier.bank.update_balance(
-        Addr::unchecked("pool_contract"),
-        vec![cosmwasm_std::coin(total_seed_lp.u128(), "gamm/pool/1")],
-    );
 
     let info = message_info(&Addr::unchecked("creator"), &[]);
     let msg = ExecuteMsg::ClaimCreatorExcessLiquidity {
@@ -236,20 +228,27 @@ fn test_claim_excess_after_unlock_succeeds() {
 
     let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
 
-    // The claim sends exactly one message: the creator's LP-share slice of
-    // the `gamm/pool/1` denom.
-    let expected_lp = total_seed_lp.multiply_ratio(excess_bluechip, total_seeded_bluechip);
+    // The claim sends exactly one BankMsg::Send carrying BOTH raw coins to
+    // the creator.
     assert_eq!(res.messages.len(), 1);
     match &res.messages[0].msg {
         CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
             assert_eq!(to_address, "creator");
-            assert_eq!(amount[0].denom, "gamm/pool/1");
-            assert_eq!(amount[0].amount, expected_lp);
+            let bluechip = amount
+                .iter()
+                .find(|c| c.denom == "ubluechip")
+                .expect("bluechip coin present");
+            assert_eq!(bluechip.amount, bluechip_amount);
+            let creator_coin = amount
+                .iter()
+                .find(|c| c.denom == crate::testing::fixtures::CREATOR_DENOM)
+                .expect("creator-token coin present");
+            assert_eq!(creator_coin.amount, token_amount);
         }
-        _ => panic!("Expected Bank Send message for gamm LP shares"),
+        _ => panic!("Expected Bank Send message for the raw excess coins"),
     }
 
-    // Excess position should be cleared
+    // Excess position should be cleared (one-shot).
     let excess = CREATOR_EXCESS_POSITION.load(&deps.storage);
     assert!(excess.is_err());
 }
@@ -266,8 +265,8 @@ fn test_claim_excess_wrong_user_fails() {
             &mut deps.storage,
             &CreatorExcessLiquidity {
                 creator: Addr::unchecked("creator"),
-                excess_bluechip: Uint128::new(50_000_000_000),
-                total_seeded_bluechip: Uint128::new(175_000_000_000),
+                bluechip_amount: Uint128::new(50_000_000_000),
+                token_amount: Uint128::new(175_000_000_000),
                 unlock_time: env.block.time.minus_seconds(100), // Already unlocked
             },
         )
@@ -940,10 +939,10 @@ fn test_accumulated_bluechips_respected() {
 
     execute(deps.as_mut(), env.clone(), info, msg).unwrap();
 
-    // Phase-2: no internal reserves. The over-cap accumulated bluechip is
-    // recorded as a creator-excess entitlement. The seed math is:
-    //   excess_bluechip = NATIVE_RAISED_AT_CROSS - max_bluechip_lock_per_pool
-    //   total_seeded_bluechip = NATIVE_RAISED_AT_CROSS
+    // FIX C: the over-cap accumulated bluechip is recorded as a RAW
+    // creator-excess entitlement. The earmark math is:
+    //   bluechip_amount = NATIVE_RAISED_AT_CROSS - max_bluechip_lock_per_pool
+    //   token_amount    = pool_seed_amount * bluechip_amount / NATIVE_RAISED
     // NATIVE_RAISED is unchanged by trigger_threshold_payout, so its
     // post-execute value equals the value read at cross time.
     let native_raised = crate::state::NATIVE_RAISED_FROM_COMMIT
@@ -954,18 +953,24 @@ fn test_accumulated_bluechips_respected() {
     let excess = crate::state::CREATOR_EXCESS_POSITION
         .load(&deps.storage)
         .unwrap();
+    let expected_excess_bluechip = native_raised.checked_sub(cap).unwrap();
     assert_eq!(
-        excess.total_seeded_bluechip, native_raised,
-        "total_seeded_bluechip must equal NATIVE_RAISED at cross time"
+        excess.bluechip_amount, expected_excess_bluechip,
+        "bluechip_amount = NATIVE_RAISED - max_bluechip_lock_per_pool"
     );
+    // token_amount is the proportional creator-token earmark.
+    let pool_seed_amount = crate::state::THRESHOLD_PAYOUT_AMOUNTS
+        .load(&deps.storage)
+        .unwrap()
+        .pool_seed_amount;
     assert_eq!(
-        excess.excess_bluechip,
-        native_raised.checked_sub(cap).unwrap(),
-        "excess_bluechip = NATIVE_RAISED - max_bluechip_lock_per_pool"
+        excess.token_amount,
+        pool_seed_amount.multiply_ratio(expected_excess_bluechip, native_raised),
+        "token_amount = pool_seed_amount * bluechip_amount / NATIVE_RAISED"
     );
     // Sanity: the accumulated bluechip is well above the cap, so a real
     // over-raise entitlement is recorded.
-    assert!(excess.excess_bluechip > Uint128::new(40_000_000_000));
+    assert!(excess.bluechip_amount > Uint128::new(40_000_000_000));
 }
 
 #[test]
@@ -1318,6 +1323,179 @@ fn test_commit_rejects_below_post_threshold_floor() {
         }
         other => panic!("expected CommitTooSmall(post-threshold), got {:?}", other),
     }
+}
+
+// ===========================================================================
+// FIX D — emergency drain PRESERVES the creator-excess earmark, and the
+// creator can still claim the raw excess AFTER a drain.
+// ===========================================================================
+#[test]
+fn test_emergency_drain_preserves_creator_excess_and_claim_survives_drain() {
+    use crate::state::{CreatorExcessLiquidity, CREATOR_EXCESS_POSITION};
+
+    // The contract's bank balance holds the time-locked earmark PLUS extra
+    // residual on both denoms, PLUS the seed LP shares.
+    let earmark_bluechip = Uint128::new(30_000_000_000);
+    let earmark_creator = Uint128::new(7_000_000_000);
+    let extra_bluechip = Uint128::new(5_000_000_000);
+    let extra_creator = Uint128::new(2_000_000_000);
+    let lp_shares = Uint128::new(1_000_000);
+
+    let mut deps = mock_dependencies_with_balance(&[
+        Coin {
+            denom: "ubluechip".to_string(),
+            amount: earmark_bluechip + extra_bluechip,
+        },
+        Coin {
+            denom: crate::testing::fixtures::CREATOR_DENOM.to_string(),
+            amount: earmark_creator + extra_creator,
+        },
+        Coin {
+            denom: "gamm/pool/1".to_string(),
+            amount: lp_shares,
+        },
+    ]);
+    setup_pool_post_threshold(&mut deps); // POOL_ID=1, factory "factory_contract"
+
+    let mut env = mock_env();
+    CREATOR_EXCESS_POSITION
+        .save(
+            &mut deps.storage,
+            &CreatorExcessLiquidity {
+                creator: Addr::unchecked("creator"),
+                bluechip_amount: earmark_bluechip,
+                token_amount: earmark_creator,
+                unlock_time: env.block.time.plus_seconds(100),
+            },
+        )
+        .unwrap();
+
+    // Factory answers the delay + bluechip-wallet queries the drain issues.
+    deps.querier.update_wasm(move |query| match query {
+        WasmQuery::Smart { msg, .. } => {
+            #[cosmwasm_schema::cw_serde]
+            enum Probe {
+                PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
+            }
+            match from_json(msg) {
+                Ok(Probe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::EmergencyWithdrawDelaySeconds {},
+                )) => SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&pool_factory_interfaces::EmergencyWithdrawDelayResponse {
+                        delay_seconds: 86_400,
+                    })
+                    .unwrap(),
+                )),
+                Ok(Probe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+                )) => SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&pool_factory_interfaces::BluechipWalletResponse {
+                        address: Addr::unchecked("drain_recipient"),
+                    })
+                    .unwrap(),
+                )),
+                _ => SystemResult::Err(SystemError::InvalidRequest {
+                    error: "unmocked wasm query".to_string(),
+                    request: Binary::default(),
+                }),
+            }
+        }
+        _ => SystemResult::Err(SystemError::InvalidRequest {
+            error: "unsupported".to_string(),
+            request: Binary::default(),
+        }),
+    });
+
+    let factory_info = message_info(&Addr::unchecked("factory_contract"), &[]);
+
+    // Phase 1: initiate (pause + arm timelock).
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        factory_info.clone(),
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+
+    // Phase 2: drain after the timelock elapses.
+    env.block.time = env.block.time.plus_seconds(86_401);
+    let drain_res = execute(
+        deps.as_mut(),
+        env.clone(),
+        factory_info,
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+
+    // The drain sweeps ONLY the residual bank balances (earmark excluded)
+    // plus the LP shares to the bluechip wallet.
+    let sent_amount = |denom: &str| -> Uint128 {
+        drain_res
+            .messages
+            .iter()
+            .filter_map(|m| match &m.msg {
+                CosmosMsg::Bank(BankMsg::Send { to_address, amount }) if to_address == "drain_recipient" => {
+                    amount.iter().find(|c| c.denom == denom).map(|c| c.amount)
+                }
+                _ => None,
+            })
+            .fold(Uint128::zero(), |acc, x| acc + x)
+    };
+    assert_eq!(
+        sent_amount("ubluechip"),
+        extra_bluechip,
+        "drain must EXCLUDE the earmarked bluechip"
+    );
+    assert_eq!(
+        sent_amount(crate::testing::fixtures::CREATOR_DENOM),
+        extra_creator,
+        "drain must EXCLUDE the earmarked creator tokens"
+    );
+    assert_eq!(
+        sent_amount("gamm/pool/1"),
+        lp_shares,
+        "drain sweeps the full LP shares"
+    );
+
+    // Pool is drained but the earmark record SURVIVES.
+    assert!(crate::state::EMERGENCY_DRAINED.load(&deps.storage).unwrap());
+    let surviving = CREATOR_EXCESS_POSITION.load(&deps.storage).unwrap();
+    assert_eq!(surviving.bluechip_amount, earmark_bluechip);
+    assert_eq!(surviving.token_amount, earmark_creator);
+
+    // The creator can still claim the raw earmark AFTER the drain (unlock
+    // has passed by now). The claim is not gated by the drained/paused
+    // state (FIX D).
+    let claim_res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&Addr::unchecked("creator"), &[]),
+        ExecuteMsg::ClaimCreatorExcessLiquidity {
+            transaction_deadline: None,
+        },
+    )
+    .expect("creator must be able to claim earmark post-drain");
+    assert_eq!(claim_res.messages.len(), 1);
+    match &claim_res.messages[0].msg {
+        CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+            assert_eq!(to_address, "creator");
+            assert_eq!(
+                amount.iter().find(|c| c.denom == "ubluechip").unwrap().amount,
+                earmark_bluechip
+            );
+            assert_eq!(
+                amount
+                    .iter()
+                    .find(|c| c.denom == crate::testing::fixtures::CREATOR_DENOM)
+                    .unwrap()
+                    .amount,
+                earmark_creator
+            );
+        }
+        _ => panic!("expected a BankMsg::Send of the raw earmark to the creator"),
+    }
+    // One-shot: the position is cleared after the claim.
+    assert!(CREATOR_EXCESS_POSITION.load(&deps.storage).is_err());
 }
 
 // ===========================================================================

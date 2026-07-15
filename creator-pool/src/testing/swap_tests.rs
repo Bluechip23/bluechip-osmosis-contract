@@ -1533,3 +1533,246 @@ fn test_swap_cw20_with_custom_recipient() {
         "Bluechip should be sent to custom recipient"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FIX A — slippage floor = max(on-chain-estimate floor, belief-price floor)
+// ---------------------------------------------------------------------------
+
+fn token_out_min_attr(res: &Response) -> String {
+    res.attributes
+        .iter()
+        .find(|a| a.key == "token_out_min_amount")
+        .expect("swap response must carry token_out_min_amount")
+        .value
+        .clone()
+}
+
+/// Pure-function proof that `derive_token_out_min` returns the MORE
+/// PROTECTIVE of the estimate floor and the belief floor, and preserves the
+/// hard-cap + zero-belief-price rejections.
+#[test]
+fn test_derive_token_out_min_takes_max_of_floors() {
+    use pool_core::swap::derive_token_out_min;
+
+    // No belief price: the estimate floor is the binding (non-zero) floor.
+    // 1000 * (1 - 0.005) = 995.
+    let f = derive_token_out_min(Uint128::new(100), Uint128::new(1000), None, None, None).unwrap();
+    assert_eq!(f, Uint128::new(995));
+
+    // Belief floor LARGER than estimate → belief wins.
+    // belief_price 0.5 → expected = 100 / 0.5 = 200 → *0.995 = 199;
+    // estimate 100 → *0.995 = 99.  max(99, 199) = 199.
+    let f2 = derive_token_out_min(
+        Uint128::new(100),
+        Uint128::new(100),
+        Some(Decimal::percent(50)),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(f2, Uint128::new(199));
+
+    // Estimate floor LARGER than belief → estimate wins.
+    // belief_price 2.0 → expected = 100 / 2 = 50 → *0.995 = 49;
+    // estimate 100 → *0.995 = 99.  max(99, 49) = 99.
+    let f3 = derive_token_out_min(
+        Uint128::new(100),
+        Uint128::new(100),
+        Some(Decimal::percent(200)),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(f3, Uint128::new(99));
+
+    // Fail-soft: zero estimate + no belief → zero floor (NOT an error).
+    let f4 =
+        derive_token_out_min(Uint128::new(100), Uint128::zero(), None, None, None).unwrap();
+    assert_eq!(f4, Uint128::zero());
+
+    // Hard-cap rejection preserved.
+    assert!(derive_token_out_min(
+        Uint128::new(100),
+        Uint128::new(100),
+        None,
+        Some(Decimal::percent(6)),
+        None,
+    )
+    .is_err());
+    // Zero-belief-price rejection preserved.
+    assert!(derive_token_out_min(
+        Uint128::new(100),
+        Uint128::new(100),
+        Some(Decimal::zero()),
+        None,
+        None,
+    )
+    .is_err());
+}
+
+/// End-to-end: a `SimpleSwap` with NO belief_price now still derives a
+/// NON-ZERO `token_out_min_amount` from the on-chain poolmanager estimate
+/// (closing the "floor of zero ⇒ no sandwich protection" hole). The
+/// `PoolMockQuerier` answers the estimate at 1:1, default spread 0.5%.
+#[test]
+fn test_simple_swap_estimate_floor_sets_nonzero_token_out_min() {
+    use crate::mock_querier::mock_deps_estimate;
+
+    let mut deps = mock_deps_estimate(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_post_threshold(&mut deps);
+
+    let env = mock_env();
+    let swap_amount = Uint128::new(100_000_000);
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None, // no belief price → estimate floor is load-bearing
+        max_spread: None,   // default 0.5%
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+
+    let res = execute(deps.as_mut(), env, info, msg).unwrap();
+    assert_eq!(action_attr(&res), "swap");
+    // estimate 100_000_000 * (1 - 0.005) = 99_500_000 — NON-ZERO.
+    assert_eq!(token_out_min_attr(&res), "99500000");
+    expect_single_swap_forward(&res);
+}
+
+/// Post-threshold commit swap site derives the same non-zero estimate
+/// floor (FIX A applied at BOTH swap sites via the shared helper). The
+/// commit's post-fee swap leg of a $100 commit (1% + 5% fees) is
+/// 94_000_000 bluechip; at a 1:1 estimate and default 0.5% spread the
+/// floor is 94_000_000 * 0.995 = 93_530_000.
+#[test]
+fn test_post_threshold_commit_estimate_floor_nonzero_token_out_min() {
+    use crate::mock_querier::mock_deps_estimate;
+
+    let mut deps = mock_deps_estimate(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_post_threshold(&mut deps);
+    deps.querier
+        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+
+    let env = mock_env();
+    let commit_amount = Uint128::new(100_000_000); // $100 gross
+    let info = message_info(
+        &Addr::unchecked("commiter"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: commit_amount,
+        }],
+    );
+    let msg = ExecuteMsg::Commit {
+        asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: commit_amount,
+        },
+        transaction_deadline: None,
+        belief_price: None,
+        max_spread: None,
+    };
+
+    let res = execute(deps.as_mut(), env, info, msg).unwrap();
+    // net-of-fees swap = 100_000_000 - 1% - 5% = 94_000_000;
+    // 94_000_000 * 0.995 = 93_530_000.
+    assert_eq!(token_out_min_attr(&res), "93530000");
+    assert!(res.messages.iter().any(|m| m.id == REPLY_ID_SWAP_FORWARD));
+}
+
+// ---------------------------------------------------------------------------
+// FIX B — COMMITTER_COUNT is O(1) and EXACT across repeat committers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_committer_count_exact_across_repeat_committers() {
+    use crate::state::COMMITTER_COUNT;
+
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(100_000_000_000),
+    }]);
+    setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1/token
+
+    assert_eq!(COMMITTER_COUNT.load(&deps.storage).unwrap(), 0);
+
+    let commit = |amount: u128| ExecuteMsg::Commit {
+        asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: Uint128::new(amount),
+        },
+        transaction_deadline: None,
+        belief_price: None,
+        max_spread: None,
+    };
+
+    let mut env = mock_env();
+
+    // user1 first commit ($10) → new committer, count 1.
+    let info1 = message_info(
+        &Addr::unchecked("user1"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(10_000_000),
+        }],
+    );
+    execute(deps.as_mut(), env.clone(), info1.clone(), commit(10_000_000)).unwrap();
+    assert_eq!(COMMITTER_COUNT.load(&deps.storage).unwrap(), 1);
+
+    // user2 commit ($20) → new committer, count 2.
+    let info2 = message_info(
+        &Addr::unchecked("user2"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(20_000_000),
+        }],
+    );
+    execute(deps.as_mut(), env.clone(), info2, commit(20_000_000)).unwrap();
+    assert_eq!(COMMITTER_COUNT.load(&deps.storage).unwrap(), 2);
+
+    // user1 REPEAT commit (advance past the 60s rate-limit) → NOT new,
+    // count stays 2 even though the ledger value accumulates.
+    env.block.time = env.block.time.plus_seconds(61);
+    execute(deps.as_mut(), env, info1, commit(10_000_000)).unwrap();
+    assert_eq!(
+        COMMITTER_COUNT.load(&deps.storage).unwrap(),
+        2,
+        "repeat committer must not double-count"
+    );
+
+    // Ground-truth cross-check: the O(1) counter equals the distinct-key
+    // count of the ledger.
+    let distinct = COMMIT_LEDGER
+        .keys(&deps.storage, None, None, Order::Ascending)
+        .count();
+    assert_eq!(distinct, 2);
+    assert_eq!(
+        COMMIT_LEDGER
+            .load(&deps.storage, &Addr::unchecked("user1"))
+            .unwrap(),
+        Uint128::new(20_000_000),
+        "user1 ledger value accumulates across repeat commits"
+    );
+}

@@ -68,6 +68,34 @@ use threshold_crossing::{process_threshold_crossing_with_excess, process_thresho
 /// builders, liquidity_helpers claim handlers). `Response::add_attributes`
 /// accepts any `IntoIterator<Item = impl Into<Attribute>>` so the
 /// consuming sites are unchanged.
+/// Add `value` to `sender`'s `COMMIT_LEDGER` entry, and bump the O(1)
+/// `COMMITTER_COUNT` by one iff this is the FIRST time `sender` appears in
+/// the ledger (prior value `None`). Repeat committers only accumulate
+/// their ledger value and never re-bump the counter, so the counter stays
+/// EXACT across any mix of first-time and repeat commits.
+///
+/// Used by every path that inserts into `COMMIT_LEDGER` (pre-threshold
+/// funding and both threshold-crossing handlers) so the counter can never
+/// diverge from the true distinct-committer set. See `state::COMMITTER_COUNT`.
+pub(crate) fn record_committer(
+    storage: &mut dyn cosmwasm_std::Storage,
+    sender: &Addr,
+    value: Uint128,
+) -> Result<(), ContractError> {
+    use crate::state::{COMMITTER_COUNT, COMMIT_LEDGER};
+    let is_new = !COMMIT_LEDGER.has(storage, sender);
+    COMMIT_LEDGER.update::<_, ContractError>(storage, sender, |v| {
+        Ok(v.unwrap_or_default().checked_add(value)?)
+    })?;
+    if is_new {
+        // `may_load` + `save` (not `update`) so a pool whose
+        // COMMITTER_COUNT was never initialised still counts correctly.
+        let current = COMMITTER_COUNT.may_load(storage)?.unwrap_or(0);
+        COMMITTER_COUNT.save(storage, &current.checked_add(1).unwrap_or(u32::MAX))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn commit_base_attributes(
     phase: &'static str,
     sender: &Addr,

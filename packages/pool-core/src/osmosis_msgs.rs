@@ -126,8 +126,9 @@ pub fn create_balancer_pool_msg(
 
 /// `MsgSwapExactAmountIn` — single-hop swap of `token_in` for
 /// `token_out_denom` through `pool_id`, reverting if the output would fall
-/// below `token_out_min_amount` (the slippage floor derived from the
-/// caller's belief-price / max-spread). `sender` (the pool contract)
+/// below `token_out_min_amount` (the slippage floor — the more protective
+/// of an on-chain poolmanager estimate floor and the caller's belief-price
+/// floor; see `pool_core::swap::compute_token_out_min`). `sender` (the pool contract)
 /// receives the output and forwards it to the committer in the reply.
 pub fn swap_exact_amount_in_msg(
     sender: &Addr,

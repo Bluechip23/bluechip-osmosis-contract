@@ -43,7 +43,13 @@ pub fn mock_dependencies_with_balance(
 }
 
 /// Sets up a pool in pre-threshold state with all surviving configuration.
-pub fn setup_pool_storage(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>) {
+///
+/// Generic over the querier `Q` (only `deps.storage` is touched) so both
+/// the stock `MockQuerier` and the `PoolMockQuerier` (which answers the
+/// FIX-A estimate Stargate query) can share these fixtures.
+pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(
+    deps: &mut OwnedDeps<MockStorage, MockApi, Q>,
+) {
     let pool_info = PoolInfo {
         pool_id: 1u64,
         pool_info: PoolDetails {
@@ -115,12 +121,19 @@ pub fn setup_pool_storage(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier
     NATIVE_RAISED_FROM_COMMIT
         .save(&mut deps.storage, &Uint128::zero())
         .unwrap();
+    // O(1) distinct-committer counter (FIX B) — instantiate sets this to
+    // zero; mirror it here so fixture-based tests match production state.
+    crate::state::COMMITTER_COUNT
+        .save(&mut deps.storage, &0u32)
+        .unwrap();
 }
 
 /// Post-threshold pool: threshold hit, USD raised at target, and a native
 /// GAMM `POOL_ID` set so `SimpleSwap` / post-threshold commits can route
 /// their `MsgSwapExactAmountIn` through it.
-pub fn setup_pool_post_threshold(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>) {
+pub fn setup_pool_post_threshold<Q: cosmwasm_std::Querier>(
+    deps: &mut OwnedDeps<MockStorage, MockApi, Q>,
+) {
     setup_pool_storage(deps);
     IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
     USD_RAISED_FROM_COMMIT

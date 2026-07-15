@@ -1,14 +1,17 @@
 //! Commit-phase-only claim handlers.
 //!
 //! Phase-2: the internal LP system and the creator fee-pot are gone. The
-//! only claim that survives is the time-locked creator-excess release,
-//! which now transfers a proportional slice of the pool-held
-//! `gamm/pool/{id}` seed LP shares to the creator.
+//! only claim that survives is the time-locked creator-excess release.
+//!
+//! FIX C: the release transfers the RAW earmarked coins — `bluechip_amount`
+//! (bluechip denom) + `token_amount` (creator denom) — that were parked in
+//! the contract's bank balance at threshold crossing, straight to the
+//! creator. There is no LP-share query/proportion anymore.
 
+use crate::asset::get_native_denom;
 use crate::error::ContractError;
-use crate::state::{CreatorExcessLiquidity, CREATOR_EXCESS_POSITION, POOL_ID, POOL_INFO};
-use cosmwasm_std::{BankMsg, Coin, CosmosMsg, DepsMut, Env, MessageInfo, Response, Timestamp, Uint128};
-use pool_core::asset::query_balance;
+use crate::state::{CreatorExcessLiquidity, CREATOR_EXCESS_POSITION, POOL_INFO};
+use cosmwasm_std::{BankMsg, Coin, CosmosMsg, DepsMut, Env, MessageInfo, Response, Timestamp};
 
 pub fn execute_claim_creator_excess(
     deps: DepsMut,
@@ -30,63 +33,59 @@ fn execute_claim_creator_excess_inner(
     let excess_position: CreatorExcessLiquidity = CREATOR_EXCESS_POSITION.load(deps.storage)?;
     let pool_info = POOL_INFO.load(deps.storage)?;
 
+    // Creator-only. Unchanged auth model.
     if info.sender != excess_position.creator {
         return Err(ContractError::Unauthorized {});
     }
 
+    // Unlock-time gate. Unchanged.
     if env.block.time < excess_position.unlock_time {
         return Err(ContractError::PositionLocked {
             unlock_time: excess_position.unlock_time,
         });
     }
 
-    // Compute the creator's LP-share slice from the pool's CURRENT
-    // `gamm/pool/{id}` balance: the pool holds all of its seed LP shares
-    // permanently, so its balance IS the total seed LP. The slice is
-    // `total_seed_lp * excess_bluechip / total_seeded_bluechip`.
-    let pool_id = POOL_ID
-        .may_load(deps.storage)?
-        .ok_or(ContractError::ShortOfThreshold {})?;
-    let lp_denom = format!("gamm/pool/{}", pool_id);
-    let total_seed_lp = query_balance(
-        &deps.querier,
-        pool_info.pool_info.contract_addr.clone(),
-        lp_denom.clone(),
-    )?;
+    // Resolve the two denoms: bluechip is the Native side, the creator
+    // token is the pool's TokenFactory denom.
+    let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
+    let creator_denom = pool_info.token_denom.clone();
 
-    let lp_share = if excess_position.total_seeded_bluechip.is_zero() {
-        Uint128::zero()
-    } else {
-        total_seed_lp.multiply_ratio(
-            excess_position.excess_bluechip,
-            excess_position.total_seeded_bluechip,
-        )
-    };
-
-    // One-shot: remove the entitlement AFTER building the message.
+    // One-shot: remove the entitlement AFTER capturing its amounts (the
+    // BankMsg::Send messages below carry the captured values).
     CREATOR_EXCESS_POSITION.remove(deps.storage);
 
+    // Send the RAW earmarked coins to the creator. The contract holds both
+    // (excess bluechip from commits + excess creator tokens minted-but-not-
+    // seeded at crossing), so this spends the contract's own bank balance.
+    let mut coins: Vec<Coin> = vec![];
+    if !excess_position.bluechip_amount.is_zero() {
+        coins.push(Coin {
+            denom: bluechip_denom.clone(),
+            amount: excess_position.bluechip_amount,
+        });
+    }
+    if !excess_position.token_amount.is_zero() {
+        coins.push(Coin {
+            denom: creator_denom.clone(),
+            amount: excess_position.token_amount,
+        });
+    }
+
     let mut messages: Vec<CosmosMsg> = vec![];
-    if !lp_share.is_zero() {
+    if !coins.is_empty() {
         messages.push(CosmosMsg::Bank(BankMsg::Send {
             to_address: excess_position.creator.to_string(),
-            amount: vec![Coin {
-                denom: lp_denom.clone(),
-                amount: lp_share,
-            }],
+            amount: coins,
         }));
     }
 
     Ok(Response::new().add_messages(messages).add_attributes(vec![
         ("action", "claim_creator_excess".to_string()),
         ("creator", excess_position.creator.to_string()),
-        ("lp_denom", lp_denom),
-        ("lp_shares", lp_share.to_string()),
-        ("excess_bluechip", excess_position.excess_bluechip.to_string()),
-        (
-            "total_seeded_bluechip",
-            excess_position.total_seeded_bluechip.to_string(),
-        ),
+        ("bluechip_denom", bluechip_denom),
+        ("bluechip_amount", excess_position.bluechip_amount.to_string()),
+        ("creator_denom", creator_denom),
+        ("token_amount", excess_position.token_amount.to_string()),
         ("pool_contract", env.contract.address.to_string()),
         ("block_height", env.block.height.to_string()),
         ("block_time", env.block.time.seconds().to_string()),

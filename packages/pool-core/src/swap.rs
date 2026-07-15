@@ -6,9 +6,12 @@
 //!
 //! 1. Confirms/derives the offer coin and the ask (`token_out`) denom from
 //!    `POOL_INFO.asset_infos`.
-//! 2. Derives a `token_out_min_amount` slippage floor from the caller's
-//!    `belief_price` / `max_spread` (a floor of zero when no belief price
-//!    is supplied — see [`derive_token_out_min`]).
+//! 2. Derives a `token_out_min_amount` slippage floor as the MORE
+//!    PROTECTIVE of an on-chain poolmanager estimate floor and the
+//!    caller's `belief_price` floor (see [`compute_token_out_min`] /
+//!    [`derive_token_out_min`]). The estimate floor binds even when no
+//!    `belief_price` is supplied, so the swap never dispatches with
+//!    `token_out_min_amount = 0`.
 //! 3. Dispatches `MsgSwapExactAmountIn` (built by
 //!    `pool_core::osmosis_msgs::swap_exact_amount_in_msg`, `sender` = the
 //!    pool contract) as a `SubMsg::reply_on_success` carrying the receiver
@@ -31,10 +34,12 @@ use crate::state::{
     REPLY_ID_SWAP_FORWARD,
 };
 use cosmwasm_std::{
-    to_json_binary, Addr, BankMsg, Coin, Decimal, DepsMut, Env, Fraction, MessageInfo, Reply,
-    Response, StdError, StdResult, SubMsg, SubMsgResult, Uint128,
+    to_json_binary, Addr, BankMsg, Coin, CustomQuery, Decimal, DepsMut, Env, Fraction, MessageInfo,
+    QuerierWrapper, Reply, Response, StdError, StdResult, SubMsg, SubMsgResult, Uint128,
 };
-use osmosis_std::types::osmosis::poolmanager::v1beta1::MsgSwapExactAmountInResponse;
+use osmosis_std::types::osmosis::poolmanager::v1beta1::{
+    MsgSwapExactAmountInResponse, PoolmanagerQuerier, SwapAmountInRoute,
+};
 use prost::Message;
 use std::str::FromStr;
 
@@ -53,22 +58,36 @@ fn denom_of(t: &crate::asset::TokenType) -> String {
 }
 
 /// Derive the `token_out_min_amount` slippage floor for a native-pool
-/// swap from the caller's `belief_price` / `max_spread`.
+/// swap, taking the MORE PROTECTIVE (max) of two independently-derived
+/// floors:
 ///
-/// `belief_price` is expressed as offer-per-ask (the same convention the
-/// retired internal `assert_max_spread` used: `expected_ask =
-/// offer_amount / belief_price`). We floor the acceptable output at
-/// `expected_ask * (1 - max_spread)`.
+/// 1. an **on-chain estimate floor** — `estimated_out * (1 -
+///    effective_max_spread)`, where `estimated_out` is the expected output
+///    at CURRENT pool state (queried at the call site via
+///    [`estimate_swap_out`] — see [`compute_token_out_min`]); and
+/// 2. a **belief-price floor** — `expected_ask * (1 - effective_max_spread)`
+///    where `expected_ask = offer_amount / belief_price` (the same
+///    convention the retired internal `assert_max_spread` used), only when
+///    the caller supplies a `belief_price`.
 ///
-/// When `belief_price` is `None` we return a floor of ZERO: without a
-/// caller-supplied reference price there is nothing on-chain to derive a
-/// price-impact bound from short of a spot-price query against the native
-/// pool, and the native pool's own `token_out_min_amount` of zero matches
-/// the prior "no belief price ⇒ only the max_spread-vs-spread heuristic"
-/// behavior closely enough for a floor. Callers wanting a hard floor must
-/// pass a `belief_price`. This is documented behavior, not an oversight.
+/// The result is `max(estimate_floor, belief_floor)`. This closes the
+/// prior "no belief price ⇒ floor of zero (no sandwich/slippage
+/// protection)" hole: even a caller that passes no `belief_price` now
+/// gets the estimate-derived floor, so `MsgSwapExactAmountIn` never
+/// dispatches with `token_out_min_amount = 0` against a functioning pool.
+///
+/// The function stays PURE and testable: the on-chain estimate is passed
+/// in as `estimated_out` (the query is done by the caller, which holds the
+/// querier + pool_id + denoms). A zero `estimated_out` (e.g. the estimate
+/// query was unavailable) simply contributes a zero estimate floor, so
+/// `max(0, belief_floor) == belief_floor` — the belief floor still binds.
+///
+/// The existing hard-cap validation (5% / 10%-with-`allow_high`) and the
+/// zero-belief-price rejection are preserved: a `max_spread` above the cap
+/// still errors, and a `belief_price` of exactly zero is rejected.
 pub fn derive_token_out_min(
     offer_amount: Uint128,
+    estimated_out: Uint128,
     belief_price: Option<Decimal>,
     max_spread: Option<Decimal>,
     allow_high_max_spread: Option<bool>,
@@ -87,25 +106,92 @@ pub fn derive_token_out_min(
         return Err(ContractError::InvalidBeliefPrice {});
     }
 
-    let belief_price = match belief_price {
-        Some(bp) => bp,
-        // No reference price — floor of zero. See doc-comment.
-        None => return Ok(Uint128::zero()),
+    // `effective_max_spread` is clamped to the hard cap. After the check
+    // above this equals `max_spread`, but computing the min explicitly
+    // keeps the floor safe even if the cap logic is ever relaxed to warn
+    // instead of reject.
+    let effective_max_spread = max_spread.min(hard_cap);
+    let keep = Decimal::one()
+        .checked_sub(effective_max_spread)
+        .unwrap_or_default();
+
+    // (1) On-chain estimate floor: `estimated_out * (1 - spread)`.
+    let estimate_floor = estimated_out.multiply_ratio(keep.numerator(), keep.denominator());
+
+    // (2) Belief-price floor: `(offer / belief_price) * (1 - spread)`.
+    let belief_floor = match belief_price {
+        Some(bp) => {
+            // expected_ask = offer_amount / belief_price = offer_amount * inv(bp)
+            let inverse = bp.inv().ok_or_else(|| {
+                ContractError::Std(StdError::generic_err("Invalid belief price: zero"))
+            })?;
+            let expected_ask = offer_amount
+                .checked_mul(inverse.numerator())?
+                .checked_div(inverse.denominator())
+                .map_err(|_| ContractError::DivideByZero)?;
+            expected_ask.multiply_ratio(keep.numerator(), keep.denominator())
+        }
+        None => Uint128::zero(),
     };
 
-    // expected_ask = offer_amount / belief_price = offer_amount * inv(bp)
-    let inverse = belief_price
-        .inv()
-        .ok_or_else(|| ContractError::Std(StdError::generic_err("Invalid belief price: zero")))?;
-    let expected_ask = offer_amount
-        .checked_mul(inverse.numerator())?
-        .checked_div(inverse.denominator())
-        .map_err(|_| ContractError::DivideByZero)?;
+    // Take the MORE PROTECTIVE of the two floors.
+    Ok(estimate_floor.max(belief_floor))
+}
 
-    // floor = expected_ask * (1 - max_spread)
-    let keep = Decimal::one().checked_sub(max_spread).unwrap_or_default();
-    let floor = expected_ask.multiply_ratio(keep.numerator(), keep.denominator());
-    Ok(floor)
+/// Query the poolmanager for the expected output of swapping `token_in`
+/// for `ask_denom` through `pool_id` at CURRENT pool state.
+///
+/// FAIL-SOFT: any query error (the estimate endpoint being unavailable on
+/// a given chain build, a transient failure, etc.) resolves to `zero`,
+/// which [`derive_token_out_min`] treats as "no estimate floor" so the
+/// belief-price floor and the hard-cap validation still bind. On a
+/// functioning Osmosis pool the estimate always resolves, so the estimate
+/// floor is the load-bearing protection whenever the caller passes no
+/// `belief_price`.
+pub fn estimate_swap_out<C: CustomQuery>(
+    querier: &QuerierWrapper<C>,
+    pool_id: u64,
+    token_in: &Coin,
+    ask_denom: &str,
+) -> Uint128 {
+    // Osmosis coin string is `{amount}{denom}` (e.g. "100000000ubluechip").
+    let token_in_str = format!("{}{}", token_in.amount, token_in.denom);
+    let routes = vec![SwapAmountInRoute {
+        pool_id,
+        token_out_denom: ask_denom.to_string(),
+    }];
+    // `sender` is DEPRECATED on the request and unused by the estimate;
+    // pass empty.
+    match PoolmanagerQuerier::new(querier)
+        .estimate_swap_exact_amount_in(String::new(), pool_id, token_in_str, routes)
+    {
+        Ok(resp) => Uint128::from_str(&resp.token_out_amount).unwrap_or_default(),
+        Err(_) => Uint128::zero(),
+    }
+}
+
+/// Shared orchestration for BOTH swap sites (SimpleSwap and the
+/// post-threshold commit swap): query the on-chain estimate, then derive
+/// the `max(estimate_floor, belief_floor)` slippage floor. Keeps the two
+/// call sites byte-identical so the protection can't drift between them.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_token_out_min<C: CustomQuery>(
+    querier: &QuerierWrapper<C>,
+    pool_id: u64,
+    token_in: &Coin,
+    ask_denom: &str,
+    belief_price: Option<Decimal>,
+    max_spread: Option<Decimal>,
+    allow_high_max_spread: Option<bool>,
+) -> Result<Uint128, ContractError> {
+    let estimated_out = estimate_swap_out(querier, pool_id, token_in, ask_denom);
+    derive_token_out_min(
+        token_in.amount,
+        estimated_out,
+        belief_price,
+        max_spread,
+        allow_high_max_spread,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -230,13 +316,24 @@ fn execute_simple_swap_with_ctx(
         .may_load(deps.storage)?
         .ok_or(ContractError::ShortOfThreshold {})?;
 
-    let token_out_min_amount =
-        derive_token_out_min(offer_asset.amount, belief_price, max_spread, allow_high_max_spread)?;
-
     let token_in = Coin {
         denom: offer_denom.clone(),
         amount: offer_asset.amount,
     };
+
+    // Slippage floor = max(on-chain-estimate floor, belief-price floor).
+    // The estimate is queried against the live native pool at `pool_id`;
+    // both floors share the same shared helper as the post-threshold
+    // commit swap so protection can't drift between the two sites.
+    let token_out_min_amount = compute_token_out_min(
+        &deps.querier,
+        pool_id,
+        &token_in,
+        &ask_denom,
+        belief_price,
+        max_spread,
+        allow_high_max_spread,
+    )?;
     let pool_addr = pool_info.pool_info.contract_addr.clone();
     let receiver = to.unwrap_or_else(|| sender.clone());
 

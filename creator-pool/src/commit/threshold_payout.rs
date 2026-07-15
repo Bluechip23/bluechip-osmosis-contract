@@ -16,9 +16,10 @@
 //!   the new `pool_id` and stores it. The pool holds the resulting
 //!   `gamm/pool/{id}` LP shares permanently.
 //! - When the raised bluechip exceeds the cap, records a time-locked
-//!   creator entitlement to a proportional slice of the seed LP shares
-//!   (`CREATOR_EXCESS_POSITION`), claimed later via
-//!   `ClaimCreatorExcessLiquidity`.
+//!   creator entitlement to the RAW excess coins — the over-cap bluechip
+//!   and the proportional creator tokens (`CREATOR_EXCESS_POSITION`),
+//!   which REMAIN in the contract's bank balance and are claimed later
+//!   via `ClaimCreatorExcessLiquidity` (FIX C).
 //! - Flips `IS_THRESHOLD_HIT` (the load-bearing no-double-mint gate) and
 //!   snapshots `THRESHOLD_CROSSED_AT`.
 //!
@@ -27,7 +28,7 @@
 //! pool's threshold-crossing state (retryable via `RetryFactoryNotify`).
 
 use cosmwasm_std::{
-    to_json_binary, Addr, Coin, CosmosMsg, Decimal, Env, Order, StdError, Storage, SubMsg, Uint128,
+    to_json_binary, Addr, Coin, CosmosMsg, Decimal, Env, StdError, Storage, SubMsg, Uint128,
     WasmMsg,
 };
 
@@ -36,7 +37,7 @@ use crate::error::ContractError;
 use crate::msg::CommitFeeInfo;
 use crate::state::{
     CommitLimitInfo, CreatorExcessLiquidity, DistributionState, PoolInfo, ThresholdPayoutAmounts,
-    COMMIT_LEDGER, CREATOR_EXCESS_POSITION, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
+    COMMITTER_COUNT, CREATOR_EXCESS_POSITION, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
     DEFAULT_MAX_GAS_PER_TX, DISTRIBUTION_STATE, IS_THRESHOLD_HIT, REPLY_ID_CREATE_POOL,
     SECONDS_PER_DAY, THRESHOLD_PAYOUT_BLUECHIP_BASE_UNITS, THRESHOLD_PAYOUT_COMMIT_RETURN_BASE_UNITS,
     THRESHOLD_PAYOUT_CREATOR_BASE_UNITS, THRESHOLD_PAYOUT_POOL_BASE_UNITS,
@@ -186,11 +187,13 @@ pub fn trigger_threshold_payout(
     ));
 
     // Post-threshold committer distribution setup (unchanged — independent
-    // of the pool venue).
-    let committer_count_usize = COMMIT_LEDGER
-        .keys(storage, None, None, Order::Ascending)
-        .count();
-    let committer_count = u32::try_from(committer_count_usize).unwrap_or(u32::MAX);
+    // of the pool venue). Distinct-committer count is read O(1) from the
+    // incrementally-maintained `COMMITTER_COUNT` (FIX B) rather than the
+    // old unbounded `COMMIT_LEDGER.keys(..).count()` scan. At crossing the
+    // ledger is full (nothing distributed yet), so the counter equals the
+    // ledger size exactly — the crossing handler recorded the crosser
+    // before calling this.
+    let committer_count = COMMITTER_COUNT.may_load(storage)?.unwrap_or(0);
 
     if committer_count > 0 {
         let dist_state = DistributionState {
@@ -216,8 +219,20 @@ pub fn trigger_threshold_payout(
     // Compute the coins seeding the native pool. The bluechip side is
     // capped at `max_bluechip_lock_per_pool`; the creator side is reduced
     // proportionally so the seeded ratio matches the retired internal-AMM
-    // reserve seeding. The over-raise is compensated to the creator as a
-    // time-locked slice of the seed LP shares (decision 5).
+    // reserve seeding.
+    //
+    // FIX C: on over-cap the excess is time-locked to the creator as RAW
+    // coins (the original model), NOT as a slice of the pool's LP shares.
+    // The pool is seeded with `max_bluechip_lock` OSMO +
+    // `(pool_seed_amount - excess_creator_tokens)` creator tokens; the
+    // earmarked excess coins REMAIN in the contract's bank balance:
+    //   - excess OSMO: `pools_bluechip_seed - max_bluechip_lock` was
+    //     received from commits and is simply not handed to the pool seed;
+    //   - excess creator tokens: `pool_seed_amount` is minted to the
+    //     contract IN FULL above, and only `seed_creator` of it is passed
+    //     to `MsgCreateBalancerPool`, so `excess_creator_tokens` stays put.
+    // Neither is sent anywhere at crossing; the creator claims the raw
+    // coins after `unlock_time` via `ClaimCreatorExcessLiquidity`.
     let (seed_osmo, seed_creator) = if pools_bluechip_seed
         > commit_config.max_bluechip_lock_per_pool
     {
@@ -225,6 +240,8 @@ pub fn trigger_threshold_payout(
             .checked_sub(commit_config.max_bluechip_lock_per_pool)
             .map_err(StdError::overflow)?;
 
+        // Creator tokens earmarked in proportion to the over-raise:
+        // `pool_seed_amount * excess_bluechip / pools_bluechip_seed`.
         let excess_creator_tokens = payout
             .pool_seed_amount
             .multiply_ratio(excess_bluechip, pools_bluechip_seed);
@@ -233,14 +250,17 @@ pub fn trigger_threshold_payout(
             storage,
             &CreatorExcessLiquidity {
                 creator: fee_info.creator_wallet_address.clone(),
-                excess_bluechip,
-                total_seeded_bluechip: pools_bluechip_seed,
+                bluechip_amount: excess_bluechip,
+                token_amount: excess_creator_tokens,
                 unlock_time: env.block.time.plus_seconds(
                     commit_config.creator_excess_liquidity_lock_days * SECONDS_PER_DAY,
                 ),
             },
         )?;
 
+        // The pool is seeded with the NON-earmarked creator tokens so the
+        // earmarked `excess_creator_tokens` stays in the contract for the
+        // creator's later raw claim.
         let seed_creator = payout
             .pool_seed_amount
             .checked_sub(excess_creator_tokens)

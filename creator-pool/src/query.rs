@@ -101,8 +101,8 @@ pub fn query_creator_earnings(deps: Deps, env: &Env) -> StdResult<CreatorEarning
         CREATOR_EXCESS_POSITION
             .may_load(deps.storage)?
             .map(|e| CreatorExcessEarningsResponse {
-                excess_bluechip: e.excess_bluechip,
-                total_seeded_bluechip: e.total_seeded_bluechip,
+                bluechip_amount: e.bluechip_amount,
+                token_amount: e.token_amount,
                 unlock_time: e.unlock_time,
                 claimable_now: env.block.time >= e.unlock_time,
             });
