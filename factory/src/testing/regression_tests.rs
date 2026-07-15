@@ -1575,6 +1575,11 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Simulate a genuine pre-index legacy contract: it predates
+        // REGISTRY_BACKFILL_DONE, so the one-time gate (M-05) is unset and
+        // the back-fill must run. (`setup_factory`'s modern instantiate set
+        // the flag; clear it to model the legacy scenario faithfully.)
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
 
         assert_eq!(
@@ -1633,6 +1638,9 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Model a pre-index legacy contract (see M-05): clear the one-time
+        // back-fill gate so the walk runs.
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
 
         // First-seen (lowest pool_id) wins.
@@ -1693,6 +1701,11 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Model a pre-index legacy contract (see M-05): clear the gate so the
+        // FIRST migrate runs the back-fill. The first migrate then SETS the
+        // gate, so the second migrate below must skip the walk (backfilled=0)
+        // — which is exactly the idempotency this test pins.
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("first migrate ok");
         // Second migrate: stored version was just written to CONTRACT_VERSION
         // (current). Reset to an older value so the migrate handler accepts

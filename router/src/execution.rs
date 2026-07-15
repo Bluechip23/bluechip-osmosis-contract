@@ -41,7 +41,8 @@ use cosmwasm_std::{
 };
 use pool_factory_interfaces::asset::{TokenInfo, TokenType};
 use pool_factory_interfaces::routing::{
-    FactoryRouteQueryMsg, PoolSwapExecuteMsg, SwapOperation,
+    FactoryRouteQueryMsg, PoolSwapExecuteMsg, PoolSwapQueryMsg, RouterPoolCommitStatus,
+    SwapOperation,
 };
 use pool_factory_interfaces::RegisteredPoolResponse;
 
@@ -169,16 +170,38 @@ fn start_multi_hop(
     let last_idx = operations.len() - 1;
     let mut messages: Vec<SubMsg> = Vec::with_capacity(operations.len() + 1);
 
+    // M-03 — snapshot the router's PRE-route balance of each hop's offer
+    // denom so each hop swaps only the funds THIS route produces, never a
+    // pre-existing/donated balance. For the FIRST hop's offer denom the
+    // snapshot already includes the just-attached `offer_amount` (funds are
+    // credited before `execute` runs), so subtract it back out to recover
+    // the true pre-existing baseline. Every hop then swaps
+    // `current_offer_balance - offer_baseline`, which equals the attached
+    // input on hop 0 and the prior hop's output on later hops — even when a
+    // denom repeats across non-adjacent hops, because each hop consumes its
+    // full computed input and later inflows of that denom come only from
+    // subsequent hops.
+    let first_offer_info = &operations[0].offer_asset_info;
+
     for (idx, op) in operations.iter().enumerate() {
         let to = if idx == last_idx {
             recipient_addr.to_string()
         } else {
             env.contract.address.to_string()
         };
+        let snapshot = op
+            .offer_asset_info
+            .query_pool_strict(&deps.querier, env.contract.address.clone())?;
+        let offer_baseline = if op.offer_asset_info.equal(first_offer_info) {
+            snapshot.saturating_sub(offer_amount)
+        } else {
+            snapshot
+        };
         let exec_op = ExecuteMsg::ExecuteSwapOperation {
             operation: op.clone(),
             hop_index: idx as u32,
             to,
+            offer_baseline,
         };
         let payload: Binary = to_json_binary(&HopReplyPayload {
             hop_index: idx as u32,
@@ -242,6 +265,7 @@ pub fn execute_swap_operation(
     operation: SwapOperation,
     hop_index: u32,
     to: String,
+    offer_baseline: Uint128,
 ) -> Result<Response, RouterError> {
     if info.sender != env.contract.address {
         return Err(RouterError::Unauthorized);
@@ -256,22 +280,33 @@ pub fn execute_swap_operation(
     let offer_balance = operation
         .offer_asset_info
         .query_pool_strict(&deps.querier, env.contract.address.clone())?;
-    if offer_balance.is_zero() {
+
+    // M-03 — swap only the funds THIS route produced for this hop, not the
+    // router's whole balance of the offer denom. `offer_baseline` is the
+    // pre-route balance snapshotted by `start_multi_hop`; the delta is the
+    // attached input (hop 0) or the prior hop's output (later hops). A
+    // pre-existing/donated balance sits below the baseline and is left
+    // untouched. `saturating_sub` is defensive — the balance can only have
+    // grown by this route's inflows since the snapshot, so it never
+    // underflows in practice.
+    let swap_input = offer_balance.saturating_sub(offer_baseline);
+    if swap_input.is_zero() {
         return Err(RouterError::HopFailed {
             hop_index: hop_index as usize,
             pool_addr: operation.pool_addr.clone(),
-            reason: "router holds zero balance of the offer token at hop start".to_string(),
+            reason: "router holds zero route-generated balance of the offer token at hop start"
+                .to_string(),
         });
     }
 
-    let pool_msg = build_pool_swap_msg(&operation, offer_balance, to_addr.to_string())?;
+    let pool_msg = build_pool_swap_msg(&operation, swap_input, to_addr.to_string())?;
 
     Ok(Response::new()
         .add_message(pool_msg)
         .add_attribute("action", "execute_swap_operation")
         .add_attribute("hop_index", hop_index.to_string())
         .add_attribute("pool", operation.pool_addr)
-        .add_attribute("offer_amount", offer_balance)
+        .add_attribute("offer_amount", swap_input)
         .add_attribute("to", to_addr))
 }
 
@@ -384,6 +419,26 @@ fn validate_route_pools_registered(
             return Err(RouterError::HopPairMismatch {
                 hop_index: idx,
                 pool_addr: op.pool_addr.clone(),
+            });
+        }
+
+        // L-02 — reject a route through a pre-threshold pool up front,
+        // mirroring the simulation path (`simulate_multi_hop`). A commit
+        // pool that has not crossed its threshold cannot be swapped through;
+        // without this check the route would still revert atomically at the
+        // pool, but as an opaque wrapped `HopFailed` rather than the
+        // actionable `PoolInCommitPhase` the frontend gets from simulation.
+        // Checking here keeps simulate and execute in agreement.
+        let commit_status: RouterPoolCommitStatus = deps.querier.query_wasm_smart(
+            op.pool_addr.clone(),
+            &PoolSwapQueryMsg::IsFullyCommited {},
+        )?;
+        if let RouterPoolCommitStatus::InProgress { raised, target } = commit_status {
+            return Err(RouterError::PoolInCommitPhase {
+                hop_index: idx,
+                pool_addr: op.pool_addr.clone(),
+                raised,
+                target,
             });
         }
     }

@@ -26,8 +26,12 @@ Beyond that, the material items are: the creator token's on-chain denom metadata
 | **H-01** — GAMM creation-fee brick | **Fixed** | `trigger_threshold_payout` now reads the chain's **live** `x/poolmanager` pool-creation fee (`query_pool_creation_fee`) and reserves exactly that from the seed, so the crossing self-corrects against a mis-set config or a governance fee change; falls back to the configured value only if the params query is unavailable. Added a zero-seed guard (clear error instead of an opaque gamm failure) and a config-time check that a non-zero `gamm_pool_creation_fee` is denominated in `bluechip_denom`. |
 | **H-02** — no pre-threshold refund | **Dismissed** (owner: intended design) | No change — permanent pre-threshold commitment is the intended economic model. |
 | **M-01** — creator token metadata never set | **Fixed** | The pool now emits `MsgSetDenomMetadata` at instantiate (name/symbol/6-decimal display), threaded from the validated `CreatorTokenInfo`. Dispatched as a non-fatal `reply_on_error` SubMsg so a metadata edge case can never revert pool creation. |
+| **M-03** — router whole-balance sweep | **Fixed** | `ExecuteSwapOperation` now carries an `offer_baseline` (the router's pre-route balance of the offer denom, snapshotted at route start). Each hop swaps only `current − baseline` — the attached input on hop 0, the prior hop's output on later hops — so a pre-existing/donated balance is never swept. |
+| **M-04** — migrate missing cw2 name check | **Fixed** | `migrate` now rejects when the stored cw2 contract name ≠ `CONTRACT_NAME`, before the version/back-fill logic, so it can't reinterpret foreign storage. |
+| **M-05** — migrate unbounded back-fill | **Fixed** | The legacy registry back-fill is gated behind a one-time `REGISTRY_BACKFILL_DONE` flag: fresh deployments set it at instantiate (never walk), and a legacy contract runs the walk once then sets it. No migration re-runs the O(N) walk. |
+| **L-02** — execution skips `IsFullyCommited` | **Fixed** | `validate_route_pools_registered` now queries `IsFullyCommited` per hop and rejects a pre-threshold pool up front with `PoolInCommitPhase`, matching the simulation path (simulate/execute now agree). |
 
-All four crates build clean and the full test suite passes (creator-pool 140, factory 102, pool-core 8, router 22; 0 failures). The remaining Medium/Low/Informational items below are unchanged.
+All four crates build clean and the full test suite passes (creator-pool 140, factory 102, pool-core 8, router 22 — 272 total, 0 failures). The remaining Low/Informational items below are unchanged; see "Remaining Low findings" for detail on L-01/L-03/L-04/L-05.
 
 ---
 

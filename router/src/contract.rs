@@ -77,7 +77,8 @@ pub fn execute(
             operation,
             hop_index,
             to,
-        } => execute_swap_operation(deps, env, info, operation, hop_index, to),
+            offer_baseline,
+        } => execute_swap_operation(deps, env, info, operation, hop_index, to, offer_baseline),
         ExecuteMsg::AssertReceived {
             ask_info,
             recipient,

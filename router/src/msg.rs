@@ -72,13 +72,22 @@ pub enum ExecuteMsg {
     /// Admin-only. Cancels a pending proposal before it can be applied.
     CancelConfigUpdate {},
     /// Internal: invoked by the router on itself once per hop. Each
-    /// handler queries the router's current balance of the offer token
-    /// and dispatches the underlying pool swap. Rejected unless the
+    /// handler dispatches the underlying pool swap. Rejected unless the
     /// caller is the router contract.
+    ///
+    /// The swap input is `current_offer_balance - offer_baseline`, where
+    /// `offer_baseline` is the router's PRE-route balance of the offer
+    /// denom (snapshotted at route start, and reduced by the attached
+    /// first-hop offer amount for the input denom). This ensures each hop
+    /// swaps only the funds THIS route produced — the attached input on
+    /// hop 0 and the prior hop's output on later hops — never a pre-existing
+    /// or donated balance the router happened to hold (M-03).
     ExecuteSwapOperation {
         operation: SwapOperation,
         hop_index: u32,
         to: String,
+        #[serde(default)]
+        offer_baseline: Uint128,
     },
     /// Internal: final slippage assertion. Compares the recipient's
     /// post-route balance against the captured pre-route balance plus

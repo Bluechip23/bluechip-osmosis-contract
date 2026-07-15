@@ -31,6 +31,16 @@ pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config")
 pub const PENDING_CONFIG: Item<PendingConfig> = Item::new("pending_config");
 pub const POOL_COUNTER: Item<u64> = Item::new("pool_counter");
 
+/// M-05 — one-time gate for the legacy registry back-fill in `migrate`.
+/// Fresh deployments set this `true` at instantiate (they maintain PAIRS /
+/// POOL_ID_BY_ADDRESS through `register_pool` from day one, so no back-fill
+/// is ever needed), which makes `migrate` skip the O(N) registry walk
+/// entirely. A genuinely-legacy contract upgraded from pre-index code has
+/// this unset, so its FIRST `migrate` runs the back-fill once and then sets
+/// the flag; every subsequent `migrate` skips it. This removes the
+/// "unbounded walk re-run on every migration" upgrade-liveness hazard.
+pub const REGISTRY_BACKFILL_DONE: Item<bool> = Item::new("registry_backfill_done");
+
 // Three coupled pool-registry maps. They MUST stay in sync — every pool
 // that exists must appear in all three. Always go through `register_pool`
 // rather than touching them individually.
