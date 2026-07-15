@@ -324,36 +324,6 @@ pub fn simple_swap(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn execute_simple_swap(
-    deps: &mut DepsMut,
-    env: Env,
-    info: MessageInfo,
-    sender: Addr,
-    offer_asset: TokenInfo,
-    belief_price: Option<Decimal>,
-    max_spread: Option<Decimal>,
-    allow_high_max_spread: Option<bool>,
-    to: Option<Addr>,
-) -> Result<Response, ContractError> {
-    if !IS_THRESHOLD_HIT.load(deps.storage)? {
-        return Err(ContractError::ShortOfThreshold {});
-    }
-    let ctx = PoolCtx::load(deps.storage)?;
-    execute_simple_swap_with_ctx(
-        deps,
-        env,
-        info,
-        sender,
-        offer_asset,
-        belief_price,
-        max_spread,
-        allow_high_max_spread,
-        to,
-        ctx,
-    )
-}
-
 /// Builds the native-pool swap SubMsg. Callers enforce the
 /// IS_THRESHOLD_HIT gate before delegating here.
 #[allow(clippy::too_many_arguments)]
