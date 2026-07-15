@@ -358,6 +358,30 @@ pub fn register_pool(
     pool_address: &Addr,
     pool_details: &PoolDetails,
 ) -> StdResult<()> {
+    // L-01 — the four registry maps must agree, so guard EVERY key against
+    // pre-existence, not just `PAIRS`. Today `pool_id` comes from a monotonic
+    // counter and `pool_address` is deterministic, so these can't collide in
+    // the current create flow — but a `save` is a blind overwrite, and a
+    // future change to how ids/addresses are assigned (or a mistaken second
+    // call for the same pool) would otherwise silently clobber a prior pool's
+    // registry entry with no error. Fail closed on any pre-existing key so
+    // the "one entry per pool in all maps" invariant is hard-locked here
+    // rather than assumed by call sites.
+    //
+    // Also pin the address invariant the reverse index depends on: the
+    // `pool_address` parameter MUST equal the address embedded in
+    // `pool_details`. If they diverged, `POOL_ID_BY_ADDRESS` (keyed by the
+    // parameter) and consumers reading `pool_details.creator_pool_addr`
+    // would disagree about the pool's address — and the migrate back-fill,
+    // which keys the reverse index off `pool_details.creator_pool_addr`,
+    // would produce a second, divergent entry.
+    if pool_address != &pool_details.creator_pool_addr {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "register_pool: pool_address {} does not match pool_details.creator_pool_addr {}",
+            pool_address, pool_details.creator_pool_addr
+        )));
+    }
+
     let pair_key = canonical_pair_key(&pool_details.pool_token_info);
     if let Some(existing) = PAIRS.may_load(storage, pair_key.clone())? {
         return Err(cosmwasm_std::StdError::generic_err(format!(
@@ -365,6 +389,19 @@ pub fn register_pool(
             existing, pair_key.0, pair_key.1
         )));
     }
+    if POOLS_BY_ID.has(storage, pool_id) {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "duplicate pool_id: {} is already registered",
+            pool_id
+        )));
+    }
+    if POOL_ID_BY_ADDRESS.has(storage, pool_address.clone()) {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "duplicate pool address: {} is already registered",
+            pool_address
+        )));
+    }
+
     PAIRS.save(storage, pair_key, &pool_id)?;
 
     POOLS_BY_ID.save(storage, pool_id, pool_details)?;

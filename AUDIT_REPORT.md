@@ -30,8 +30,10 @@ Beyond that, the material items are: the creator token's on-chain denom metadata
 | **M-04** — migrate missing cw2 name check | **Fixed** | `migrate` now rejects when the stored cw2 contract name ≠ `CONTRACT_NAME`, before the version/back-fill logic, so it can't reinterpret foreign storage. |
 | **M-05** — migrate unbounded back-fill | **Fixed** | The legacy registry back-fill is gated behind a one-time `REGISTRY_BACKFILL_DONE` flag: fresh deployments set it at instantiate (never walk), and a legacy contract runs the walk once then sets it. No migration re-runs the O(N) walk. |
 | **L-02** — execution skips `IsFullyCommited` | **Fixed** | `validate_route_pools_registered` now queries `IsFullyCommited` per hop and rejects a pre-threshold pool up front with `PoolInCommitPhase`, matching the simulation path (simulate/execute now agree). |
+| **L-01** — `register_pool` guards only `PAIRS` | **Fixed** | `register_pool` now rejects a duplicate `pool_id`, a duplicate pool address, and a `pool_address` that disagrees with `pool_details.creator_pool_addr` — every registry key is fail-closed, not a blind overwrite. Covered by a new regression test. |
+| **L-05** — stale "anchor-exclusion" doc | **Fixed (doc)** | Corrected the `build_upgrade_batch` / propose doc comments: there is no anchor-pool concept in this factory. The "anchor pool" belonged to the pre-migration `bluechip-contracts` design and does not exist post-Osmosis-migration; no anchor resolution runs anywhere. |
 
-All four crates build clean and the full test suite passes (creator-pool 140, factory 102, pool-core 8, router 22 — 272 total, 0 failures). The remaining Low/Informational items below are unchanged; see "Remaining Low findings" for detail on L-01/L-03/L-04/L-05.
+All four crates build clean and the full test suite passes (creator-pool 140, factory 103, pool-core 8, router 22 — 273 total, 0 failures). Remaining open items: **L-03** (router single-step admin rotation) and **L-04** (config apply re-runs a live TWAP probe) — both intentionally left per owner discussion; see "Remaining Low findings" for detail.
 
 ---
 
