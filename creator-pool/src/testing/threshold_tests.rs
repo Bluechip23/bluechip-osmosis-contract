@@ -1774,6 +1774,7 @@ mod native_raised_net_semantics_tests {
 
         let _payout_msgs = trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
             &commit_config,
             &payout,
@@ -1906,6 +1907,7 @@ mod native_raised_net_semantics_tests {
 
         let err = trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
             &commit_config,
             &payout,
@@ -1961,6 +1963,7 @@ mod native_raised_net_semantics_tests {
 
         trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
             &commit_config,
             &payout,
@@ -2027,6 +2030,7 @@ mod crossed_at_snapshot_tests {
 
         trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
             &commit_config,
             &payout,

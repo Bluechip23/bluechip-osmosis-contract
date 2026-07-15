@@ -113,6 +113,28 @@ pub fn instantiate(
     let create_denom =
         pool_core::osmosis_msgs::create_denom_msg(&env.contract.address, &msg.subdenom);
 
+    // M-01 — register bank Metadata for the freshly created denom so
+    // explorers/wallets show the creator's chosen name/symbol and the
+    // 6-decimal scaling instead of the raw `factory/{addr}/{sub}` micro
+    // denom. Dispatched as a `reply_on_error` SubMsg (swallowed in `reply`)
+    // so a metadata edge case can never revert pool creation — the metadata
+    // is display-only. Skipped entirely when the symbol is empty (legacy
+    // create messages predating the threaded token fields).
+    let set_metadata: Option<SubMsg> = if msg.token_symbol.trim().is_empty() {
+        None
+    } else {
+        Some(SubMsg::reply_on_error(
+            pool_core::osmosis_msgs::set_denom_metadata_msg(
+                &env.contract.address,
+                &creator_denom,
+                &msg.token_name,
+                &msg.token_symbol,
+                msg.token_decimals as u32,
+            ),
+            crate::state::REPLY_ID_SET_DENOM_METADATA,
+        ))
+    };
+
     if (msg.commit_fee_info.commit_fee_bluechip + msg.commit_fee_info.commit_fee_creator)
         > Decimal::one()
     {
@@ -181,8 +203,13 @@ pub fn instantiate(
     COMMIT_LIMIT_INFO.save(deps.storage, &commit_config)?;
     POOL_ANALYTICS.save(deps.storage, &PoolAnalytics::default())?;
 
-    Ok(Response::new()
-        .add_message(create_denom)
+    // Order matters: `create_denom` (plain message) executes before the
+    // metadata SubMsg, so the denom exists when `MsgSetDenomMetadata` runs.
+    let mut response = Response::new().add_message(create_denom);
+    if let Some(meta_submsg) = set_metadata {
+        response = response.add_submessage(meta_submsg);
+    }
+    Ok(response
         .add_attribute("action", "instantiate")
         .add_attribute("pool_kind", crate::state::POOL_KIND_COMMIT)
         .add_attribute("pool_contract", env.contract.address.to_string())
@@ -435,6 +462,19 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
                 .add_attribute("block_time", env.block.time.seconds().to_string()))
         }
         REPLY_ID_SWAP_FORWARD => pool_core::swap::handle_swap_forward_reply(deps, env, msg),
+        crate::state::REPLY_ID_SET_DENOM_METADATA => {
+            // M-01 — denom metadata is display-only; a failure to register
+            // it must never brick pool creation. `reply_on_error` only fires
+            // on failure, so simply acknowledge it and move on (the denom and
+            // all pool state are already committed).
+            let reason = match msg.result {
+                SubMsgResult::Err(e) => e,
+                SubMsgResult::Ok(_) => return Ok(Response::new()),
+            };
+            Ok(Response::new()
+                .add_attribute("action", "set_denom_metadata_failed")
+                .add_attribute("reason", reason))
+        }
         REPLY_ID_FACTORY_NOTIFY_INITIAL => {
             let err = match msg.result {
                 SubMsgResult::Err(e) => e,

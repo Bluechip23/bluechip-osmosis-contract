@@ -16,12 +16,17 @@
 //! Keeping all `.into()`-to-`CosmosMsg` conversions here means the rest of
 //! the crate never touches osmosis-std types directly.
 
-use cosmwasm_std::{Addr, Coin, CosmosMsg, Decimal, Uint128};
+use cosmwasm_std::{Addr, Coin, CosmosMsg, CustomQuery, Decimal, QuerierWrapper, Uint128};
 use osmosis_std::types::cosmos::base::v1beta1::Coin as OsmoCoin;
 use osmosis_std::types::osmosis::gamm::poolmodels::balancer::v1beta1::MsgCreateBalancerPool;
 use osmosis_std::types::osmosis::gamm::v1beta1::{PoolAsset, PoolParams};
-use osmosis_std::types::osmosis::poolmanager::v1beta1::{MsgSwapExactAmountIn, SwapAmountInRoute};
-use osmosis_std::types::osmosis::tokenfactory::v1beta1::{MsgBurn, MsgCreateDenom, MsgMint};
+use osmosis_std::types::osmosis::poolmanager::v1beta1::{
+    MsgSwapExactAmountIn, PoolmanagerQuerier, SwapAmountInRoute,
+};
+use osmosis_std::types::osmosis::tokenfactory::v1beta1::{
+    MsgBurn, MsgCreateDenom, MsgMint, MsgSetDenomMetadata,
+};
+use std::str::FromStr;
 
 /// Balancer pool-asset weight used for BOTH sides. Any pair of *equal*
 /// weights produces the 50/50 constant-product curve — identical behavior
@@ -55,6 +60,88 @@ pub fn create_denom_msg(sender: &Addr, subdenom: &str) -> CosmosMsg {
         subdenom: subdenom.to_string(),
     }
     .into()
+}
+
+/// Register bank Metadata for a TokenFactory `denom` so explorers and
+/// wallets render the creator's chosen `name` / `symbol` and the correct
+/// decimal scaling instead of the raw `factory/{admin}/{sub}` micro-denom.
+/// `sender` must be the denom admin (the pool contract). Emitted right
+/// after `MsgCreateDenom` in the same instantiate response — the denom
+/// exists by the time this message executes.
+///
+/// Two denom units are registered: the base micro-denom at exponent 0 and
+/// a human `display` unit (the ticker) at `decimals`. When `decimals == 0`
+/// only the base unit is registered (a display unit at exponent 0 would
+/// collide with the base and be rejected by the bank module).
+pub fn set_denom_metadata_msg(
+    sender: &Addr,
+    denom: &str,
+    name: &str,
+    symbol: &str,
+    decimals: u32,
+) -> CosmosMsg {
+    use osmosis_std::types::cosmos::bank::v1beta1::{DenomUnit, Metadata};
+
+    let mut denom_units = vec![DenomUnit {
+        denom: denom.to_string(),
+        exponent: 0,
+        aliases: vec![],
+    }];
+    // The display unit's denom is the ticker (e.g. "MYTOKEN"). It must
+    // differ from the base and sit at a higher exponent; skip it entirely
+    // for a zero-decimal token so the two units can't collide.
+    if decimals > 0 {
+        denom_units.push(DenomUnit {
+            denom: symbol.to_string(),
+            exponent: decimals,
+            aliases: vec![],
+        });
+    }
+
+    MsgSetDenomMetadata {
+        sender: sender.to_string(),
+        metadata: Some(Metadata {
+            description: format!("{} creator token", name),
+            denom_units,
+            base: denom.to_string(),
+            // `display` must name one of the registered denom units. Use
+            // the ticker when a display unit exists, else the base denom.
+            display: if decimals > 0 {
+                symbol.to_string()
+            } else {
+                denom.to_string()
+            },
+            name: name.to_string(),
+            symbol: symbol.to_string(),
+            uri: String::new(),
+            uri_hash: String::new(),
+        }),
+    }
+    .into()
+}
+
+/// Query the chain's LIVE pool-creation fee (the coins `x/poolmanager`
+/// deducts from the sender when `MsgCreateBalancerPool` executes) for a
+/// given `denom`.
+///
+/// Returns `None` if the params query is unavailable on the target chain
+/// build or the fee is not denominated in `denom`. Callers treat `None`
+/// as "fall back to the factory-configured value." Using the live value
+/// at threshold-crossing makes the seed math self-correcting: the pool
+/// always reserves exactly what the module will charge, so a governance
+/// change to the fee — or a mis-set factory config — can no longer brick
+/// the crossing by leaving the pool unable to cover the create fee.
+pub fn query_pool_creation_fee<C: CustomQuery>(
+    querier: &QuerierWrapper<C>,
+    denom: &str,
+) -> Option<Uint128> {
+    let resp = PoolmanagerQuerier::new(querier).params().ok()?;
+    let params = resp.params?;
+    params
+        .pool_creation_fee
+        .iter()
+        .find(|c| c.denom == denom)
+        .and_then(|c| Uint128::from_str(&c.amount).ok())
 }
 
 /// `MsgMint` — mint `amount` of `denom` and credit `mint_to`. `sender`

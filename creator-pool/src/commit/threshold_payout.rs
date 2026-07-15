@@ -28,8 +28,8 @@
 //! pool's threshold-crossing state (retryable via `RetryFactoryNotify`).
 
 use cosmwasm_std::{
-    to_json_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, Env, StdError, Storage, SubMsg,
-    Uint128, WasmMsg,
+    to_json_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, Env, QuerierWrapper, StdError, Storage,
+    SubMsg, Uint128, WasmMsg,
 };
 
 use crate::asset::get_native_denom;
@@ -43,7 +43,7 @@ use crate::state::{
     THRESHOLD_PAYOUT_CREATOR_BASE_UNITS, THRESHOLD_PAYOUT_POOL_BASE_UNITS,
     THRESHOLD_PAYOUT_TOTAL_BASE_UNITS,
 };
-use pool_core::osmosis_msgs::create_balancer_pool_msg;
+use pool_core::osmosis_msgs::{create_balancer_pool_msg, query_pool_creation_fee};
 
 /// Validate that the four threshold-payout components match the canonical
 /// per-pool split (325B + 25B + 350B + 500B = 1.2T base units).
@@ -123,8 +123,15 @@ pub struct ThresholdPayoutMsgs {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn trigger_threshold_payout(
     storage: &mut dyn Storage,
+    // Live chain querier — used to read the ACTUAL x/poolmanager
+    // pool-creation fee at crossing so the seed reservation is
+    // self-correcting (H-01). Kept as a separate borrow from `storage`
+    // (distinct `DepsMut` fields) the same way the swap path passes
+    // `deps.storage` + `&deps.querier` to the liquidity breaker.
+    querier: &QuerierWrapper,
     pool_info: &PoolInfo,
     commit_config: &CommitLimitInfo,
     payout: &ThresholdPayoutAmounts,
@@ -236,9 +243,27 @@ pub fn trigger_threshold_payout(
     let reserved = crate::state::BLUECHIP_FEE_RESERVED
         .may_load(storage)?
         .unwrap_or_default();
-    let creation_fee = crate::state::CREATION_FEE_RESERVE_TARGET
+    // H-01 — resolve the creation fee to charge against from the CHAIN'S
+    // LIVE `x/poolmanager` pool-creation fee, not the factory-configured
+    // guess. The `x/gamm` module deducts this exact amount when
+    // `MsgCreateBalancerPool` runs, so pinning the seed reservation to the
+    // live value makes the crossing self-correcting: a mis-set factory
+    // config OR a post-deployment governance change to the fee can no
+    // longer leave the pool unable to cover the create (which, as a
+    // `reply_on_success` SubMsg, would otherwise revert the whole crossing
+    // and strand the pool below threshold). The configured
+    // `CREATION_FEE_RESERVE_TARGET` remains the RETENTION target (how much
+    // bluechip to pre-hold from the 1% fee); it is used as the charge
+    // amount ONLY as a fallback when the live params query is unavailable
+    // (e.g. a chain build without the query, or test mocks).
+    let bluechip_denom_for_fee = get_native_denom(&pool_info.pool_info.asset_infos)?;
+    let configured_fee = crate::state::CREATION_FEE_RESERVE_TARGET
         .may_load(storage)?
         .unwrap_or_default();
+    let creation_fee = match query_pool_creation_fee(querier, &bluechip_denom_for_fee) {
+        Some(live) => live,
+        None => configured_fee,
+    };
 
     // Compute the coins seeding the native pool. The bluechip side is
     // capped at `max_bluechip_lock_per_pool`; the creator side is reduced
@@ -312,6 +337,25 @@ pub fn trigger_threshold_payout(
     // over-recording the earmark and stranding the creator's claim.)
     let shortfall = creation_fee.saturating_sub(reserved);
     let seed_osmo = base_seed_osmo.saturating_sub(shortfall);
+
+    // H-01 guard — if the creation fee consumes the entire OSMO seed, the
+    // pool would try to create a balancer pool with a zero-amount side,
+    // which the gamm module rejects (reverting the whole crossing). This
+    // is only reachable when the net raise is smaller than the chain's
+    // pool-creation fee — an economic impossibility for a real threshold
+    // (a $25k raise dwarfs the ~1000 OSMO fee) that no seed adjustment can
+    // fix. Surface it as an explicit, actionable error instead of an
+    // opaque gamm failure so operators see the true cause (fee ≥ raise,
+    // i.e. the threshold is mis-sized relative to the chain fee).
+    if seed_osmo.is_zero() {
+        return Err(ContractError::InvalidThresholdParams {
+            msg: format!(
+                "pool-creation fee ({}) meets or exceeds the raised bluechip seed ({}); \
+                 the commit threshold is too small relative to the chain's pool-creation fee",
+                creation_fee, base_seed_osmo
+            ),
+        });
+    }
 
     // FIX G — snapshot the per-side liquidity ACTUALLY seeded (post the FIX-E
     // adjustment above) as the breaker's reference point. A later swap trips

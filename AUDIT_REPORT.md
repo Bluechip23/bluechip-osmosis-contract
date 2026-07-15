@@ -19,6 +19,18 @@ Beyond that, the material items are: the creator token's on-chain denom metadata
 
 ---
 
+## Remediation status (this branch)
+
+| Finding | Status | What changed |
+|---|---|---|
+| **H-01** — GAMM creation-fee brick | **Fixed** | `trigger_threshold_payout` now reads the chain's **live** `x/poolmanager` pool-creation fee (`query_pool_creation_fee`) and reserves exactly that from the seed, so the crossing self-corrects against a mis-set config or a governance fee change; falls back to the configured value only if the params query is unavailable. Added a zero-seed guard (clear error instead of an opaque gamm failure) and a config-time check that a non-zero `gamm_pool_creation_fee` is denominated in `bluechip_denom`. |
+| **H-02** — no pre-threshold refund | **Dismissed** (owner: intended design) | No change — permanent pre-threshold commitment is the intended economic model. |
+| **M-01** — creator token metadata never set | **Fixed** | The pool now emits `MsgSetDenomMetadata` at instantiate (name/symbol/6-decimal display), threaded from the validated `CreatorTokenInfo`. Dispatched as a non-fatal `reply_on_error` SubMsg so a metadata edge case can never revert pool creation. |
+
+All four crates build clean and the full test suite passes (creator-pool 140, factory 102, pool-core 8, router 22; 0 failures). The remaining Medium/Low/Informational items below are unchanged.
+
+---
+
 ## Answers to your functional questions (behavioral verification)
 
 | Your question | Verified answer |
