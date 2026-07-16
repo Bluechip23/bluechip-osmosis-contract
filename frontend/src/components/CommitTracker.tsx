@@ -28,7 +28,9 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
     const [totalBluechips, setTotalBluechips] = useState(0);
     const [graphData, setGraphData] = useState<GraphDataPoint[]>([]);
     const [loading, setLoading] = useState(false);
-    const THRESHOLD = 25000; // $25,000 threshold
+    // USD threshold, read live from the pool (factory-configured;
+    // $25,000 is the default). Falls back to the default until loaded.
+    const [threshold, setThreshold] = useState(25000);
 
     useEffect(() => {
         if (client && contractAddress) {
@@ -41,6 +43,19 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
 
         setLoading(true);
         try {
+            // The commit target is USD-denominated (6 decimals) and set by
+            // factory config — read it from the pool rather than hardcoding.
+            try {
+                const status = await client.queryContractSmart(contractAddress, {
+                    is_fully_commited: {}
+                });
+                if (status && typeof status === 'object' && 'in_progress' in status) {
+                    setThreshold(parseInt(status.in_progress.target) / 1_000_000);
+                }
+            } catch (err) {
+                console.error('Error fetching commit target:', err);
+            }
+
             const response = await client.queryContractSmart(contractAddress, {
                 pool_commits: {
                     pool_contract_address: contractAddress,
@@ -82,7 +97,7 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
     };
 
     const displayTotal = totalRaised > 1000000 ? totalRaised / 1000000 : totalRaised;
-    const progress = Math.min((displayTotal / THRESHOLD) * 100, 100);
+    const progress = Math.min((displayTotal / threshold) * 100, 100);
 
     return (
         <Card sx={{ mb: 2 }}>
@@ -92,12 +107,12 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
                 <Box sx={{ mb: 3 }}>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
                         <Typography variant="body2">Raised: ${displayTotal.toLocaleString()}</Typography>
-                        <Typography variant="body2">Goal: ${THRESHOLD.toLocaleString()}</Typography>
+                        <Typography variant="body2">Goal: ${threshold.toLocaleString()}</Typography>
                     </Box>
                     <LinearProgress variant="determinate" value={progress} sx={{ height: 10, borderRadius: 5 }} />
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 0.5 }}>
                         <Typography variant="caption" color="textSecondary">
-                            bluechips Committed: {totalBluechips.toLocaleString()}
+                            OSMO Committed: {totalBluechips.toLocaleString()}
                         </Typography>
                     </Box>
                 </Box>
@@ -108,7 +123,7 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
                             <CartesianGrid stroke="#ccc" strokeDasharray="5 5" />
                             <XAxis dataKey="name" label={{ value: `Users Committed: ${commits.length}`, offset: -10 }} />
                             <YAxis
-                                domain={[0, Math.max(THRESHOLD, displayTotal * 1.1)]}
+                                domain={[0, Math.max(threshold, displayTotal * 1.1)]}
                                 label={{ value: 'Subscription Amount', angle: -90, position: 'left', dy: -60, offset: -10 }}
                                 tick={{ fontSize: 10 }}
                             />
@@ -117,7 +132,7 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
                                 labelStyle={{ color: '#aaa' }}
                                 formatter={(value, name) => [`$${value}`, name === 'total' ? 'Cumulative Total' : 'Transaction Value']}
                             />
-                            <ReferenceLine y={THRESHOLD} label="Goal" stroke="red" strokeDasharray="3 3" />
+                            <ReferenceLine y={threshold} label="Goal" stroke="red" strokeDasharray="3 3" />
                             <Line type="monotone" dataKey="total" stroke="#8884d8" strokeWidth={2} dot={false} activeDot={{ r: 8 }} />
                         </LineChart>
                     </ResponsiveContainer>

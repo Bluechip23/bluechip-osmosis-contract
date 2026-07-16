@@ -63,32 +63,45 @@ const SellModal: React.FC<TokenModalProps> = ({
                 ? (Date.now() + parseFloat(deadline) * 60 * 1000) * 1_000_000
                 : null;
 
-            const hookMsg = {
-                swap: {
-                    belief_price: null,
+            // The creator token is a native TokenFactory denom, so selling it
+            // is a plain simple_swap on the pool with the creator denom
+            // attached as funds (the old CW20 send-hook path no longer exists).
+            // Take a live quote first and fix belief_price from it so a
+            // front-run that moves the pool reverts the swap instead of
+            // filling at the worse price.
+            const offerAsset = {
+                info: { creator_token: { denom: token.tokenDenom } },
+                amount: amountInMicroUnits
+            };
+
+            let beliefPrice: string | null = null;
+            const sim = await client.queryContractSmart(token.poolAddress, {
+                simulation: { offer_asset: offerAsset }
+            });
+            const expectedOut = Number(sim?.return_amount ?? 0);
+            if (Number.isFinite(expectedOut) && expectedOut > 0) {
+                // belief_price = offer / expected_out (offer-per-ask).
+                beliefPrice = (Number(amountInMicroUnits) / expectedOut).toFixed(18);
+            }
+
+            const msg = {
+                simple_swap: {
+                    offer_asset: offerAsset,
+                    belief_price: beliefPrice,
                     max_spread: maxSpread || null,
+                    allow_high_max_spread: null,
                     to: null,
                     transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
                 }
             };
 
-            const encodedMsg = btoa(JSON.stringify(hookMsg));
-
-            const msg = {
-                send: {
-                    contract: token.poolAddress,
-                    amount: amountInMicroUnits,
-                    msg: encodedMsg
-                }
-            };
-
             const result = await client.execute(
                 address,
-                token.tokenAddress,
+                token.poolAddress,
                 msg,
                 { amount: [], gas: '500000' },
                 'Sell Token',
-                []
+                [{ denom: token.tokenDenom, amount: amountInMicroUnits }]
             );
 
             setTxHash(result.transactionHash);
@@ -136,7 +149,7 @@ const SellModal: React.FC<TokenModalProps> = ({
             <DialogContent>
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
                     <Typography variant="body2" color="text.secondary">
-                        Swap {token.name} ({token.symbol}) for bluechips
+                        Swap {token.name} ({token.symbol}) for OSMO
                     </Typography>
 
                     {hasBalance(token) && (

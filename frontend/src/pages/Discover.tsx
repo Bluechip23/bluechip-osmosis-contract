@@ -30,17 +30,6 @@ import BuyModal from '../components/modals/BuyModal';
 import { DiscoverToken } from '../types/FrontendTypes';
 
 
-interface Token {
-    address: string;
-    name: string;
-    symbol: string;
-    price: string;
-    priceChange24h: number;
-    volume24h: string;
-    marketCap: string;
-    poolAddress: string;
-    thresholdReached: boolean;
-}
 
 interface TabPanelProps {
     children?: React.ReactNode;
@@ -56,8 +45,8 @@ const TabPanel: React.FC<TabPanelProps> = ({ children, value, index }) => (
 
 const mockTokens: DiscoverToken[] = [
     {
-        tokenAddress: 'cosmos1abc...', // was 'address'
-        poolAddress: 'cosmos1pool...',
+        tokenDenom: 'factory/osmo1pool.../uext',
+        poolAddress: 'osmo1pool...',
         name: 'Example Token',
         symbol: 'EXT',
         decimals: 6, // added
@@ -68,8 +57,8 @@ const mockTokens: DiscoverToken[] = [
         thresholdReached: true
     },
     {
-        tokenAddress: 'cosmos1def...', // was 'address'
-        poolAddress: 'cosmos1pool2...',
+        tokenDenom: 'factory/osmo1pool2.../unct',
+        poolAddress: 'osmo1pool2...',
         name: 'New Creator Token',
         symbol: 'NCT',
         decimals: 6, // added
@@ -274,7 +263,7 @@ const DiscoverPage: React.FC = () => {
                                 <TableBody>
                                     {filteredTokens.map((token) => (
                                         <TokenRow
-                                            key={token.tokenAddress}
+                                            key={token.tokenDenom}
                                             token={token}
                                             client={client}
                                             address={address}

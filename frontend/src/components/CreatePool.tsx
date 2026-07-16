@@ -5,9 +5,7 @@ import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
 import { DEFAULT_CHAIN_CONFIG } from '../types/FrontendTypes';
 
 // Factory contract address - configured during deployment.
-const FACTORY_ADDRESS =
-    import.meta.env.VITE_FACTORY_ADDRESS ||
-    'cosmos1yvgh8xeju5dyr0zxlkvq09htvhjj20fncp5g58np4u25g8rkpgjst8ghg8';
+const FACTORY_ADDRESS = DEFAULT_CHAIN_CONFIG.factoryAddress;
 
 interface CreatePoolProps {
     client: SigningCosmWasmClient | null;
@@ -39,15 +37,17 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
                 return;
             }
             // Create { pool_msg, token_info }. Only `pool_token_info` and the
-            // CW20 metadata are caller-supplied; commit threshold, fee splits,
-            // threshold-payout amounts, lock caps, and oracle config are read
-            // from factory config.
+            // token's display metadata are caller-supplied; commit threshold,
+            // fee splits, threshold-payout amounts, lock caps, and pricing
+            // config are read from factory config. The creator_token entry is
+            // a placeholder — the pool mints its own TokenFactory denom
+            // (factory/{pool_addr}/{subdenom}) at instantiate.
             const createMsg: Record<string, unknown> = {
                 create: {
                     pool_msg: {
                         pool_token_info: [
                             { bluechip: { denom: DEFAULT_CHAIN_CONFIG.nativeDenom } },
-                            { creator_token: { contract_addr: 'WILL_BE_CREATED_BY_FACTORY' } },
+                            { creator_token: { denom: 'WILL_BE_CREATED_BY_FACTORY' } },
                         ],
                     },
                     token_info: {
@@ -61,12 +61,24 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
 
             console.log('Creating pool with message:', JSON.stringify(createMsg, null, 2));
 
+            // The factory charges a flat OSMO creation fee (surplus is
+            // refunded on-chain; zero means the fee is disabled and no funds
+            // may be attached). Read the live value from factory config.
+            const factoryConfig = await client.queryContractSmart(FACTORY_ADDRESS, { factory: {} });
+            const creationFee: string = factoryConfig?.factory?.pool_creation_fee ?? '0';
+            const feeDenom: string =
+                factoryConfig?.factory?.bluechip_denom ?? DEFAULT_CHAIN_CONFIG.nativeDenom;
+            const funds = creationFee !== '0'
+                ? [{ denom: feeDenom, amount: creationFee }]
+                : [];
+
             const result = await client.execute(
                 address,
                 FACTORY_ADDRESS,
                 createMsg,
                 { amount: [], gas },
                 'Create',
+                funds,
             );
 
             console.log('Transaction Hash:', result.transactionHash);
@@ -93,7 +105,8 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
             <CardContent>
                 <Typography variant="h6" gutterBottom>Create Pool</Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    Creator pools start in commit phase and mint a fresh CW20.
+                    Creator pools start in commit phase and mint a fresh native
+                    TokenFactory denom at threshold crossing.
                 </Typography>
 
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -102,7 +115,7 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
                         value={tokenName}
                         onChange={(e) => setTokenName(e.target.value)}
                         placeholder="My Creator Token"
-                        helperText="Full name of the new CW20 the factory will mint"
+                        helperText="Display name registered as bank metadata for the new token"
                         required
                     />
                     <TextField
@@ -119,12 +132,12 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
                             Factory-Configured (read at call time)
                         </Typography>
                         <Typography variant="body2">- Commit threshold (USD)</Typography>
-                        <Typography variant="body2">- Commit fee splits (bluechip / creator)</Typography>
-                        <Typography variant="body2">- Threshold-payout amounts (creator / bluechip / pool seed / committers)</Typography>
-                        <Typography variant="body2">- Max bluechip lock per pool & creator excess lock days</Typography>
-                        <Typography variant="body2">- Pyth oracle address & price feed id</Typography>
+                        <Typography variant="body2">- Commit fee splits (protocol / creator)</Typography>
+                        <Typography variant="body2">- Threshold-payout amounts (creator / protocol / pool seed / committers)</Typography>
+                        <Typography variant="body2">- Max OSMO lock per pool & creator excess lock days</Typography>
+                        <Typography variant="body2">- USD pricing (x/twap pool id, quote denom, window)</Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                            The frontend no longer forwards these — the factory consults its own stored config. Per-address create cooldown: 1h.
+                            The frontend no longer forwards these — the factory consults its own stored config. Per-address create cooldown: 1h; a flat OSMO creation fee is attached automatically.
                         </Typography>
                     </Box>
 

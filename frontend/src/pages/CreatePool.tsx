@@ -33,9 +33,10 @@ const CreatePoolPage: React.FC = () => {
                     Launch Your Creator Token
                 </Typography>
                 <Typography variant="body1" sx={{ mb: 2 }}>
-                    Create a new Creator Liquidity Pool with your custom token. This process will deploy a new token contract
-                    and establish a trading pool paired with BlueChip tokens. This pool exists on the BlueChip chain. This
-                    means BlueChip does not own your pool and has no authority to shut your pool down or discontinue your tokens.
+                    Create a new Creator Pool with your custom token. Your token is minted as a native
+                    Osmosis TokenFactory denom and, once funded, trades against OSMO in a native Osmosis
+                    liquidity pool. The pool exists on the Osmosis chain — BlueChip does not own your pool
+                    and has no authority to shut your pool down or discontinue your tokens.
                     Since the pool exists on chain, this allows you to bring your subscriptions everywhere you go. The "payment
                     gateway" exists on chain and any frontend can link to it. This includes linking to any website you put content on,
                     sponsorship websites, or even connecting your friends content to your pool to create mini joint channels for
@@ -53,26 +54,25 @@ const CreatePoolPage: React.FC = () => {
                         IMPORTANT: DO NOT LOSE AS WE WILL NOT BE ABLE TO RECOVER YOUR WALLET IF YOU LOSE IT!
                     </Typography>
                     <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        The pool requires $25,000 USD in commits to activate
+                        The pool requires $25,000 USD in commits (paid in OSMO) to activate
                     </Typography>
                     <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        You will recieve fees from all COMMIT transactions ONLY, unless you provde liquidty to your pool
+                        You will receive a 5% fee from every COMMIT transaction
                     </Typography>
                     <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        Once the threshold is met, your token becomes tradeable
+                        Once the threshold is met, your token becomes tradeable — a native Osmosis
+                        liquidity pool is created and seeded automatically, so your token can also
+                        be traded directly on Osmosis
                     </Typography>
                     <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        Once the threshold is met, your pool can now accept liquidity and providers can collect fees
-                    </Typography>
-                    <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        Once the threshold is crossed, you will receive creator rewards and initial liquidity allocation. This will happen automatically. Just pay attention to your wallet!
+                        Once the threshold is crossed, you will receive creator rewards automatically. Just pay attention to your wallet!
                     </Typography>
                     <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
                         The initial crossing values are as follows:
                         <br />To you the Creator: <strong>325,000</strong>,
                         <br />To BlueChip: <strong>25,000</strong>,
                         <br />To your initial subscribers based on the % of the $25,000 they subscribed: <strong>500,000</strong>,
-                        <br />Initial liquidity to your pool: <strong>350,000</strong>
+                        <br />Initial liquidity seeded into the Osmosis pool: <strong>350,000</strong>
                     </Typography>
                     <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
                         You can not mint any extra creator tokens. The <strong>1,200,000</strong> is a fixed amount.

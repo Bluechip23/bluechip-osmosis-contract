@@ -6,8 +6,6 @@ import { Coin } from '@cosmjs/stargate';
 import Navigation from './components/Navigation';
 import WalletConnect from './components/WalletConnect';
 import Swap from './components/Swap';
-import Liquidity from './components/Liquidity';
-import Fees from './components/Fees';
 import Commit from './components/Commit';
 import CreatePoolPage from './pages/CreatePool';
 import DiscoverPage from './pages/Discover';
@@ -48,24 +46,15 @@ function App() {
           />
         </Grid>
         <Grid size={{ xs: 6 }}>
-          <Liquidity
-            client={client}
-            address={address}
-          />
-        </Grid>
-        <Grid size={{ xs: 6 }}>
-          <Fees
-            client={client}
-            address={address}
-          />
-        </Grid>
-        <Grid size={{ xs: 6 }}>
           <Commit
             client={client}
             address={address}
           />
         </Grid>
       </Grid>
+      {/* Liquidity management and LP fee collection moved to Osmosis itself:
+          the seed liquidity is a native GAMM pool owned by the pool contract,
+          and any extra liquidity is added/removed via the Osmosis app. */}
     </>
   );
 
