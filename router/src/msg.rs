@@ -2,10 +2,11 @@
 //!
 //! The router exposes:
 //! - `InstantiateMsg` for setup
-//! - `ExecuteMsg::ExecuteMultiHop` for native-offered routes (the user
-//! attaches bluechip funds with the call)
-//! - `ExecuteMsg::Receive` for CW20-offered routes (the user calls
-//! `cw20::Send` and the router decodes [`Cw20HookMsg`] from the body)
+//! - `ExecuteMsg::ExecuteMultiHop` for all routes (the user attaches the
+//! first-hop offer as funds). Both the bluechip side and the creator
+//! TokenFactory denom are native bank coins, so there is a single
+//! native entry point — the old CW20 `Receive` path was removed with
+//! the creator-token migration.
 //! - `ExecuteMsg::UpdateConfig` for admin rotation
 //! - Two internal variants (`ExecuteSwapOperation`, `AssertReceived`)
 //! that the router invokes on itself; both reject any caller other
@@ -15,7 +16,6 @@
 
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Decimal, Timestamp, Uint128};
-use cw20::Cw20ReceiveMsg;
 use pool_factory_interfaces::asset::TokenType;
 use pool_factory_interfaces::routing::SwapOperation;
 
@@ -71,19 +71,23 @@ pub enum ExecuteMsg {
     UpdateConfig {},
     /// Admin-only. Cancels a pending proposal before it can be applied.
     CancelConfigUpdate {},
-    /// CW20 entry path: triggered when a user invokes `cw20::Send`
-    /// targeting the router with [`Cw20HookMsg::ExecuteMultiHop`] in the
-    /// body. Used when the first hop offers a creator token rather than
-    /// native bluechip.
-    Receive(Cw20ReceiveMsg),
     /// Internal: invoked by the router on itself once per hop. Each
-    /// handler queries the router's current balance of the offer token
-    /// and dispatches the underlying pool swap. Rejected unless the
+    /// handler dispatches the underlying pool swap. Rejected unless the
     /// caller is the router contract.
+    ///
+    /// The swap input is `current_offer_balance - offer_baseline`, where
+    /// `offer_baseline` is the router's PRE-route balance of the offer
+    /// denom (snapshotted at route start, and reduced by the attached
+    /// first-hop offer amount for the input denom). This ensures each hop
+    /// swaps only the funds THIS route produced — the attached input on
+    /// hop 0 and the prior hop's output on later hops — never a pre-existing
+    /// or donated balance the router happened to hold (M-03).
     ExecuteSwapOperation {
         operation: SwapOperation,
         hop_index: u32,
         to: String,
+        #[serde(default)]
+        offer_baseline: Uint128,
     },
     /// Internal: final slippage assertion. Compares the recipient's
     /// post-route balance against the captured pre-route balance plus
@@ -94,21 +98,6 @@ pub enum ExecuteMsg {
         recipient: String,
         prev_balance: Uint128,
         minimum_receive: Uint128,
-    },
-}
-
-/// Body of `cw20::Send.msg` accepted by the router.
-///
-/// Mirrors the field set of [`ExecuteMsg::ExecuteMultiHop`] because the
-/// only difference between the two entry paths is how the offer token
-/// arrives at the router.
-#[cw_serde]
-pub enum Cw20HookMsg {
-    ExecuteMultiHop {
-        operations: Vec<SwapOperation>,
-        minimum_receive: Uint128,
-        deadline: Option<Timestamp>,
-        recipient: Option<String>,
     },
 }
 

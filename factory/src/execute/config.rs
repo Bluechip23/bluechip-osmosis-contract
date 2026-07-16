@@ -139,6 +139,24 @@ pub(crate) fn validate_factory_config(
         ))));
     }
 
+    // H-01 — the GAMM pool-creation-fee reserve. The pool retains this much
+    // bluechip from the 1% commit fee toward the fee `x/poolmanager` charges
+    // at threshold-crossing (the pool ALSO self-corrects against the live
+    // chain fee at crossing, so a stale value can't brick the crossing — but
+    // the denom must still be the canonical bluechip denom, since that is the
+    // only asset the pool holds to pay it). A zero amount disables the
+    // reserve (the crossing then pays the whole fee out of the seed, still
+    // covered by the live-fee query). Reject a non-zero fee in the wrong
+    // denom up front rather than letting it ride a 48h timelock.
+    if !config.gamm_pool_creation_fee.amount.is_zero()
+        && config.gamm_pool_creation_fee.denom != config.bluechip_denom
+    {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "gamm_pool_creation_fee.denom must equal bluechip_denom \"{}\"; got \"{}\"",
+            config.bluechip_denom, config.gamm_pool_creation_fee.denom
+        ))));
+    }
+
     Ok(())
 }
 

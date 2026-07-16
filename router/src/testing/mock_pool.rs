@@ -16,9 +16,9 @@
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps,
-    DepsMut, Empty, Env, MessageInfo, Response, StdError, StdResult, Timestamp, Uint128, WasmMsg,
+    DepsMut, Empty, Env, MessageInfo, Response, StdError, StdResult, Timestamp, Uint128,
 };
-use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
+use cw20::Cw20ReceiveMsg;
 use cw_storage_plus::Item;
 use pool_factory_interfaces::asset::{query_pools, PoolPairType, TokenInfo, TokenType};
 
@@ -145,13 +145,11 @@ fn execute_native_swap(
         return Err(StdError::generic_err("pool is in commit phase"));
     }
 
+    // Post-migration both the bluechip side AND the creator side are native
+    // bank denoms, so a creator-token offer now arrives here as attached
+    // funds + `SimpleSwap` (previously it came in via a CW20 `Receive`).
     let denom = match &offer_asset.info {
-        TokenType::Native { denom } => denom.clone(),
-        TokenType::CreatorToken { .. } => {
-            return Err(StdError::generic_err(
-                "SimpleSwap requires a native offer; use cw20 Send for token swaps",
-            ));
-        }
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom.clone(),
     };
 
     let funds_amount = info
@@ -206,12 +204,21 @@ fn execute_cw20_swap(
     let HookMsg::Swap { to, max_spread, .. } = hook;
     LAST_MAX_SPREAD.save(deps.storage, &max_spread)?;
 
+    // TODO(phase1-migration): this CW20 `Receive` swap path is dead now —
+    // the creator token is a native TokenFactory denom, so the router
+    // never dispatches a CW20 `Send`/`Receive` for it (it attaches the
+    // creator denom as funds and calls `SimpleSwap` instead, handled in
+    // `execute_native_swap`). Kept compiling for the `Receive` wire variant
+    // but no longer reachable from the router or these tests.
+    let sender_denom = info.sender.to_string();
     let offer_info = TokenType::CreatorToken {
-        contract_addr: info.sender.clone(),
+        denom: sender_denom.clone(),
     };
-    if !state.asset_infos.iter().any(
-        |t| matches!(t, TokenType::CreatorToken { contract_addr } if *contract_addr == info.sender),
-    ) {
+    if !state
+        .asset_infos
+        .iter()
+        .any(|t| matches!(t, TokenType::CreatorToken { denom } if *denom == sender_denom))
+    {
         return Err(StdError::generic_err(format!(
             "cw20 sender {} is not in this pool's pair",
             info.sender
@@ -336,21 +343,18 @@ fn build_transfer_msg(
     if amount.is_zero() {
         return Err(StdError::generic_err("zero return amount"));
     }
+    // Both sides are native bank denoms now, so the ask output is always a
+    // `BankMsg::Send` of the ask denom (previously the `CreatorToken` arm
+    // built a CW20 `Transfer`).
     match asset {
-        TokenType::Native { denom } => Ok(CosmosMsg::Bank(BankMsg::Send {
-            to_address: recipient.to_string(),
-            amount: vec![Coin {
-                denom: denom.clone(),
-                amount,
-            }],
-        })),
-        TokenType::CreatorToken { contract_addr } => Ok(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: contract_addr.to_string(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: recipient.to_string(),
-                amount,
-            })?,
-            funds: vec![],
-        })),
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => {
+            Ok(CosmosMsg::Bank(BankMsg::Send {
+                to_address: recipient.to_string(),
+                amount: vec![Coin {
+                    denom: denom.clone(),
+                    amount,
+                }],
+            }))
+        }
     }
 }

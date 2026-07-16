@@ -1,43 +1,59 @@
 //! Pool creation entry point, plus the input
 //! validators that guard it.
 //!
-//! Commit pools mint a fresh CW20 at creation and register through the
-//! shared reply-ID / register_pool plumbing downstream.
+//! The creator token is now a native TokenFactory denom that the POOL
+//! owns: the factory no longer instantiates a CW20. Pool creation
+//! instantiates the position NFT, then the pool (which creates its own
+//! `factory/{pool_addr}/{subdenom}` denom at instantiate), and registers
+//! through the shared reply-ID / register_pool plumbing downstream.
 
 use cosmwasm_std::{
     to_json_binary, CosmosMsg, DepsMut, Env, MessageInfo, Response, StdError, SubMsg, Uint128,
     WasmMsg,
 };
-use cw20::MinterResponse;
 use cw_utils::{must_pay, PaymentError};
 
 use crate::error::ContractError;
-use crate::msg::{CreatorTokenInfo, TokenInstantiateMsg};
-use crate::pool_struct::{CreatePool, TempPoolCreation};
+use crate::msg::{CreatePoolReplyMsg, CreatorTokenInfo};
+use crate::pool_struct::{CommitFeeInfo, CreatePool, TempPoolCreation};
 use crate::state::{
     COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS, FACTORYINSTANTIATEINFO, LAST_COMMIT_POOL_CREATE_AT,
     POOL_COUNTER,
 };
 
-use super::super::{encode_reply_id, SET_TOKENS};
+use super::super::{encode_reply_id, FINALIZE_POOL};
 
-// Sentinel placeholder the caller must supply for the CreatorToken slot.
-// The factory mints a fresh CW20 during pool creation and rewrites this
-// entry to the real address in mint_create_pool. Any other value in the
-// CreatorToken slot is rejected so attackers can't smuggle an arbitrary
-// (possibly malicious) CW20 into the pool's asset_infos.
+// Placeholder value the caller supplies for the CreatorToken slot's denom.
+// The pool creates its own TokenFactory denom at instantiate and the
+// factory reconstructs the real denom in `finalize_pool`, so whatever the
+// caller puts here is ignored — the constant is retained only as a
+// convention for clients building the create message.
 pub const CREATOR_TOKEN_SENTINEL: &str = "WILL_BE_CREATED_BY_FACTORY";
 
+/// Derive a valid TokenFactory subdenom from the creator token symbol.
+/// `validate_creator_token_info` already restricts the symbol to 3-12
+/// uppercase ASCII letters/digits with at least one letter, so the
+/// lowercased form is always a non-empty, alphanumeric, ≤12-byte string
+/// — well within the TokenFactory subdenom charset/length limits. The
+/// full denom is `factory/{pool_addr}/{subdenom}`; the pool address makes
+/// it globally unique even if two pools pick the same symbol.
+pub(crate) fn subdenom_from_symbol(symbol: &str) -> String {
+    symbol.to_lowercase()
+}
+
 /// Validates the pair shape supplied by the commit-pool creator:
-/// - exactly one Bluechip entry whose denom equals the factory's canonical
-/// `bluechip_denom` (prevents attackers from registering pools under a
-/// fake native denom they control via tokenfactory or similar)
-/// - exactly one CreatorToken entry whose contract_addr equals the sentinel
+/// - index 0 = Bluechip `Native` whose denom equals the factory's
+///   canonical `bluechip_denom` (prevents attackers from registering
+///   pools under a fake native denom they control via tokenfactory)
+/// - index 1 = a `CreatorToken` PLACEHOLDER. Its denom is ignored — the
+///   pool creates its own TokenFactory denom at instantiate and the
+///   factory reconstructs it deterministically in `finalize_pool` — so
+///   any denom string is accepted in this slot; only the variant/order
+///   matter.
 ///
-/// Anything else (duplicate Bluechips with different denoms, two CreatorTokens,
-/// a CreatorToken pointing at some pre-existing CW20, a Bluechip with a wrong
-/// denom) is rejected up front so the downstream instantiate doesn't have to
-/// untangle a malformed pair.
+/// Anything else (reversed order, two Natives, two CreatorTokens, a
+/// Bluechip with the wrong denom) is rejected up front so the downstream
+/// instantiate doesn't have to untangle a malformed pair.
 pub(crate) fn validate_pool_token_info(
     pool_token_info: &[crate::asset::TokenType; 2],
     canonical_bluechip_denom: &str,
@@ -47,14 +63,10 @@ pub(crate) fn validate_pool_token_info(
     // Strict ordering: bluechip MUST be at index 0, creator-token at
     // index 1. Every downstream piece of pool code (post_threshold_commit,
     // simple_swap, threshold_payout reserves) hard-codes the assumption
-    // that `reserve0` is bluechip and `reserve1` is creator-token. The
-    // factory's `mint_create_pool` rewrites the sentinel in place
-    // preserving order, so a `[CreatorToken sentinel, Bluechip]` input
-    // would propagate a reversed pair into the pool and silently produce
-    // wrong-direction swaps. Enforcing order here keeps the assumption
-    // load-bearing rather than incidental.
+    // that `reserve0` is bluechip and `reserve1` is creator-token, so a
+    // reversed pair would silently produce wrong-direction swaps.
     match (&pool_token_info[0], &pool_token_info[1]) {
-        (TokenType::Native { denom }, TokenType::CreatorToken { contract_addr }) => {
+        (TokenType::Native { denom }, TokenType::CreatorToken { .. }) => {
             if denom.trim().is_empty() {
                 return Err(ContractError::Std(StdError::generic_err(
                     "Bluechip denom must be non-empty",
@@ -66,16 +78,10 @@ pub(crate) fn validate_pool_token_info(
                     canonical_bluechip_denom, denom
                 ))));
             }
-            if contract_addr.as_str() != CREATOR_TOKEN_SENTINEL {
-                return Err(ContractError::Std(StdError::generic_err(format!(
-                    "CreatorToken contract_addr must be the sentinel \"{}\"; got \"{}\". The factory mints the CW20 itself and rewrites this field.",
-                    CREATOR_TOKEN_SENTINEL, contract_addr
-                ))));
-            }
             Ok(())
         }
         _ => Err(ContractError::Std(StdError::generic_err(
-            "pool_token_info must be [Bluechip(canonical denom), CreatorToken(sentinel)] — \
+            "pool_token_info must be [Bluechip(canonical denom), CreatorToken(placeholder)] — \
              order matters: bluechip at index 0, creator-token at index 1.",
         ))),
     }
@@ -275,71 +281,82 @@ pub(crate) fn execute_create_creator_pool(
     }
 
     let creator_attr = info.sender.to_string();
+    let creator_wallet = info.sender.clone();
     let pool_counter = POOL_COUNTER.may_load(deps.storage)?.unwrap_or(0);
     let pool_id = pool_counter + 1;
     POOL_COUNTER.save(deps.storage, &pool_id)?;
 
-    let msg = WasmMsg::Instantiate {
-        code_id: factory_cw20.cw20_token_contract_id,
-        //creating the creator token only, no minting.
-        msg: to_json_binary(&TokenInstantiateMsg {
-            name: token_info.name.clone(),
-            symbol: token_info.symbol,
-            decimals: token_info.decimal,
-            initial_balances: vec![],
-            mint: Some(MinterResponse {
-                minter: env.contract.address.to_string(),
-                // Mint cap pinned to the exact threshold-payout total
-                // derived from `factory_cw20.threshold_payout_amounts`
-                // (default: creator 325e9 + bluechip 25e9 + pool_seed
-                // 350e9 + commit_return 500e9 = 1.2e12). No protocol
-                // path ever needs to mint beyond this — the payout is
-                // fixed at threshold-cross and validated by
-                // `ThresholdPayoutAmounts::validate` (propose-time)
-                // and `validate_pool_threshold_payments` (runtime).
-                // If any future code path ever gained mint authority
-                // and tried to mint extra tokens, cw20-base would
-                // reject the mint and revert the entire tx
-                // (fail-closed) rather than silently letting
-                // additional supply be created.
-                cap: Some(factory_cw20.threshold_payout_amounts.total_mint()?),
-            }),
-            // Marketing admin = the pool creator. cw20-base permanently
-            // locks marketing when this is None at instantiation, which
-            // would leave every creator token unable to ever set a logo,
-            // description, or project URL. Project/description/logo start
-            // empty; the creator fills them in via UpdateMarketing /
-            // UploadLogo on the token contract.
-            marketing: Some(crate::msg::InstantiateMarketingInfo {
-                project: None,
-                description: None,
-                marketing: Some(info.sender.to_string()),
-                logo: None,
-            }),
-        })?,
-        //no initial balance. waits until threshold is crossed to mint creator tokens.
+    // Phase-2: the pool no longer takes a position NFT (the internal LP
+    // system was removed), so the reply chain collapses to a single step:
+    // instantiate the pool directly, then `finalize_pool` registers it.
+    // The pool creates its own `factory/{pool_addr}/{subdenom}` denom and
+    // seeds a NATIVE Osmosis pool at threshold crossing.
+    //
+    // `subdenom` is derived from the (already-validated) token symbol and
+    // carried through the reply payload for `finalize_pool` to reconstruct
+    // the deterministic denom.
+    let subdenom = subdenom_from_symbol(&token_info.symbol);
+
+    // Threshold-payout splits are re-validated here (belt-and-suspenders
+    // over the propose-time gate).
+    let threshold_payout = factory_cw20.threshold_payout_amounts.clone();
+    threshold_payout.validate()?;
+    let threshold_binary = to_json_binary(&threshold_payout)?;
+
+    let commit_msg = CreatePoolReplyMsg {
+        pool_id,
+        pool_token_info: pool_msg.pool_token_info.clone(),
+        used_factory_addr: env.contract.address.clone(),
+        threshold_payout: Some(threshold_binary),
+        commit_fee_info: CommitFeeInfo {
+            bluechip_wallet_address: factory_cw20.bluechip_wallet_address.clone(),
+            creator_wallet_address: creator_wallet.clone(),
+            commit_fee_bluechip: factory_cw20.commit_fee_bluechip,
+            commit_fee_creator: factory_cw20.commit_fee_creator,
+        },
+        commit_threshold_limit_usd: factory_cw20.commit_threshold_limit_usd,
+        subdenom: subdenom.clone(),
+        // M-01 — forward the creator's chosen name/symbol/decimals so the
+        // pool can register bank denom Metadata at instantiate. Already
+        // validated by `validate_creator_token_info` above.
+        token_name: token_info.name.clone(),
+        token_symbol: token_info.symbol.clone(),
+        token_decimals: token_info.decimal,
+        max_bluechip_lock_per_pool: factory_cw20.max_bluechip_lock_per_pool,
+        creator_excess_liquidity_lock_days: factory_cw20.creator_excess_liquidity_lock_days,
+        // FIX E — thread only the AMOUNT of the GAMM pool-creation fee to the
+        // pool, NOT the coin itself. The pool no longer receives the fee as
+        // instantiate funds; instead it retains this much bluechip out of the
+        // protocol's own 1% commit fee (into CREATION_FEE_RESERVE_TARGET) so
+        // the fee the `x/gamm` module auto-charges at threshold-crossing is
+        // paid from protocol revenue — not from the creator, and not from the
+        // AMM seed. This also removes the old collect-from-creator TODO: with
+        // no coin forwarded there is nothing extra to collect at `Create`.
+        gamm_pool_creation_fee_amount: factory_cw20.gamm_pool_creation_fee.amount,
+    };
+
+    // The pool is instantiated with NO funds. The gamm creation fee is
+    // funded post-hoc from the retained commit-fee reserve (FIX E), so the
+    // factory neither pre-funds the pool nor collects the fee from the
+    // creator here.
+    let pool_instantiate = WasmMsg::Instantiate {
+        code_id: factory_cw20.create_pool_wasm_contract_id,
+        msg: to_json_binary(&commit_msg)?,
         funds: vec![],
         admin: Some(env.contract.address.to_string()),
-        label: token_info.name,
+        label: format!("Pool-{}", pool_id),
     };
-    // The creation context rides the SubMsg payload through the whole
-    // reply chain (set_tokens → mint_create_pool → finalize_pool)
-    // instead of being round-tripped through storage at every step.
-    // The chain is atomic — every step uses `reply_on_success`, so a
-    // failure anywhere reverts the entire tx — which means the context
-    // never needs to survive the tx and never needs to be observable
-    // outside it. Each reply handler deserializes the payload, extends
-    // it with the address it just learned, and attaches it to the next
-    // SubMsg.
+
+    // Creation context rides the SubMsg payload; the reply chain is atomic
+    // (`reply_on_success`), so it never needs to survive the tx.
     let creation_payload = cosmwasm_std::to_json_binary(&TempPoolCreation {
         temp_pool_info: pool_msg,
-        temp_creator_wallet: info.sender,
+        temp_creator_wallet: creator_wallet,
         pool_id,
-        creator_token_addr: None,
-        nft_addr: None,
+        subdenom,
     })?;
     let sub_msg = vec![
-        SubMsg::reply_on_success(msg, encode_reply_id(pool_id, SET_TOKENS))
+        SubMsg::reply_on_success(pool_instantiate, encode_reply_id(pool_id, FINALIZE_POOL))
             .with_payload(creation_payload),
     ];
 

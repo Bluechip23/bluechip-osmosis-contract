@@ -8,27 +8,27 @@
 //! The creator-pool crate keeps:
 //! - `execute_emergency_withdraw` — a wrapper around pool-core's
 //! two-phase initiate/core_drain that adds the commit-only
-//! pre-threshold rejection, CREATOR_EXCESS_POSITION sweep, and
-//! DISTRIBUTION_STATE halt.
+//! pre-threshold rejection, CREATOR_EXCESS_POSITION earmark preservation
+//! (FIX D), and DISTRIBUTION_STATE halt.
 //! - `execute_recover_stuck_states` + private recovery helpers —
 //! all three failure modes (stuck threshold, stalled distribution,
 //! jammed reentrancy guard) only ever occur inside the commit
 //! flow, so they stay here rather than in the shared library.
 
 pub use pool_core::admin::{
-    ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_emergency_share,
-    execute_emergency_withdraw_dispatch, execute_pause, execute_sweep_unclaimed_emergency_shares,
-    execute_unpause, execute_update_config_from_factory, CoreDrainResult,
+    ensure_not_drained, execute_cancel_emergency_withdraw, execute_emergency_withdraw_dispatch,
+    execute_pause, execute_unpause, execute_update_config_from_factory, CoreDrainResult,
 };
 
 use crate::error::ContractError;
 use crate::state::{
-    DistributionState, RecoveryType, COMMITFEEINFO, COMMIT_LEDGER, CREATOR_EXCESS_POSITION,
-    DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX, DISTRIBUTION_STATE,
-    FAILED_MINTS, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT, MAX_CONSECUTIVE_DISTRIBUTION_FAILURES,
-    PENDING_EMERGENCY_WITHDRAW, POOL_INFO, PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS,
-    REENTRANCY_LOCK, STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS,
-    STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS, THRESHOLD_PROCESSING,
+    DistributionState, RecoveryType, COMMITFEEINFO, COMMITTER_COUNT, COMMIT_LEDGER,
+    CREATOR_EXCESS_POSITION, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX,
+    DISTRIBUTION_STATE, FAILED_MINTS, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
+    MAX_CONSECUTIVE_DISTRIBUTION_FAILURES, PENDING_EMERGENCY_WITHDRAW, POOL_INFO, POOL_PAUSED,
+    PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, REENTRANCY_LOCK,
+    STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS,
+    THRESHOLD_PROCESSING,
 };
 use cosmwasm_std::{
     Addr, DepsMut, Env, MessageInfo, Order, Response, StdResult, Storage, SubMsg, Timestamp,
@@ -43,9 +43,11 @@ use cosmwasm_std::{
 /// bookkeeping:
 /// - Pre-threshold rejection (committed funds are untracked in
 /// reserves; draining would strand them).
-/// - CREATOR_EXCESS_POSITION sweep on Phase 2 — fold its amounts into
-/// `accumulation_drain_{0,1}` so pool-core's single drain record
-/// captures the grand total and the two transfer messages carry it.
+/// - CREATOR_EXCESS_POSITION earmark PRESERVATION on Phase 2 (FIX D) —
+/// its raw `bluechip_amount` / `token_amount` are passed to the core
+/// drain as sweep EXCLUSIONS so the time-locked excess stays in the
+/// contract for the creator; the record itself is left intact so the
+/// creator can still `ClaimCreatorExcessLiquidity` after the drain.
 /// - DISTRIBUTION_STATE halt on Phase 2 so future
 /// ContinueDistribution calls reject cleanly.
 ///
@@ -87,34 +89,35 @@ pub fn execute_emergency_withdraw(
     // user-owned state during the timelock window.
     let pending_armed = PENDING_EMERGENCY_WITHDRAW.may_load(deps.storage)?.is_some();
 
-    // Phase 2 bookkeeping: capture creator excess + halt distribution
-    // state BEFORE handing off to the shared dispatcher. CosmWasm tx
-    // atomicity rolls these saves back along with the rest of the tx
-    // if anything inside the dispatcher errors, so half-drained state
-    // is structurally unreachable.
+    // Phase 2 bookkeeping: read the creator-excess earmark + halt
+    // distribution state BEFORE handing off to the shared dispatcher.
+    // CosmWasm tx atomicity rolls these saves back along with the rest of
+    // the tx if anything inside the dispatcher errors, so half-drained
+    // state is structurally unreachable.
+    //
+    // FIX D: the creator-excess entitlement is now RAW time-locked coins
+    // parked in the contract's bank balance. The core drain must EXCLUDE
+    // them (they belong to the creator, not the bluechip wallet), so we
+    // pass the earmarked `bluechip_amount` / `token_amount` down as the
+    // sweep exclusions and — critically — do NOT delete
+    // `CREATOR_EXCESS_POSITION`: the creator must still be able to claim
+    // the earmark after the drain.
+    let (earmark_bluechip, earmark_creator) =
+        match CREATOR_EXCESS_POSITION.may_load(deps.storage)? {
+            Some(pos) => (pos.bluechip_amount, pos.token_amount),
+            None => (Uint128::zero(), Uint128::zero()),
+        };
+
     let mut deps = deps;
-    let (acc_0, acc_1) = if pending_armed {
-        let excess = CREATOR_EXCESS_POSITION.may_load(deps.storage)?;
-        let amounts = excess
-            .as_ref()
-            .map(|e| (e.bluechip_amount, e.token_amount))
-            .unwrap_or((Uint128::zero(), Uint128::zero()));
-        if excess.is_some() {
-            CREATOR_EXCESS_POSITION.remove(deps.storage);
-        }
-        // Halt any in-flight distribution so future
-        // ContinueDistribution calls reject cleanly.
+    if pending_armed {
         if let Ok(mut dist_state) = DISTRIBUTION_STATE.load(deps.storage) {
             dist_state.is_distributing = false;
             dist_state.distributions_remaining = 0;
             DISTRIBUTION_STATE.save(deps.storage, &dist_state)?;
         }
-        amounts
-    } else {
-        (Uint128::zero(), Uint128::zero())
-    };
+    }
 
-    execute_emergency_withdraw_dispatch(deps.branch(), env, info, acc_0, acc_1)
+    execute_emergency_withdraw_dispatch(deps.branch(), env, info, earmark_bluechip, earmark_creator)
 }
 
 // ---------------------------------------------------------------------------
@@ -223,19 +226,31 @@ fn recover_distribution(
         if time_since_update >= STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS
             || dist_state.consecutive_failures >= MAX_CONSECUTIVE_DISTRIBUTION_FAILURES
         {
-            let remaining_committers = COMMIT_LEDGER
+            // CARRY-OVER 1 — the empty-vs-non-empty decision is an O(1) probe
+            // (`next().is_none()`), not the old O(N) `keys(..).count()` scan.
+            // Completion/removal semantics are unchanged: an empty ledger
+            // means the distribution finished, so DISTRIBUTION_STATE is
+            // removed; otherwise the cursor is restarted. The `remaining`
+            // figure used for the restart's INFORMATIONAL
+            // `distributions_remaining` comes from the O(1) `COMMITTER_COUNT`
+            // (distinct-committer total); the ledger itself stays the ground
+            // truth for what actually remains to pay.
+            let ledger_empty = COMMIT_LEDGER
                 .keys(storage, None, None, Order::Ascending)
-                .count() as u32;
+                .next()
+                .is_none();
 
-            if remaining_committers == 0 {
+            let remaining = if ledger_empty {
                 DISTRIBUTION_STATE.remove(storage);
+                0u32
             } else {
+                let count = COMMITTER_COUNT.may_load(storage)?.unwrap_or(0);
                 let restarted = DistributionState {
                     is_distributing: true,
                     total_to_distribute: dist_state.total_to_distribute,
                     total_committed_usd: dist_state.total_committed_usd,
                     last_processed_key: None,
-                    distributions_remaining: remaining_committers,
+                    distributions_remaining: count,
                     estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
                     max_gas_per_tx: DEFAULT_MAX_GAS_PER_TX,
                     last_successful_batch_size: None,
@@ -251,12 +266,10 @@ fn recover_distribution(
                     distributed_so_far: dist_state.distributed_so_far,
                 };
                 DISTRIBUTION_STATE.save(storage, &restarted)?;
-            }
+                count
+            };
 
-            recovered.push(format!(
-                "distribution_restarted_{}_remaining",
-                remaining_committers
-            ));
+            recovered.push(format!("distribution_restarted_{}_remaining", remaining));
         }
     }
     Ok(())
@@ -321,6 +334,14 @@ pub fn execute_self_recover_distribution(
 ) -> Result<Response, ContractError> {
     ensure_not_drained(deps.storage)?;
 
+    // FIX F audit — this handler emits NO mints: it only resets the
+    // DISTRIBUTION_STATE cursor (or removes it). The actual minting happens
+    // in `execute_continue_distribution`, which already honors POOL_PAUSED,
+    // so a paused pool that is self-recovered still cannot mint until it is
+    // unpaused. No pause gate is therefore added here (it would only block a
+    // harmless cursor reset). `RetryFactoryNotify` is likewise unmintful and
+    // stays ungated.
+
     let dist_state = DISTRIBUTION_STATE
         .may_load(deps.storage)?
         .ok_or(ContractError::NoDistributionToSelfRecover)?;
@@ -335,19 +356,27 @@ pub fn execute_self_recover_distribution(
         });
     }
 
-    let remaining_committers = COMMIT_LEDGER
+    // CARRY-OVER 1 — O(1) empty-vs-non-empty probe (was an O(N)
+    // `keys(..).count()` scan). Same completion semantics: empty ledger ⇒
+    // remove DISTRIBUTION_STATE (distribution done), non-empty ⇒ restart the
+    // cursor. The restart's informational `distributions_remaining` uses the
+    // O(1) `COMMITTER_COUNT`; the ledger is the ground truth for what remains.
+    let ledger_empty = COMMIT_LEDGER
         .keys(deps.storage, None, None, Order::Ascending)
-        .count() as u32;
+        .next()
+        .is_none();
 
-    if remaining_committers == 0 {
+    let remaining = if ledger_empty {
         DISTRIBUTION_STATE.remove(deps.storage);
+        0u32
     } else {
+        let count = COMMITTER_COUNT.may_load(deps.storage)?.unwrap_or(0);
         let restarted = DistributionState {
             is_distributing: true,
             total_to_distribute: dist_state.total_to_distribute,
             total_committed_usd: dist_state.total_committed_usd,
             last_processed_key: None,
-            distributions_remaining: remaining_committers,
+            distributions_remaining: count,
             estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
             max_gas_per_tx: DEFAULT_MAX_GAS_PER_TX,
             last_successful_batch_size: None,
@@ -362,14 +391,15 @@ pub fn execute_self_recover_distribution(
             distributed_so_far: dist_state.distributed_so_far,
         };
         DISTRIBUTION_STATE.save(deps.storage, &restarted)?;
-    }
+        count
+    };
 
     let pool_info = POOL_INFO.load(deps.storage)?;
     Ok(Response::new()
         .add_attribute("action", "self_recover_distribution")
         .add_attribute("recovered_by", info.sender.to_string())
         .add_attribute("stall_elapsed_seconds", elapsed.to_string())
-        .add_attribute("remaining_committers", remaining_committers.to_string())
+        .add_attribute("remaining_committers", remaining.to_string())
         .add_attribute(
             "pool_contract",
             pool_info.pool_info.contract_addr.to_string(),
@@ -404,6 +434,19 @@ pub fn execute_claim_failed_distribution(
 ) -> Result<Response, ContractError> {
     ensure_not_drained(deps.storage)?;
 
+    // FIX F — pause gate. This is a distribution-recovery MINT path: it
+    // dispatches a creator-token mint through the same
+    // `build_distribution_mint_submsg` harness as the bulk distribution
+    // loop. A `POOL_PAUSED` admin (or auto-low-liquidity) pause must halt it
+    // exactly like `execute_continue_distribution` already does — otherwise a
+    // paused pool could keep minting via this recovery path while an admin
+    // investigates. Reuses `PoolPausedLowLiquidity` for consistency with the
+    // commit / swap / continue-distribution pause gates. Pause is reversible,
+    // so the claim becomes available again once the admin unpauses.
+    if POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false) {
+        return Err(ContractError::PoolPausedLowLiquidity {});
+    }
+
     let owed = FAILED_MINTS
         .may_load(deps.storage, &info.sender)?
         .ok_or_else(|| ContractError::NoFailedMintEntry {
@@ -434,7 +477,8 @@ pub fn execute_claim_failed_distribution(
     let pool_info = POOL_INFO.load(deps.storage)?;
     let submsg: SubMsg = crate::commit::distribution_batch::build_distribution_mint_submsg(
         deps.storage,
-        &pool_info.token_address,
+        &pool_info.pool_info.contract_addr,
+        &pool_info.token_denom,
         &recipient_addr,
         // accounting key stays the original committer (info.sender) so
         // a re-failure reaccumulates back to them, not to the alternate

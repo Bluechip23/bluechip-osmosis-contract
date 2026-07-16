@@ -2,7 +2,7 @@ use crate::asset::{TokenInfo, TokenType};
 use crate::contract::{execute, instantiate};
 use crate::msg::CommitFeeInfo;
 use crate::msg::{ExecuteMsg, PoolConfigUpdate, PoolInstantiateMsg};
-use crate::state::{ThresholdPayoutAmounts, POOL_PAUSED, POOL_SPECS, POOL_STATE};
+use crate::state::{ThresholdPayoutAmounts, POOL_PAUSED, POOL_SPECS};
 use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env, MockApi};
 use cosmwasm_std::{
     to_json_binary, Addr, Binary, Coin, ContractResult, Decimal, SystemError, SystemResult,
@@ -42,12 +42,10 @@ fn install_factory_emergency_delay_mock(
 }
 
 fn mock_instantiate_msg() -> PoolInstantiateMsg {
-    // Both the CreatorToken entry and `token_address` must be bech32-valid
-    // (cosmwasm's mock API rejects raw strings via addr_validate) AND must
-    // equal each other. Using the same
-    // MockApi-derived address for both satisfies both.
-    let api = MockApi::default();
-    let token_addr = api.addr_make("creator_token");
+    // The creator token is now a native TokenFactory denom. The index-1
+    // `CreatorToken` slot is a placeholder whose denom the pool ignores —
+    // it recomputes `factory/{pool_addr}/{subdenom}` at instantiate. Supply
+    // a realistic factory-style placeholder denom.
     // Supply the fixed threshold_payout shape
     // `validate_pool_threshold_payments` accepts (creator=325B,
     // bluechip=25B, pool=350B, commit=500B, total=1.2T).
@@ -65,10 +63,9 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
                 denom: "ublue".to_string(),
             },
             TokenType::CreatorToken {
-                contract_addr: token_addr.clone(),
+                denom: "factory/creator_pool/ucreator".to_string(),
             },
         ],
-        cw20_token_contract_id: 123,
         used_factory_addr: Addr::unchecked("factory_addr"),
         threshold_payout: Some(threshold_payout),
         commit_fee_info: CommitFeeInfo {
@@ -78,10 +75,13 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
             commit_fee_creator: Decimal::percent(1),
         },
         commit_threshold_limit_usd: Uint128::new(1000),
-        position_nft_address: Addr::unchecked("nft_addr"),
-        token_address: token_addr,
+        subdenom: "ucreator".to_string(),
+        token_name: "Creator Token".to_string(),
+        token_symbol: "UCREATOR".to_string(),
+        token_decimals: 6,
         max_bluechip_lock_per_pool: Uint128::new(10000),
         creator_excess_liquidity_lock_days: 7,
+        gamm_pool_creation_fee_amount: Uint128::zero(),
     }
 }
 
@@ -141,6 +141,58 @@ fn test_pause_unpause() {
 }
 
 #[test]
+fn test_claim_failed_distribution_rejected_when_paused() {
+    // FIX F — a paused pool must reject the distribution-recovery mint path
+    // (`ClaimFailedDistribution`), matching the pause gate that
+    // `ContinueDistribution` already enforces.
+    let mut deps = mock_dependencies();
+    let msg = mock_instantiate_msg();
+    let info = message_info(&Addr::unchecked("factory_addr"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Seed a claimable failed-mint entry so, absent the pause, the claim
+    // would proceed — isolating the pause as the sole cause of rejection.
+    crate::state::FAILED_MINTS
+        .save(
+            &mut deps.storage,
+            &Addr::unchecked("claimant"),
+            &Uint128::new(1_000),
+        )
+        .unwrap();
+
+    // Paused ⇒ rejected with the pause error.
+    POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
+    let claimant = message_info(&Addr::unchecked("claimant"), &[]);
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        claimant.clone(),
+        ExecuteMsg::ClaimFailedDistribution { recipient: None },
+    )
+    .unwrap_err();
+    match err {
+        crate::error::ContractError::PoolPausedLowLiquidity {} => {}
+        other => panic!("expected PoolPausedLowLiquidity, got {:?}", other),
+    }
+
+    // Unpausing lets the same claim proceed (dispatches the mint SubMsg),
+    // proving the pause was the sole blocker.
+    POOL_PAUSED.save(&mut deps.storage, &false).unwrap();
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        claimant,
+        ExecuteMsg::ClaimFailedDistribution { recipient: None },
+    )
+    .unwrap();
+    assert_eq!(
+        res.messages.len(),
+        1,
+        "unpaused claim dispatches exactly one mint SubMsg"
+    );
+}
+
+#[test]
 fn test_emergency_withdraw() {
     let mut deps = mock_dependencies();
     let msg = mock_instantiate_msg();
@@ -155,11 +207,6 @@ fn test_emergency_withdraw() {
     // for the (admin-tunable) delay; install the mock before triggering it.
     install_factory_emergency_delay_mock(&mut deps, "factory_addr");
 
-    // Inject some liquidity mock manually for testing.
-    let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    pool_state.reserve0 = Uint128::new(1000); // 1000 ublue
-    pool_state.reserve1 = Uint128::new(2000); // 2000 creator token
-    POOL_STATE.save(&mut deps.storage, &pool_state).unwrap();
     let initiate_res = execute(
         deps.as_mut(),
         base_env.clone(),
@@ -177,11 +224,6 @@ fn test_emergency_withdraw() {
 
     // Pool should be paused immediately on initiation.
     assert!(POOL_PAUSED.load(&deps.storage).unwrap());
-
-    // No funds moved yet — reserves are still intact.
-    let ps = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(ps.reserve0, Uint128::new(1000));
-    assert_eq!(ps.reserve1, Uint128::new(2000));
 
     // Calling again before timelock should fail.
     let early_err = execute(
@@ -211,21 +253,16 @@ fn test_emergency_withdraw() {
         .unwrap();
     assert_eq!(action.value, "emergency_withdraw");
 
-    // LP-owned funds (reserve0=1000, reserve1=2000) are
-    // escrowed for per-position claims via ClaimEmergencyShare rather
-    // than swept to the bluechip wallet. The response's `amount0/amount1`
-    // attributes report ONLY the funds actually swept (CREATOR_FEE_POT +
-    // creator-excess-position). Both are empty in this test setup, so
-    // sweep is zero on both sides and no transfer messages are emitted.
+    // Phase-2 drain sweeps the pool's held `gamm/pool/{id}` LP shares to
+    // the bluechip wallet. This test never set POOL_ID and holds no LP
+    // shares, so the sweep is zero on both sides and no messages are
+    // emitted.
     let amount0 = exec_res
         .attributes
         .iter()
         .find(|a| a.key == "amount0")
         .unwrap();
-    assert_eq!(
-        amount0.value, "0",
-        "LP funds escrow, only non-LP buckets sweep — both empty here"
-    );
+    assert_eq!(amount0.value, "0");
 
     let amount1 = exec_res
         .attributes
@@ -234,25 +271,11 @@ fn test_emergency_withdraw() {
         .unwrap();
     assert_eq!(amount1.value, "0");
 
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(pool_state.reserve0, Uint128::zero());
-    assert_eq!(pool_state.reserve1, Uint128::zero());
-
-    // No transfer messages — sweep was zero on both sides.
+    // No transfer messages — no LP shares to sweep.
     assert_eq!(exec_res.messages.len(), 0);
 
-    // The LP-owned funds are captured in EMERGENCY_DRAIN_SNAPSHOT
-    // for per-position claims. Verify the snapshot recorded the
-    // pre-drain reserves correctly so positions can claim against
-    // them.
-    let snap = pool_core::state::EMERGENCY_DRAIN_SNAPSHOT
-        .load(&deps.storage)
-        .expect("snapshot must exist post-Phase-2");
-    assert_eq!(snap.reserve0_at_drain, Uint128::new(1000));
-    assert_eq!(snap.reserve1_at_drain, Uint128::new(2000));
-    assert_eq!(snap.total_claimed_0, Uint128::zero());
-    assert_eq!(snap.total_claimed_1, Uint128::zero());
-    assert!(!snap.residual_swept);
+    // Pool is permanently drained.
+    assert!(pool_core::state::EMERGENCY_DRAINED.load(&deps.storage).unwrap());
 }
 
 #[test]
@@ -268,12 +291,6 @@ fn test_cancel_emergency_withdraw() {
     // execute_emergency_withdraw_initiate queries the factory at runtime
     // for the (admin-tunable) delay; install the mock before triggering it.
     install_factory_emergency_delay_mock(&mut deps, "factory_addr");
-
-    // Inject reserves.
-    let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    pool_state.reserve0 = Uint128::new(500);
-    pool_state.reserve1 = Uint128::new(1000);
-    POOL_STATE.save(&mut deps.storage, &pool_state).unwrap();
 
     // Phase 1: initiate
     execute(
@@ -301,11 +318,8 @@ fn test_cancel_emergency_withdraw() {
         .unwrap();
     assert_eq!(action.value, "emergency_withdraw_cancelled");
 
-    // Pool unpaused, reserves intact.
+    // Pool unpaused.
     assert!(!POOL_PAUSED.load(&deps.storage).unwrap());
-    let ps = POOL_STATE.load(&deps.storage).unwrap();
-    assert_eq!(ps.reserve0, Uint128::new(500));
-    assert_eq!(ps.reserve1, Uint128::new(1000));
 }
 
 #[test]
@@ -394,15 +408,21 @@ fn test_unauthorized_admin_actions() {
 
 #[test]
 fn instantiate_rejects_doubling_assets() {
-    // Both legs identical → DoublingAssets.
+    // Both legs set to the bluechip Native side. Post-migration the pool
+    // OVERWRITES index 1 with the CreatorToken denom it derives from
+    // `subdenom`, so the old `DoublingAssets` (index0 == index1) path is
+    // now structurally unreachable — a Native at index 1 is instead
+    // rejected earlier by the pair-shape guard. Either way the malformed
+    // pair is refused.
     let mut msg = mock_instantiate_msg();
     msg.pool_token_info[1] = msg.pool_token_info[0].clone();
     let mut deps = mock_dependencies();
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+    let s = format!("{:?}", err);
     assert!(
-        format!("{:?}", err).contains("DoublingAssets"),
-        "expected DoublingAssets, got: {:?}",
+        s.contains("CreatorToken placeholder") || s.contains("DoublingAssets"),
+        "expected malformed-pair rejection, got: {:?}",
         err
     );
 }
@@ -455,10 +475,12 @@ fn instantiate_rejects_empty_bluechip_denom() {
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     let s = format!("{:?}", err);
-    // The empty-denom guard lives in the shared `TokenType::check` and
-    // emits the kind-agnostic "Native denom must be non-empty" message.
+    // The bluechip index-0 empty-denom guard now fires in `instantiate`
+    // before the shared `TokenType::check`, emitting the bluechip-specific
+    // "Bluechip denom must be non-empty" message.
     assert!(
-        s.contains("Native denom must be non-empty"),
+        s.contains("Bluechip denom must be non-empty")
+            || s.contains("Native denom must be non-empty"),
         "expected empty-denom rejection, got: {:?}",
         err
     );
@@ -466,19 +488,23 @@ fn instantiate_rejects_empty_bluechip_denom() {
 
 #[test]
 fn instantiate_rejects_creator_token_addr_mismatch() {
-    // CreatorToken.contract_addr inside pool_token_info must equal the
-    // separate `token_address` field on the msg. Mismatch is rejected so
-    // a buggy factory can't smuggle a different cw20 into the pool's
-    // accounting.
+    // TODO(phase1-migration): the original assertion checked that
+    // `CreatorToken.contract_addr` equalled the separate `token_address`
+    // field — a CW20-era guard that no longer exists. The pool now
+    // recomputes `factory/{pool_addr}/{subdenom}` and ignores the
+    // placeholder denom, so there is no addr-mismatch path to reject.
+    // Repurposed to the nearest surviving instantiate guard: an empty
+    // `subdenom` is rejected so a buggy factory can't create a pool with a
+    // malformed creator denom.
     let mut msg = mock_instantiate_msg();
-    msg.token_address = Addr::unchecked("a_completely_different_addr");
+    msg.subdenom = "   ".to_string();
     let mut deps = mock_dependencies();
     let info = message_info(&Addr::unchecked("factory_addr"), &[]);
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     let s = format!("{:?}", err);
     assert!(
-        s.contains("must equal msg.token_address"),
-        "expected token_address-mismatch rejection, got: {:?}",
+        s.contains("subdenom must be non-empty"),
+        "expected empty-subdenom rejection, got: {:?}",
         err
     );
 }

@@ -62,6 +62,22 @@ pub const NATIVE_RAISED_FROM_COMMIT: Item<Uint128> = Item::new("bluechip_raised"
 /// Per-committer USD ledger; drained during post-threshold distribution.
 pub const COMMIT_LEDGER: cw_storage_plus::Map<&Addr, Uint128> =
     cw_storage_plus::Map::new("commit_usd");
+/// Incrementally-maintained count of DISTINCT committers ever recorded in
+/// `COMMIT_LEDGER` toward the threshold. Bumped by exactly one the first
+/// time each address appears in the ledger (pre-threshold funding commits
+/// and the threshold-crossing commit alike); repeat commits from an
+/// already-recorded address do NOT bump it. Initialised to `0` at
+/// instantiate.
+///
+/// This replaces the O(n) `COMMIT_LEDGER.keys(..).count()` scan that used
+/// to run inside the atomic threshold-crossing tx (and the admin recovery
+/// path) purely to seed the INFORMATIONAL
+/// `DistributionState.distributions_remaining`. Distribution TERMINATION is
+/// still driven by ledger-emptiness — this counter is informational and is
+/// read O(1) to size the initial `distributions_remaining`. It is not
+/// decremented as the distribution drains the ledger; the ledger itself is
+/// the ground truth for what remains.
+pub const COMMITTER_COUNT: Item<u32> = Item::new("committer_count");
 /// Re-entrancy/inflight flag set while a threshold-crossing commit is mid-execution.
 pub const THRESHOLD_PROCESSING: Item<bool> = Item::new("threshold_processing");
 /// Fixed split of creator-token amounts paid out at threshold crossing.
@@ -75,6 +91,28 @@ pub const COMMIT_LIMIT_INFO: Item<CommitLimitInfo> = Item::new("commit_config");
 pub const CREATOR_EXCESS_POSITION: Item<CreatorExcessLiquidity> = Item::new("creator_excess");
 /// Timestamp of the most recent threshold-crossing attempt; used by stuck-state recovery.
 pub const LAST_THRESHOLD_ATTEMPT: Item<Timestamp> = Item::new("last_threshold_attempt");
+
+/// FIX E — target uosmo amount of the native GAMM pool-creation fee that
+/// the `x/gamm` module auto-charges when `MsgCreateBalancerPool` runs at
+/// threshold-crossing. Threaded in from the factory config's
+/// `gamm_pool_creation_fee.amount` via `PoolInstantiateMsg` and pinned at
+/// instantiate. This is the ceiling for [`BLUECHIP_FEE_RESERVED`]: the
+/// pool retains bluechip out of the protocol's 1% commit fee up to this
+/// amount, so the creation fee is funded from the protocol's own fee
+/// stream — NOT from the creator, and NOT from the AMM seed. Zero means the
+/// gamm fee is waived (e.g. test environments) and no bluechip is retained.
+pub const CREATION_FEE_RESERVE_TARGET: Item<Uint128> = Item::new("creation_fee_reserve_target");
+
+/// FIX E — running total of bluechip (uosmo) retained IN THE POOL out of
+/// the protocol's 1% commit fee toward [`CREATION_FEE_RESERVE_TARGET`].
+/// Initialised to zero at instantiate. On every commit the 1% bluechip fee
+/// is split: the portion needed to reach the target is added here and STAYS
+/// in the pool (never bank-sent), the remainder flows to the live bluechip
+/// wallet as before. At threshold-crossing this retained OSMO covers the
+/// gamm creation fee; any leftover (`reserved - creation_fee`) is remitted
+/// to the bluechip wallet. Bounded above by the target, so the retained
+/// amount is always `<= CREATION_FEE_RESERVE_TARGET`.
+pub const BLUECHIP_FEE_RESERVED: Item<Uint128> = Item::new("bluechip_fee_reserved");
 
 /// `env.block.time` snapshotted at the moment threshold flipped (set
 /// inside `trigger_threshold_payout` immediately after
@@ -106,6 +144,12 @@ pub const PENDING_FACTORY_NOTIFY: Item<bool> = Item::new("pending_factory_notify
 /// slot in without renumbering.
 pub const REPLY_ID_FACTORY_NOTIFY_INITIAL: u64 = 1;
 pub const REPLY_ID_FACTORY_NOTIFY_RETRY: u64 = 2;
+/// Reply id for the `MsgSetDenomMetadata` dispatched at instantiate (M-01).
+/// Wired as `reply_on_error` and swallowed in the reply handler: denom
+/// metadata is cosmetic (explorer/wallet display), so a failure to register
+/// it must NEVER revert pool creation. 5 slots in below the swap/create
+/// ids (3, 4) and well under the distribution-mint base.
+pub const REPLY_ID_SET_DENOM_METADATA: u64 = 5;
 
 /// Distribution-mint reply IDs occupy `[REPLY_ID_DISTRIBUTION_MINT_BASE,
 /// u64::MAX]`. Each mint dispatched from `process_distribution_batch` (or
@@ -376,16 +420,29 @@ pub struct CommitLimitInfo {
     pub min_commit_usd_post_threshold: Uint128,
 }
 
+/// Time-locked creator entitlement to the RAW excess coins parked in the
+/// contract at threshold crossing (FIX C — restores the original model).
+///
+/// When the raised bluechip exceeds `max_bluechip_lock_per_pool`, the pool
+/// is seeded with only `max_bluechip_lock` OSMO + the non-earmarked
+/// creator tokens; the excess bluechip and the proportional excess creator
+/// tokens REMAIN in the contract's bank balance, earmarked here. After
+/// `unlock_time` the creator claims these exact raw amounts via
+/// `ClaimCreatorExcessLiquidity` — a `BankMsg::Send` of `bluechip_amount`
+/// (bluechip denom) + `token_amount` (creator denom). No LP-share math is
+/// involved.
 #[cw_serde]
 pub struct CreatorExcessLiquidity {
     /// Creator wallet entitled to claim the excess once unlocked.
     pub creator: Addr,
-    /// Bluechip portion of the excess (above max_bluechip_lock_per_pool).
+    /// Raw bluechip earmarked for the creator (`raised -
+    /// max_bluechip_lock_per_pool`). Held in the contract's bank balance.
     pub bluechip_amount: Uint128,
-    /// Creator-token portion of the excess proportional to bluechip_amount.
+    /// Raw creator tokens earmarked for the creator
+    /// (`pool_seed_amount * excess_bluechip / raised`). Held in the
+    /// contract's bank balance (minted to the contract in full, only the
+    /// non-earmarked remainder was seeded into the pool).
     pub token_amount: Uint128,
     /// Earliest block time at which the creator may claim this excess.
     pub unlock_time: Timestamp,
-    /// Position-NFT id minted on claim (None until claimed).
-    pub excess_nft_id: Option<String>,
 }

@@ -1,27 +1,29 @@
 //! Post-threshold commit handler. Once the pool has crossed its commit
-//! threshold the commit flow becomes a plain AMM swap: the caller's
-//! bluechip deposit is swapped against the creator-token reserve, the
-//! reserves + fee growth are updated, and the creator tokens are sent
-//! back to the caller. Commit ledger and pre-threshold USD totals are
-//! NOT touched here — those belong to the funding phase.
+//! threshold, the commit flow's swap leg routes through the NATIVE Osmosis
+//! pool: the caller's post-fee bluechip is swapped for the creator token
+//! via `MsgSwapExactAmountIn`, and the reply forwards the creator tokens
+//! back to the committer.
 //!
-//! All four of the pool's hot-path state items (`POOL_INFO`, `POOL_SPECS`,
-//! `POOL_STATE`, `POOL_FEE_STATE`) are threaded in from `execute_commit_logic`
-//! via references — see `super::execute_commit_logic` for the outer load.
+//! The per-commit 1%/5% fee kickout and the `update_commit_info`
+//! subscription record are preserved (the fee split happens in the
+//! dispatcher; `swap_amount` here is already net-of-fees). The retired
+//! internal-AMM machinery (compute_swap, reserve drain guards, the
+//! post-threshold cooldown + swap-cap ramp) is gone.
 
-use cosmwasm_std::{
-    to_json_binary, Addr, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128, WasmMsg,
-};
-use cw20::Cw20ExecuteMsg;
+use cosmwasm_std::{to_json_binary, Addr, Coin, CosmosMsg, Decimal, DepsMut, Env, Response, SubMsg, Uint128};
 
-use crate::asset::TokenInfo;
+use crate::asset::{get_native_denom, TokenInfo};
 use crate::error::ContractError;
-use crate::generic_helpers::{update_commit_info, update_pool_fee_growth};
+use crate::generic_helpers::update_commit_info;
 use crate::state::{
-    PoolAnalytics, PoolFeeState, PoolInfo, PoolSpecs, PoolState, MINIMUM_LIQUIDITY, POOL_FEE_STATE,
-    POOL_PAUSED, POOL_STATE, POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK,
+    PoolAnalytics, PoolInfo, PoolSpecs, POOL_ID, POOL_PAUSED, REPLY_ID_SWAP_FORWARD,
 };
-use crate::swap_helper::{assert_max_spread, compute_swap, update_price_accumulator};
+use crate::swap_helper::{
+    breaker_tripped_refund_response, compute_token_out_min, enforce_liquidity_breaker,
+    BreakerOutcome,
+};
+use pool_core::osmosis_msgs::swap_exact_amount_in_msg;
+use pool_core::state::SwapForwardPayload;
 
 use super::commit_base_attributes;
 
@@ -37,169 +39,136 @@ pub(super) fn process_post_threshold_commit(
     belief_price: Option<Decimal>,
     max_spread: Option<Decimal>,
     pool_info: &PoolInfo,
-    pool_specs: &PoolSpecs,
-    pool_state: &mut PoolState,
-    pool_fee_state: &mut PoolFeeState,
+    _pool_specs: &PoolSpecs,
     analytics: &mut PoolAnalytics,
 ) -> Result<Response, ContractError> {
     if POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::PoolPausedLowLiquidity {});
     }
 
-    // Post-threshold-crossing cooldown. Mirrors the gate in
-    // pool_core::swap::execute_simple_swap: a follower commit landing in
-    // the crossing block (after the crosser's tx) or the next N blocks
-    // is rejected so it can't atomically sandwich the freshly-seeded
-    // pool. The crosser's own bounded excess swap runs before any other
-    // tx ever observes this storage item, so it isn't gated by itself.
-    let cooldown_until = POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
-        .may_load(deps.storage)?
-        .unwrap_or(0);
-    if env.block.height < cooldown_until {
-        return Err(ContractError::PostThresholdCooldownActive {
-            until_block: cooldown_until,
-        });
-    }
-
-    let offer_pool = pool_state.reserve0;
-    let ask_pool = pool_state.reserve1;
-
-    // Per-tx swap cap ramp. After the cooldown ends,
-    // each post-threshold commit (which IS a swap) is capped at a
-    // fraction of the offer-side reserve, ramping from 0.5% up to
-    // "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks.
-    // Mirrors the gate in pool_core::swap::execute_simple_swap so
-    // commits and simple swaps face the same per-tx cap during the
-    // ramp window.
-    if let Some(cap) =
-        pool_core::state::post_threshold_swap_cap(cooldown_until, env.block.height, offer_pool)
-    {
-        if swap_amount > cap {
-            return Err(ContractError::PostThresholdSwapCapExceeded {
-                offer: swap_amount,
-                cap,
-            });
-        }
-    }
-
-    // Pre-state drain guard. Mirrors `pool_core::swap::execute_simple_swap`
-    // so the post-threshold commit path enforces the same MINIMUM_LIQUIDITY
-    // floor as a plain swap. Without this, an already-drained pool (either
-    // reserve below MIN) would accept commits whose `compute_swap`
-    // arithmetic operates on near-zero reserves and produces tiny outputs.
-    // The matching docstring on `pool_core::state::maybe_auto_pause_on_low_liquidity`
-    // assumes "swap and commit paths reject trades that would leave
-    // reserves below the floor" — this gate restores that invariant on
-    // the commit side.
-    if pool_state.reserve0 < MINIMUM_LIQUIDITY || pool_state.reserve1 < MINIMUM_LIQUIDITY {
-        return Err(ContractError::InsufficientReserves {});
-    }
-
-    let (return_amt, spread_amt, commission_amt) =
-        compute_swap(offer_pool, ask_pool, swap_amount, pool_specs.lp_fee)?;
-
-    // Dust-swap guard: mirror simple_swap's zero-return rejection so a
-    // post-threshold commit that would consume the user's bluechip
-    // without yielding any creator tokens fails loudly.
-    if return_amt.is_zero() {
+    if swap_amount.is_zero() {
         return Err(ContractError::ZeroAmount {});
     }
 
-    // `assert_max_spread` measures `expected_return - return_amount` against
-    // `max_spread`. Pass the gross-of-commission return so the spread check
-    // matches the convention used by `pool_core::swap::execute_simple_swap`
-    // and `process_threshold_crossing_with_excess`. A net-of-commission
-    // argument would make this path stricter than the equivalent
-    // SimpleSwap, causing identical-params commits to revert where swaps
-    // succeed.
-    assert_max_spread(
+    // The native pool id must be set post-threshold.
+    let pool_id = POOL_ID
+        .may_load(deps.storage)?
+        .ok_or(ContractError::ShortOfThreshold {})?;
+
+    // H-3 — a post-threshold commit is a market BUY of the creator token
+    // (the net bluechip is swapped through the native pool). The
+    // `token_out_min_amount` floor derived below from the on-chain estimate
+    // is computed at CURRENT pool state, so it does NOT defend against a
+    // front-run that moved the pool earlier in the same block — it only
+    // bounds the swap's own price impact. An explicit `belief_price` (a
+    // max acceptable price, sourced from an off-chain quote) is the only
+    // manipulation-resistant downside bound on this path, and — unlike the
+    // multi-hop router, which enforces an end-to-end `minimum_receive` —
+    // the commit path has no other backstop. Require it so a committer can
+    // never be sandwiched for an unbounded amount by omitting slippage
+    // protection. Checked AFTER the POOL_ID gate so a pool that has crossed
+    // the threshold but whose native pool is not yet seeded still surfaces
+    // the clearer `ShortOfThreshold`. (Pre-threshold commits do not swap and
+    // never reach here.)
+    if belief_price.is_none() {
+        return Err(ContractError::BeliefPriceRequired {});
+    }
+
+    let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
+    let creator_denom = pool_info.token_denom.clone();
+
+    // FIX G — trip the native relative circuit breaker BEFORE dispatching
+    // the swap leg, matching the `SimpleSwap` site (both share the helper).
+    // If either side of the live pool has fallen below BREAKER_FLOOR_PERCENT%
+    // of its seeded liquidity, this auto-pauses the pool and rejects the
+    // commit. Pre-threshold commits never reach here (no pool yet).
+    //
+    // H-1: on a trip the breaker has latched the pause; return `Ok`
+    // (refunding the committer's GROSS attached bluechip — no fees taken,
+    // no swap) so the pause persists. Returning `Err` would roll it back.
+    match enforce_liquidity_breaker(
+        deps.storage,
+        &deps.querier,
+        pool_id,
+        &bluechip_denom,
+        &creator_denom,
+    )? {
+        BreakerOutcome::Proceed => {}
+        BreakerOutcome::Tripped => {
+            return Ok(breaker_tripped_refund_response(
+                &sender,
+                &bluechip_denom,
+                asset.amount,
+                pool_id,
+                "commit_auto_paused_low_liquidity",
+            ));
+        }
+    }
+
+    let token_in = Coin {
+        denom: bluechip_denom.clone(),
+        amount: swap_amount,
+    };
+
+    // Slippage floor = max(on-chain-estimate floor, belief-price floor).
+    // Shares the exact orchestration used by `SimpleSwap` (pool_core::swap)
+    // so the sandwich/slippage protection is identical at both sites.
+    let token_out_min_amount = compute_token_out_min(
+        &deps.querier,
+        pool_id,
+        &token_in,
+        &creator_denom,
         belief_price,
         max_spread,
         None,
-        swap_amount,
-        return_amt.checked_add(commission_amt)?,
-        spread_amt,
     )?;
+    let payload = SwapForwardPayload {
+        receiver: sender.clone(),
+        token_out_denom: creator_denom.clone(),
+        sender: sender.clone(),
+        offer_amount: swap_amount,
+        offer_denom: bluechip_denom.clone(),
+    };
+    let swap_msg = swap_exact_amount_in_msg(
+        &pool_info.pool_info.contract_addr,
+        pool_id,
+        &token_in,
+        &creator_denom,
+        token_out_min_amount,
+    );
+    let swap_submsg = SubMsg::reply_on_success(swap_msg, REPLY_ID_SWAP_FORWARD)
+        .with_payload(to_json_binary(&payload)?);
 
-    update_price_accumulator(pool_state, env.block.time.seconds())?;
-
-    let new_reserve0 = offer_pool.checked_add(swap_amount)?;
-    let new_reserve1 = ask_pool.checked_sub(return_amt.checked_add(commission_amt)?)?;
-
-    // Post-state drain guard. Reject when the post-swap ask reserve
-    // drops below MINIMUM_LIQUIDITY. Without this, a large enough commit
-    // could leave reserve1 at single-base-unit levels while the pool
-    // stays operational (POOL_PAUSED_AUTO is only armed by remove paths);
-    // subsequent swaps would reject at simple_swap's reserve check but
-    // commits would continue draining until `compute_swap` floored the
-    // return to zero. Matches `pool_core::swap::execute_simple_swap`'s
-    // post-state check.
-    if new_reserve1 < MINIMUM_LIQUIDITY {
-        return Err(ContractError::InsufficientReserves {});
-    }
-
-    pool_state.reserve0 = new_reserve0;
-    pool_state.reserve1 = new_reserve1;
-
-    update_pool_fee_growth(pool_fee_state, pool_state, 0, commission_amt)?;
-    POOL_FEE_STATE.save(deps.storage, &*pool_fee_state)?;
-    POOL_STATE.save(deps.storage, &*pool_state)?;
-
-    if !return_amt.is_zero() {
-        messages.push(
-            WasmMsg::Execute {
-                contract_addr: pool_info.token_address.to_string(),
-                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                    recipient: sender.to_string(),
-                    amount: return_amt,
-                })?,
-                funds: vec![],
-            }
-            .into(),
-        );
-    }
-
+    // Subscription record (unchanged). `asset.amount` is the GROSS commit.
     update_commit_info(
         deps.storage,
         &sender,
-        &pool_state.pool_contract_address,
+        &pool_info.pool_info.contract_addr,
         asset.amount,
         commit_value,
         env.block.time,
     )?;
 
-    // Update analytics — `total_commit_count` is incremented and persisted
-    // by the dispatcher (`commit::execute_commit_logic`); this handler
-    // only mutates the swap-specific fields on the shared `&mut analytics`.
+    // Analytics — offer-side volume known now; ask side finalized in the
+    // swap-forward reply.
     analytics.total_swap_count += 1;
     analytics.total_volume_0 = analytics.total_volume_0.saturating_add(swap_amount);
-    analytics.total_volume_1 = analytics.total_volume_1.saturating_add(return_amt);
     analytics.last_trade_block = env.block.height;
     analytics.last_trade_timestamp = env.block.time.seconds();
-
-    // Effective price: creator tokens received per bluechip spent
-    let effective_price = if !swap_amount.is_zero() {
-        Decimal::from_ratio(return_amt, swap_amount).to_string()
-    } else {
-        "0".to_string()
-    };
 
     let base = commit_base_attributes(
         "active",
         &sender,
-        &pool_state.pool_contract_address,
+        &pool_info.pool_info.contract_addr,
         analytics.total_commit_count,
         &env,
     );
     Ok(Response::new()
-        .add_messages(messages)
+        .add_messages(messages.drain(..))
+        .add_submessage(swap_submsg)
         .add_attributes(base)
         .add_attribute("commit_amount_bluechip", asset.amount.to_string())
         .add_attribute("swap_amount_bluechip", swap_amount.to_string())
-        .add_attribute("tokens_received", return_amt.to_string())
-        .add_attribute("spread_amount", spread_amt.to_string())
-        .add_attribute("commission_amount", commission_amt.to_string())
-        .add_attribute("effective_price", effective_price)
-        .add_attribute("reserve0_after", pool_state.reserve0.to_string())
-        .add_attribute("reserve1_after", pool_state.reserve1.to_string()))
+        .add_attribute("token_out_min_amount", token_out_min_amount.to_string())
+        .add_attribute("pool_id", pool_id.to_string()))
 }

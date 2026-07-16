@@ -12,15 +12,12 @@
 pub use pool_core::msg::*;
 
 use crate::asset::{TokenInfo, TokenType};
-use crate::state::{CreatorFeePot, RecoveryType};
+use crate::state::RecoveryType;
 // Schema-only refs: cited only by `#[returns(...)]` on QueryMsg
 // variants. The QueryResponses derive consumes them but rustc still
-// flags them as unused without this allow. Grouping them under one
-// outer allow keeps the schema-suppression scoped (so an unused-import
-// on `TokenInfo` / `RecoveryType` would still get reported).
+// flags them as unused without this allow.
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Binary, Decimal, Timestamp, Uint128};
-use cw20::Cw20ReceiveMsg;
 #[allow(unused_imports)]
 use {
     crate::state::{Committing, PoolDetails},
@@ -29,7 +26,9 @@ use {
 
 #[cw_serde]
 pub enum ExecuteMsg {
-    Receive(Cw20ReceiveMsg),
+    // The creator token is a native TokenFactory denom now, so selling it
+    // is a normal `SimpleSwap` with the creator denom attached as funds —
+    // there is no CW20 `Receive(Cw20ReceiveMsg)` sell hook anymore.
     SimpleSwap {
         offer_asset: TokenInfo,
         belief_price: Option<Decimal>,
@@ -55,70 +54,11 @@ pub enum ExecuteMsg {
         belief_price: Option<Decimal>,
         max_spread: Option<Decimal>,
     },
-    DepositLiquidity {
-        amount0: Uint128,
-        amount1: Uint128,
-        min_amount0: Option<Uint128>,
-        min_amount1: Option<Uint128>,
-        transaction_deadline: Option<Timestamp>,
-    },
-    CollectFees {
-        position_id: String,
-        /// Optional caller-supplied deadline. Same shape as the
-        /// `transaction_deadline` field on every other liquidity path;
-        /// rejects mempool-replayed collects that land after the caller's
-        /// intended expiry. Pure fee math grows monotonically, so a late
-        /// collect can only return *more* fees — not a security gate
-        /// against value loss, but kept for client-side symmetry so a
-        /// frontend can pass the same deadline to every LP action.
-        /// `#[serde(default)]` keeps clients that omit the field
-        /// wire-compatible (it deserializes as `None` when absent).
-        #[serde(default)]
-        transaction_deadline: Option<Timestamp>,
-    },
-    AddToPosition {
-        position_id: String,
-        amount0: Uint128,
-        amount1: Uint128,
-        min_amount0: Option<Uint128>,
-        min_amount1: Option<Uint128>,
-        transaction_deadline: Option<Timestamp>,
-    },
-    RemovePartialLiquidity {
-        position_id: String,
-        liquidity_to_remove: Uint128,
-        transaction_deadline: Option<Timestamp>,
-        min_amount0: Option<Uint128>,
-        min_amount1: Option<Uint128>,
-        max_ratio_deviation_bps: Option<u16>,
-    },
-    RemovePartialLiquidityByPercent {
-        position_id: String,
-        percentage: u64,
-        transaction_deadline: Option<Timestamp>,
-        min_amount0: Option<Uint128>,
-        min_amount1: Option<Uint128>,
-        max_ratio_deviation_bps: Option<u16>,
-    },
-    RemoveAllLiquidity {
-        position_id: String,
-        transaction_deadline: Option<Timestamp>,
-        min_amount0: Option<Uint128>,
-        min_amount1: Option<Uint128>,
-        max_ratio_deviation_bps: Option<u16>,
-    },
+    // Time-locked release of the creator's RAW excess coins earmarked at
+    // threshold crossing (see `CreatorExcessLiquidity`). Sends the raw
+    // `bluechip_amount` + `token_amount` to the creator once `unlock_time`
+    // has passed (FIX C). Claimable even after an emergency drain (FIX D).
     ClaimCreatorExcessLiquidity {
-        // Optional deadline protecting the claim from lying in the mempool
-        // indefinitely. Unset means no deadline check — clients that omit
-        // the field stay wire-compatible.
-        #[serde(default)]
-        transaction_deadline: Option<Timestamp>,
-    },
-    // Empties the CREATOR_FEE_POT into the creator wallet. The pot
-    // accumulates the portion of LP fees that the fee-size multiplier
-    // clips off small positions — routed here rather than left
-    // orphaned in fee_reserve. Creator-only.
-    ClaimCreatorFees {
         #[serde(default)]
         transaction_deadline: Option<Timestamp>,
     },
@@ -155,51 +95,6 @@ pub enum ExecuteMsg {
     ClaimFailedDistribution {
         recipient: Option<String>,
     },
-
-    // per-position claim against the post-emergency
-    // -drain escrow. Caller must own (CW721) the position NFT — the
-    // handler checks `verify_position_ownership` against the stored NFT
-    // contract. Each position can be claimed exactly once; a successful
-    // claim sets `position.liquidity = 0` and bumps the snapshot's
-    // `total_claimed_*` running tally. The funds the claimant receives
-    // are their pro-rata share of `(reserve_*_at_drain +
-    // fee_reserve_*_at_drain) * position.liquidity /
-    // total_liquidity_at_drain`, transferred to `info.sender`.
-    //
-    // Available immediately after Phase-2 drain and through the full
-    // 1-year `EMERGENCY_CLAIM_DORMANCY_SECONDS` window. After
-    // dormancy, individual claims still work in principle but the
-    // pool's bank balance may have been swept by
-    // SweepUnclaimedEmergencyShares, so a late claim would error on
-    // insufficient balance.
-    ClaimEmergencyShare {
-        position_id: String,
-    },
-
-    // factory-only sweep of the unclaimed residual
-    // after the dormancy window expires. `info.sender` must equal the
-    // pool's `factory_addr`; the handler verifies
-    // `env.block.time >= dormancy_expires_at` (1 year post-drain) and
-    // sends the residual to `bluechip_wallet_address`. One-shot —
-    // `residual_swept` flag prevents double-sweeps.
-    SweepUnclaimedEmergencyShares {},
-
-    // Factory-only callback invoked once at pool finalize. The factory
-    // dispatches `Cw721ExecuteMsg::TransferOwnership { new_owner: pool }`
-    // to the position-NFT during `finalize_pool`, which only sets
-    // `pending_owner` on the NFT (cw_ownable is two-phase). This handler
-    // is the matching second half: it sends `AcceptOwnership` back to
-    // the NFT contract and flips `pool_state.nft_ownership_accepted` so
-    // the deposit-side lazy fallback in pool-core becomes a no-op.
-    //
-    // Closes the pre-accept window between pool creation and threshold
-    // cross — without this handler the factory would remain the NFT
-    // contract's actual owner for that whole stretch.
-    //
-    // Authorisation: `info.sender` must equal `pool_info.factory_addr`.
-    // Idempotent: returns Ok with no NFT message if the flag is already
-    // set (e.g. the deposit-side fallback fired first in a test fixture).
-    AcceptNftOwnership {},
 }
 
 #[cw_serde]
@@ -227,10 +122,6 @@ pub enum QueryMsg {
     Config {},
     #[returns(SimulationResponse)]
     Simulation { offer_asset: TokenInfo },
-    #[returns(ReverseSimulationResponse)]
-    ReverseSimulation { ask_asset: TokenInfo },
-    #[returns(CumulativePricesResponse)]
-    CumulativePrices {},
     #[returns(FeeInfoResponse)]
     FeeInfo {},
     #[returns(CommitStatus)]
@@ -249,19 +140,6 @@ pub enum QueryMsg {
     PoolState {},
     #[returns(PoolFeeStateResponse)]
     FeeState {},
-    #[returns(PositionResponse)]
-    Position { position_id: String },
-    #[returns(PositionsResponse)]
-    Positions {
-        start_after: Option<String>,
-        limit: Option<u32>,
-    },
-    #[returns(PositionsResponse)]
-    PositionsByOwner {
-        owner: String,
-        start_after: Option<String>,
-        limit: Option<u32>,
-    },
     // NOTE: the canonical wire name carries an on-chain typo
     // ("last_commited"). The serde alias also accepts the correct
     // spelling so new clients don't have to ship the typo; renaming
@@ -308,28 +186,23 @@ pub struct CreatorEarningsResponse {
     /// Creator wallet configured at instantiation — the recipient of
     /// every claim path below.
     pub creator_wallet_address: Addr,
-    /// Claimable-now clip-slice fee pot. `amount_0` is the native
-    /// bluechip leg, `amount_1` the creator-token leg. Emptied by
-    /// `ExecuteMsg::ClaimCreatorFees`; zero/zero when nothing accrued.
-    pub fee_pot: CreatorFeePot,
     /// Locked excess-liquidity claim created at threshold crossing when
     /// the seeded bluechip exceeded `max_bluechip_lock_per_pool`.
     /// `None` when no excess exists or it was already claimed.
     pub excess: Option<CreatorExcessEarningsResponse>,
     pub is_threshold_hit: bool,
-    /// Block time at which the threshold flipped. `None` pre-threshold
-    /// (and on pools deployed before this timestamp was recorded).
+    /// Block time at which the threshold flipped. `None` pre-threshold.
     pub threshold_crossed_at: Option<Timestamp>,
 }
 
 #[cw_serde]
 pub struct CreatorExcessEarningsResponse {
+    /// Raw bluechip earmarked for the creator (claimed as-is after unlock).
     pub bluechip_amount: Uint128,
+    /// Raw creator tokens earmarked for the creator (claimed as-is after unlock).
     pub token_amount: Uint128,
     pub unlock_time: Timestamp,
-    /// True once block time has reached `unlock_time` — i.e.
-    /// `ExecuteMsg::ClaimCreatorExcessLiquidity` will not reject with
-    /// `PositionLocked`.
+    /// True once block time has reached `unlock_time`.
     pub claimable_now: bool,
 }
 
@@ -374,17 +247,44 @@ pub struct FactoryNotifyStatusResponse {
 #[cw_serde]
 pub struct PoolInstantiateMsg {
     pub pool_id: u64,
+    /// The pool pair. Index 0 MUST be the bluechip `Native` side. Index 1
+    /// is a `CreatorToken` PLACEHOLDER (its denom is ignored) — the pool
+    /// creates its own TokenFactory denom at instantiate from `subdenom`
+    /// and overwrites this slot with `CreatorToken { denom }`.
     pub pool_token_info: [TokenType; 2],
-    pub cw20_token_contract_id: u64,
     pub used_factory_addr: Addr,
     pub threshold_payout: Option<Binary>,
     pub commit_fee_info: CommitFeeInfo,
     /// Commit threshold, USD-denominated (6 decimals).
     pub commit_threshold_limit_usd: Uint128,
-    pub position_nft_address: Addr,
-    pub token_address: Addr,
+    /// TokenFactory subdenom for the creator token. The pool creates
+    /// `factory/{pool_contract_addr}/{subdenom}` at instantiate and
+    /// becomes its denom admin. Replaces the old `token_address: Addr`
+    /// (the CW20 contract) and `cw20_token_contract_id`.
+    pub subdenom: String,
+    /// Creator-chosen token display name / ticker / decimals. Used at
+    /// instantiate to register bank denom `Metadata` (`MsgSetDenomMetadata`)
+    /// so explorers/wallets render the creator's name and the 6-decimal
+    /// scaling instead of the raw `factory/{addr}/{sub}` micro-denom (M-01).
+    /// `#[serde(default)]` keeps pre-this-field create messages valid; when
+    /// `token_symbol` is empty the pool skips metadata registration.
+    #[serde(default)]
+    pub token_name: String,
+    #[serde(default)]
+    pub token_symbol: String,
+    #[serde(default)]
+    pub token_decimals: u8,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
+    /// FIX E — uosmo amount of the native GAMM pool-creation fee, set by the
+    /// factory from its `gamm_pool_creation_fee.amount` config. Pinned at
+    /// instantiate into `CREATION_FEE_RESERVE_TARGET`; the pool retains this
+    /// much bluechip out of the protocol's 1% commit fee to cover the fee the
+    /// `x/gamm` module auto-charges at threshold-crossing. Zero disables the
+    /// reserve (gamm fee waived). `#[serde(default)]` keeps pre-this-field
+    /// factory create messages deserializing with a zero (disabled) reserve.
+    #[serde(default)]
+    pub gamm_pool_creation_fee_amount: Uint128,
 }
 
 #[cw_serde]

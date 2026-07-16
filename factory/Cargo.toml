@@ -55,7 +55,13 @@ cw2 = { workspace = true }
 cw20 = { workspace = true }
 
 semver = {workspace = true}
-cosmwasm-std = { workspace = true }
+# `cosmwasm_1_1` enables `QuerierWrapper::query_supply`, used by
+# production `query.rs::query_creator_token_info` to read the creator
+# TokenFactory denom's bank supply. When the whole workspace is built,
+# this feature arrives via unification (easy-addr enables `cosmwasm_1_4`),
+# so `cargo build`/optimizer builds are unaffected; declaring it here lets
+# the factory crate (and `cargo test -p factory`) compile standalone.
+cosmwasm-std = { workspace = true, features = ["cosmwasm_1_1"] }
 serde = { workspace = true }
 cw-storage-plus = { workspace = true }
 thiserror = { workspace = true }

@@ -11,10 +11,8 @@
 pub use pool_factory_interfaces::asset::*;
 
 use cosmwasm_std::{
-    to_json_binary, Addr, BankMsg, Coin, CosmosMsg, MessageInfo, QuerierWrapper, StdError,
-    StdResult, WasmMsg,
+    Addr, BankMsg, Coin, CosmosMsg, MessageInfo, QuerierWrapper, StdError, StdResult,
 };
-use cw20::Cw20ExecuteMsg;
 use cw_utils::must_pay;
 
 pub const UBLUECHIP_DENOM: &str = "ubluechip";
@@ -29,52 +27,45 @@ pub trait TokenInfoPoolExt {
 
 impl TokenInfoPoolExt for TokenInfo {
     fn deduct_tax(&self, _querier: &QuerierWrapper) -> StdResult<Coin> {
+        // Both sides are bank denoms now (bluechip Native + the creator
+        // TokenFactory denom), so either shape yields a plain bank Coin.
         let amount = self.amount;
-        if let TokenType::Native { denom } = &self.info {
-            Ok(Coin {
+        match &self.info {
+            TokenType::Native { denom } | TokenType::CreatorToken { denom } => Ok(Coin {
                 denom: denom.to_string(),
                 amount,
-            })
-        } else {
-            Err(StdError::generic_err("cannot deduct tax from token asset"))
+            }),
         }
     }
 
     fn into_msg(self, querier: &QuerierWrapper, recipient: Addr) -> StdResult<CosmosMsg> {
-        let amount = self.amount;
-
-        match &self.info {
-            TokenType::CreatorToken { contract_addr } => Ok(CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: contract_addr.to_string(),
-                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                    recipient: recipient.to_string(),
-                    amount,
-                })?,
-                funds: vec![],
-            })),
-            TokenType::Native { .. } => Ok(CosmosMsg::Bank(BankMsg::Send {
-                to_address: recipient.to_string(),
-                amount: vec![self.deduct_tax(querier)?],
-            })),
-        }
+        // Both the bluechip side and the creator TokenFactory side are
+        // native bank coins, so every outgoing transfer is a BankMsg::Send.
+        // (Pre-migration the CreatorToken arm built a `Cw20ExecuteMsg::Transfer`.)
+        Ok(CosmosMsg::Bank(BankMsg::Send {
+            to_address: recipient.to_string(),
+            amount: vec![self.deduct_tax(querier)?],
+        }))
     }
 
     fn confirm_sent_native_balance(&self, message_info: &MessageInfo) -> StdResult<()> {
-        if let TokenType::Native { denom } = &self.info {
-            let amount = must_pay(message_info, denom)
-                .map_err(|err| StdError::generic_err(err.to_string()))?;
-            if self.amount == amount {
-                Ok(())
-            } else {
-                Err(StdError::generic_err(format!(
-                    "amount mismatch for denom '{}': expected {}, but received {}",
-                    denom, self.amount, amount
-                )))
-            }
+        // Accept EITHER bank denom as attached funds. The creator token is
+        // now a TokenFactory native denom, so a `SimpleSwap` selling the
+        // creator token attaches that denom directly (replacing the old
+        // CW20 `Receive`/`Send` hook path). Whichever side the offer is,
+        // `must_pay` verifies the exact attached amount.
+        let denom = match &self.info {
+            TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom,
+        };
+        let amount =
+            must_pay(message_info, denom).map_err(|err| StdError::generic_err(err.to_string()))?;
+        if self.amount == amount {
+            Ok(())
         } else {
-            Err(StdError::generic_err(
-                "SimpleSwap can only be used with bluechip tokens. Use CW20 Send for token swaps.",
-            ))
+            Err(StdError::generic_err(format!(
+                "amount mismatch for denom '{}': expected {}, but received {}",
+                denom, self.amount, amount
+            )))
         }
     }
 }

@@ -12,9 +12,7 @@ use cosmwasm_std::{Addr, CosmosMsg, DepsMut, Env, Response, Uint128};
 use crate::asset::TokenInfo;
 use crate::error::ContractError;
 use crate::generic_helpers::update_commit_info;
-use crate::state::{
-    PoolAnalytics, COMMIT_LEDGER, NATIVE_RAISED_FROM_COMMIT, USD_RAISED_FROM_COMMIT,
-};
+use crate::state::{PoolAnalytics, NATIVE_RAISED_FROM_COMMIT, USD_RAISED_FROM_COMMIT};
 
 use super::commit_base_attributes;
 
@@ -31,9 +29,10 @@ pub(super) fn process_pre_threshold_commit(
     pool_contract_addr: &Addr,
     analytics: &mut PoolAnalytics,
 ) -> Result<Response, ContractError> {
-    COMMIT_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
-        Ok(v.unwrap_or_default().checked_add(commit_value)?)
-    })?;
+    // Append to the ledger and bump the O(1) distinct-committer counter
+    // iff `sender` is new (FIX B). `record_committer` does the
+    // has()-before-update check so repeat committers never double-count.
+    super::record_committer(deps.storage, &sender, commit_value)?;
     // `new_usd_total` is the dispatcher's already-computed
     // `USD_RAISED_FROM_COMMIT + commit_value` (overflow-checked there,
     // and the routing into this handler depends on it), so save it

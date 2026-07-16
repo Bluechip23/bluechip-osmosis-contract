@@ -55,9 +55,8 @@ pub fn execute_propose_pool_upgrade(
     // invalid ID would error inside `build_upgrade_batch` at apply
     // time and revert the entire batch.
     //
-    // None means "all pools" — same dedup/existence is implicit
-    // (POOLS_BY_ID.keys already returns unique, registered IDs) but
-    // we still need to filter the anchor.
+    // None means "all pools" — dedup/existence is implicit
+    // (POOLS_BY_ID.keys already returns unique, registered IDs).
     let pools_to_upgrade: Vec<u64> = if let Some(ids) = pool_ids {
         // Dedup while preserving order: first occurrence wins, later
         // duplicates dropped. Sort+dedup would also work but reorders
@@ -121,16 +120,13 @@ struct UpgradeBatchOutcome {
 
 /// Processes a single batch of pools from the pending upgrade.
 ///
-/// Anchor exclusion runs here in addition to the propose-time check.
-/// `execute_propose_pool_upgrade` snapshots the anchor at propose time, but
-/// the pending list can outlive an anchor change (Propose pool upgrade
-/// containing pool X -> 48h elapses -> ProposeConfigUpdate that promotes X
-/// to anchor -> apply config update -> apply upgrade: X is now the live
-/// anchor but is still in the frozen list). Re-resolving the anchor here
-/// and hard-failing if it appears in the batch closes that race. We
-/// hard-fail rather than silently skip so an operator notices the
-/// collision and decides whether to drop X from the upgrade or rotate
-/// the anchor first.
+/// (Historical note: earlier revisions of this doc described an
+/// "anchor pool" exclusion here. The anchor concept belonged to the
+/// pre-migration `bluechip-contracts` design, before the contracts were
+/// gutted for Osmosis compatibility; there is no anchor pool in this
+/// factory — every registered pool is a plain creator pool, and none is
+/// special-cased during an upgrade. No anchor resolution or exclusion
+/// runs here or at propose time.)
 ///
 /// Paused pools are skipped (returned in `skipped_pool_ids`) so the
 /// upgrade doesn't migrate a pool that is mid-emergency-withdraw or

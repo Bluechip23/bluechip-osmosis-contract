@@ -41,6 +41,10 @@ semver = { workspace = true }
 pool-factory-interfaces = { path = "../packages/pool-factory-interfaces" }
 pool-core = { path = "../packages/pool-core" }
 cw-utils = { workspace = true }
+# Reply-response decoding for the native GAMM create-pool reply
+# (MsgCreateBalancerPoolResponse.pool_id).
+osmosis-std = { workspace = true }
+prost = { workspace = true }
 
 [dev-dependencies]
 cw-multi-test = { workspace = true }

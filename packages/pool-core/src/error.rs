@@ -71,6 +71,14 @@ pub enum ContractError {
     #[error("belief_price cannot be zero")]
     InvalidBeliefPrice {},
 
+    #[error(
+        "belief_price is required for this operation: a post-threshold commit swaps the \
+         net bluechip through the native pool, and an explicit off-chain-derived belief_price \
+         is the only manipulation-resistant slippage bound on that path (the on-chain estimate \
+         floor is computed at execution time and does not defend against front-running)"
+    )]
+    BeliefPriceRequired {},
+
     #[error("Slippage exceeded: expected at least {expected} {token}, got {actual}")]
     SlippageExceeded {
         expected: Uint128,

@@ -38,7 +38,7 @@ pub use config::{
 pub use pool_lifecycle::admin::{
     execute_cancel_emergency_withdraw_pool, execute_emergency_withdraw_pool,
     execute_notify_threshold_crossed, execute_pause_pool, execute_recover_pool_stuck_states,
-    execute_sweep_unclaimed_emergency_shares_pool, execute_unpause_pool,
+    execute_unpause_pool,
 };
 pub use upgrades::{
     execute_apply_pool_upgrade, execute_cancel_pool_upgrade, execute_continue_pool_upgrade,
@@ -47,7 +47,7 @@ pub use upgrades::{
 
 use crate::error::ContractError;
 use crate::msg::ExecuteMsg;
-use crate::pool_creation_reply::{finalize_pool, mint_create_pool, set_tokens};
+use crate::pool_creation_reply::finalize_pool;
 use crate::state::FACTORYINSTANTIATEINFO;
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -56,8 +56,13 @@ use cosmwasm_std::{Deps, DepsMut, Env, MessageInfo, Reply, Response};
 use crate::{CONTRACT_NAME, CONTRACT_VERSION};
 
 // Reply step constants (stored in low 8 bits of reply ID).
-pub const SET_TOKENS: u64 = 1;
-pub const MINT_CREATE_POOL: u64 = 2;
+//
+// Phase-2: the CW20-instantiate step AND the position-NFT-instantiate step
+// are both gone. The creator token is a pool-owned native denom and the
+// internal LP system was removed, so the reply chain is a single step:
+// pool-instantiate -> finalize. `FINALIZE_POOL` handles the pool-created
+// reply. (`MINT_CREATE_POOL` = 2 is retired; the constant is left out so a
+// stale reply id routes to `UnknownReplyId`.)
 pub const FINALIZE_POOL: u64 = 3;
 
 /// Encodes a `pool_id` and a reply-chain step into a single SubMsg reply ID.
@@ -95,6 +100,11 @@ pub fn instantiate(
     config::validate_factory_config(deps.as_ref(), &env, &msg)?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &msg)?;
+    // M-05 — a fresh deployment maintains PAIRS / POOL_ID_BY_ADDRESS through
+    // `register_pool` from the first pool onward, so the legacy registry
+    // back-fill in `migrate` is never needed. Mark it done up front so
+    // `migrate` skips the O(N) walk entirely for this deployment.
+    crate::state::REGISTRY_BACKFILL_DONE.save(deps.storage, &true)?;
     Ok(Response::new().add_attribute("action", "init_contract"))
 }
 
@@ -146,9 +156,6 @@ pub fn execute(
         }
         ExecuteMsg::CancelEmergencyWithdrawPool { pool_id } => {
             execute_cancel_emergency_withdraw_pool(deps, info, pool_id)
-        }
-        ExecuteMsg::SweepUnclaimedEmergencyPool { pool_id } => {
-            execute_sweep_unclaimed_emergency_shares_pool(deps, info, pool_id)
         }
         ExecuteMsg::RecoverPoolStuckStates {
             pool_id,
@@ -263,8 +270,6 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractEr
 pub fn pool_creation_reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractError> {
     let (pool_id, step) = decode_reply_id(msg.id);
     match step {
-        SET_TOKENS => set_tokens(deps, env, msg, pool_id),
-        MINT_CREATE_POOL => mint_create_pool(deps, env, msg, pool_id),
         FINALIZE_POOL => finalize_pool(deps, env, msg, pool_id),
         _ => Err(ContractError::UnknownReplyId { id: msg.id }),
     }

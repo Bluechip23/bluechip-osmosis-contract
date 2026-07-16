@@ -18,11 +18,7 @@
 //! for the threshold-crossing handler that initialises
 //! `DISTRIBUTION_STATE` in the first place.
 
-use cosmwasm_std::{
-    to_json_binary, Addr, CosmosMsg, Env, Order, StdResult, Storage, SubMsg, Uint128, Uint256,
-    WasmMsg,
-};
-use cw20::Cw20ExecuteMsg;
+use cosmwasm_std::{Addr, Env, Order, StdResult, Storage, SubMsg, Uint128, Uint256};
 use cw_storage_plus::Bound;
 
 use crate::error::ContractError;
@@ -34,9 +30,10 @@ use crate::state::{
 };
 
 /// Build a `SubMsg::reply_always` that mints `amount` of the pool's
-/// CW20 to `recipient`, wrapped so a per-mint failure is captured by
-/// the contract's reply handler and folded into `FAILED_MINTS` rather
-/// than reverting the entire batch tx.
+/// creator TokenFactory `denom` to `recipient`, wrapped so a per-mint
+/// failure is captured by the contract's reply handler and folded into
+/// `FAILED_MINTS` rather than reverting the entire batch tx. `pool_addr`
+/// is the pool contract (the denom admin / required mint `sender`).
 ///
 /// Used by both `process_distribution_batch` (for bulk distribution +
 /// dust settlement) and `execute_claim_failed_distribution` (for
@@ -55,7 +52,8 @@ use crate::state::{
 /// original committer if the redirect also fails.
 pub(crate) fn build_distribution_mint_submsg(
     storage: &mut dyn Storage,
-    token_addr: &Addr,
+    pool_addr: &Addr,
+    denom: &str,
     recipient: &Addr,
     user_for_accounting: &Addr,
     amount: Uint128,
@@ -83,17 +81,11 @@ pub(crate) fn build_distribution_mint_submsg(
         },
     )?;
 
-    let mint_msg = Cw20ExecuteMsg::Mint {
-        recipient: recipient.to_string(),
-        amount,
-    };
-    let wasm = WasmMsg::Execute {
-        contract_addr: token_addr.to_string(),
-        msg: to_json_binary(&mint_msg)?,
-        funds: vec![],
-    };
+    // TokenFactory MsgMint — the pool contract (denom admin) mints the
+    // creator denom straight to `recipient`.
+    let mint = pool_core::osmosis_msgs::mint_msg(pool_addr, denom, amount, recipient);
 
-    Ok(SubMsg::reply_always(CosmosMsg::Wasm(wasm), reply_id))
+    Ok(SubMsg::reply_always(mint, reply_id))
 }
 
 /// Process one batch of pending committer payouts.
@@ -166,7 +158,8 @@ pub fn process_distribution_batch(
                 if !reward.is_zero() {
                     submsgs.push(build_distribution_mint_submsg(
                         storage,
-                        &pool_info.token_address,
+                        &pool_info.pool_info.contract_addr,
+                        &pool_info.token_denom,
                         payer,
                         payer,
                         reward,
@@ -227,7 +220,8 @@ pub fn process_distribution_batch(
                     let creator = fee_info.creator_wallet_address.clone();
                     submsgs.push(build_distribution_mint_submsg(
                         storage,
-                        &pool_info.token_address,
+                        &pool_info.pool_info.contract_addr,
+                        &pool_info.token_denom,
                         &creator,
                         &creator,
                         residual,

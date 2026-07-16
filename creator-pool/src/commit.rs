@@ -40,8 +40,8 @@ use crate::generic_helpers::{
 use crate::msg::CommitFeeInfo;
 use crate::state::{
     PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
-    POOL_ANALYTICS, POOL_FEE_STATE, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
-    THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    POOL_ANALYTICS, POOL_INFO, POOL_PAUSED, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
+    THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
 
 use crate::swap_helper::get_commit_context;
@@ -68,6 +68,34 @@ use threshold_crossing::{process_threshold_crossing_with_excess, process_thresho
 /// builders, liquidity_helpers claim handlers). `Response::add_attributes`
 /// accepts any `IntoIterator<Item = impl Into<Attribute>>` so the
 /// consuming sites are unchanged.
+/// Add `value` to `sender`'s `COMMIT_LEDGER` entry, and bump the O(1)
+/// `COMMITTER_COUNT` by one iff this is the FIRST time `sender` appears in
+/// the ledger (prior value `None`). Repeat committers only accumulate
+/// their ledger value and never re-bump the counter, so the counter stays
+/// EXACT across any mix of first-time and repeat commits.
+///
+/// Used by every path that inserts into `COMMIT_LEDGER` (pre-threshold
+/// funding and both threshold-crossing handlers) so the counter can never
+/// diverge from the true distinct-committer set. See `state::COMMITTER_COUNT`.
+pub(crate) fn record_committer(
+    storage: &mut dyn cosmwasm_std::Storage,
+    sender: &Addr,
+    value: Uint128,
+) -> Result<(), ContractError> {
+    use crate::state::{COMMITTER_COUNT, COMMIT_LEDGER};
+    let is_new = !COMMIT_LEDGER.has(storage, sender);
+    COMMIT_LEDGER.update::<_, ContractError>(storage, sender, |v| {
+        Ok(v.unwrap_or_default().checked_add(value)?)
+    })?;
+    if is_new {
+        // `may_load` + `save` (not `update`) so a pool whose
+        // COMMITTER_COUNT was never initialised still counts correctly.
+        let current = COMMITTER_COUNT.may_load(storage)?.unwrap_or(0);
+        COMMITTER_COUNT.save(storage, &current.checked_add(1).unwrap_or(u32::MAX))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn commit_base_attributes(
     phase: &'static str,
     sender: &Addr,
@@ -252,11 +280,40 @@ fn execute_commit_logic(
                 return Err(ContractError::InvalidFee {});
             }
 
+            // FIX E — the creator 5% fee is bank-sent immediately as before.
+            // The bluechip 1% fee is SPLIT: the portion still needed to reach
+            // the gamm creation-fee reserve target STAYS in the pool (added to
+            // BLUECHIP_FEE_RESERVED, never bank-sent), and only the remainder
+            // is bank-sent to the live bluechip wallet. `amount_after_fees` is
+            // unchanged: the full 1%+5% is still deducted from the commit, the
+            // reserve only redirects where the bluechip fee lands (pool vs
+            // wallet).
+            //
+            // H-2 — the reserve is ONLY topped up while the pool is still
+            // pre-threshold. The gamm creation fee is charged (and any reserve
+            // surplus remitted) exactly once, inside the threshold-crossing
+            // handler; after that the reserve is spent and must never grow
+            // again. Retaining post-threshold would siphon the protocol's 1%
+            // fee into the pool's bank balance whenever the live gamm fee is
+            // below the configured reserve target (`room > 0`), where it would
+            // sit unspent and stranded until an emergency drain. Gating the
+            // reservation on `!threshold_already_hit` guarantees every
+            // post-threshold commit forwards its FULL 1% bluechip fee to the
+            // live wallet. The crossing commit itself is still pre-threshold at
+            // this point (IS_THRESHOLD_HIT flips inside the crossing handler,
+            // after this line), so it correctly makes its final top-up before
+            // the crossing consumes the reserve.
+            let bluechip_fee_to_wallet = if threshold_already_hit {
+                commit_fee_bluechip_amt
+            } else {
+                reserve_bluechip_fee(deps.storage, commit_fee_bluechip_amt)?
+            };
+
             let messages = build_fee_messages(
                 &fee_info,
                 &live_bluechip_wallet,
                 denom,
-                commit_fee_bluechip_amt,
+                bluechip_fee_to_wallet,
                 commit_fee_creator_amt,
             )?;
 
@@ -313,8 +370,6 @@ fn execute_commit_logic(
                     // the hot pre-/post-threshold paths never pay for
                     // reads they don't use.
                     let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
-                    let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-                    let mut pool_state = POOL_STATE.load(deps.storage)?;
 
                     let value_to_threshold = commit_config
                         .commit_amount_for_threshold_usd
@@ -333,8 +388,6 @@ fn execute_commit_logic(
                             commit_value,
                             value_to_threshold,
                             usd_rate,
-                            &mut pool_state,
-                            &mut pool_fee_state,
                             &pool_specs,
                             &pool_info,
                             &commit_config,
@@ -360,8 +413,7 @@ fn execute_commit_logic(
                             amount_after_fees,
                             commit_value,
                             new_total,
-                            &mut pool_state,
-                            &mut pool_fee_state,
+                            &pool_specs,
                             &pool_info,
                             &commit_config,
                             &threshold_payout,
@@ -397,12 +449,6 @@ fn execute_commit_logic(
                     )?
                 }
             } else {
-                // Loaded here rather than at the top of the dispatcher:
-                // the pre-threshold path touches neither fee state nor
-                // pool state, so only the post-threshold (and crossing)
-                // branches pay for these reads.
-                let mut pool_fee_state = POOL_FEE_STATE.load(deps.storage)?;
-                let mut pool_state = POOL_STATE.load(deps.storage)?;
                 process_post_threshold_commit(
                     deps,
                     env,
@@ -415,8 +461,6 @@ fn execute_commit_logic(
                     max_spread,
                     &pool_info,
                     &pool_specs,
-                    &mut pool_state,
-                    &mut pool_fee_state,
                     &mut analytics,
                 )?
             };
@@ -435,6 +479,39 @@ fn execute_commit_logic(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// FIX E — split the 1% bluechip commit fee between the in-pool
+/// creation-fee reserve and the live bluechip wallet.
+///
+/// Reads the `CREATION_FEE_RESERVE_TARGET` ceiling and the running
+/// `BLUECHIP_FEE_RESERVED`, then:
+/// - `room       = target.saturating_sub(reserved)`
+/// - `to_reserve = min(room, commit_fee_bluechip)` — added to
+///   `BLUECHIP_FEE_RESERVED` and RETAINED in the pool (never bank-sent);
+/// - `to_wallet  = commit_fee_bluechip - to_reserve` — returned to the
+///   caller to bank-send to the live bluechip wallet.
+///
+/// Once `reserved == target` the room is zero, `to_reserve == 0`, and the
+/// full fee flows to the wallet exactly as before this fix. `to_reserve` is
+/// bounded by `room`, so `BLUECHIP_FEE_RESERVED` never exceeds the target —
+/// the retained OSMO is always `<= CREATION_FEE_RESERVE_TARGET`.
+fn reserve_bluechip_fee(
+    storage: &mut dyn cosmwasm_std::Storage,
+    commit_fee_bluechip: Uint128,
+) -> Result<Uint128, ContractError> {
+    use crate::state::{BLUECHIP_FEE_RESERVED, CREATION_FEE_RESERVE_TARGET};
+    let target = CREATION_FEE_RESERVE_TARGET
+        .may_load(storage)?
+        .unwrap_or_default();
+    let reserved = BLUECHIP_FEE_RESERVED.may_load(storage)?.unwrap_or_default();
+    let room = target.saturating_sub(reserved);
+    let to_reserve = room.min(commit_fee_bluechip);
+    let to_wallet = commit_fee_bluechip.checked_sub(to_reserve)?;
+    if !to_reserve.is_zero() {
+        BLUECHIP_FEE_RESERVED.save(storage, &reserved.checked_add(to_reserve)?)?;
+    }
+    Ok(to_wallet)
+}
 
 /// Calculate both fee portions for a commit. Returns (bluechip_fee, creator_fee).
 fn calculate_commit_fees(

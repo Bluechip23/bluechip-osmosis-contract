@@ -131,8 +131,11 @@ pub struct TempPoolCreation {
     pub temp_pool_info: CreatePool,
     pub temp_creator_wallet: Addr,
     pub pool_id: u64,
-    pub creator_token_addr: Option<Addr>,
-    pub nft_addr: Option<Addr>,
+    /// TokenFactory subdenom for the creator token. The pool creates
+    /// `factory/{pool_addr}/{subdenom}` at instantiate and becomes its
+    /// denom admin; the full denom is reconstructed deterministically in
+    /// `finalize_pool` once the pool address is known.
+    pub subdenom: String,
 }
 
 /// Canonical per-component values for the threshold-payout splits.

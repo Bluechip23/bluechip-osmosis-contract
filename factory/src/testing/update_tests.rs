@@ -56,7 +56,7 @@ fn register_test_pool_addr(
                         denom: "ubluechip".to_string(),
                     },
                     TokenType::CreatorToken {
-                        contract_addr: Addr::unchecked("token"),
+                        denom: String::from("token"),
                     },
                 ],
                 creator_pool_addr: pool_addr.clone(),
@@ -88,6 +88,10 @@ fn test_propose_and_execute_update_config() {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     };
@@ -378,7 +382,7 @@ fn test_update_specific_pool_from_registry() {
                 denom: "ubluechip".to_string(),
             },
             TokenType::CreatorToken {
-                contract_addr: Addr::unchecked("token"),
+                denom: String::from("token"),
             },
         ],
         creator_pool_addr: pool_addr.clone(),
@@ -929,6 +933,10 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     }

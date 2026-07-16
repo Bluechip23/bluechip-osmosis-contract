@@ -1,221 +1,108 @@
-//! Pair-shape-agnostic swap.
+//! Pair-shape-agnostic swap — now routed through the NATIVE Osmosis pool.
 //!
-//! Two layers:
-//! - Pure AMM math: `compute_swap`, `compute_offer_amount`,
-//! `assert_max_spread`, `update_price_accumulator`. No storage; may
-//! mutate a caller-provided `PoolState` ref.
-//! - Swap orchestration: `execute_swap_cw20` (CW20 `Receive` hook),
-//! `simple_swap` (reentrancy + rate-limit wrapper), and
-//! `execute_simple_swap` (the actual swap handler). All
-//! shape-agnostic — no commit-phase logic; `query_check_commit` is
-//! the only gate.
+//! Phase-2 replaced the internal constant-product AMM with a native GAMM
+//! balancer pool created at threshold-crossing. A swap therefore no longer
+//! does any reserve math locally. Instead it:
 //!
-//! USD conversion helpers — which query the factory's x/twap-backed
-//! pricing and are only needed by the commit flow — stay in
-//! `creator-pool::swap_helper`.
+//! 1. Confirms/derives the offer coin and the ask (`token_out`) denom from
+//!    `POOL_INFO.asset_infos`.
+//! 2. Derives a `token_out_min_amount` slippage floor as the MORE
+//!    PROTECTIVE of an on-chain poolmanager estimate floor and the
+//!    caller's `belief_price` floor (see [`compute_token_out_min`] /
+//!    [`derive_token_out_min`]). The estimate floor binds even when no
+//!    `belief_price` is supplied, so the swap never dispatches with
+//!    `token_out_min_amount = 0`.
+//! 3. Dispatches `MsgSwapExactAmountIn` (built by
+//!    `pool_core::osmosis_msgs::swap_exact_amount_in_msg`, `sender` = the
+//!    pool contract) as a `SubMsg::reply_on_success` carrying the receiver
+//!    in its `payload`.
+//! 4. In the reply ([`handle_swap_forward_reply`]) it reads
+//!    `MsgSwapExactAmountInResponse.token_out_amount` and `BankMsg::Send`s
+//!    it to the receiver.
+//!
+//! The pool already holds the offer funds — they were attached to the
+//! `SimpleSwap` message and confirmed via `confirm_sent_native_balance` at
+//! the contract entry point — so `MsgSwapExactAmountIn` with the pool as
+//! `sender` spends the pool's own balance.
 
-use crate::asset::{TokenInfo, TokenInfoPoolExt, TokenType};
+use crate::asset::TokenInfo;
 use crate::error::ContractError;
-use crate::generic::{
-    check_rate_limit, decimal2decimal256, enforce_transaction_deadline, update_pool_fee_growth,
-    with_reentrancy_guard,
-};
-use crate::msg::Cw20HookMsg;
+use crate::generic::{check_rate_limit, enforce_transaction_deadline, with_reentrancy_guard};
+use crate::osmosis_msgs::swap_exact_amount_in_msg;
 use crate::state::{
-    PoolCtx, PoolState, CREATOR_FEE_POT, IS_THRESHOLD_HIT, MINIMUM_LIQUIDITY,
-    POOL_ANALYTICS, POOL_FEE_STATE, POOL_PAUSED, POOL_STATE,
-    POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK,
+    PoolCtx, SwapForwardPayload, BREAKER_FLOOR_PERCENT, IS_THRESHOLD_HIT, POOL_ANALYTICS, POOL_ID,
+    POOL_PAUSED, POOL_PAUSED_AUTO, REPLY_ID_SWAP_FORWARD, SEED_LIQUIDITY,
 };
 use cosmwasm_std::{
-    from_json, Addr, Decimal, Decimal256, DepsMut, Env, Fraction, MessageInfo, Response, StdError,
-    StdResult, Uint128, Uint256,
+    to_json_binary, Addr, BankMsg, Coin, CustomQuery, Decimal, DepsMut, Env, Fraction, MessageInfo,
+    QuerierWrapper, Reply, Response, StdError, StdResult, Storage, SubMsg, SubMsgResult, Uint128,
 };
-use cw20::Cw20ReceiveMsg;
+use osmosis_std::types::osmosis::poolmanager::v1beta1::{
+    MsgSwapExactAmountInResponse, PoolmanagerQuerier, SwapAmountInRoute,
+};
+use prost::Message;
 use std::str::FromStr;
 
 pub const DEFAULT_SLIPPAGE: &str = "0.005";
 
-/// Constant product swap (x * y = k). Returns (return_amount, spread, commission).
-pub fn compute_swap(
-    offer_pool: Uint128,
-    ask_pool: Uint128,
-    offer_amount: Uint128,
-    commission_rate: Decimal,
-) -> StdResult<(Uint128, Uint128, Uint128)> {
-    let offer_pool: Uint256 = offer_pool.into();
-    let ask_pool: Uint256 = ask_pool.into();
-    let offer_amount: Uint256 = offer_amount.into();
-    let commission_rate = decimal2decimal256(commission_rate)?;
+/// Protobuf type URL for the poolmanager swap response.
+const SWAP_EXACT_AMOUNT_IN_RESPONSE_TYPE: &str =
+    "/osmosis.poolmanager.v1beta1.MsgSwapExactAmountInResponse";
 
-    let cp: Uint256 = offer_pool.checked_mul(ask_pool).map_err(|e| {
-        StdError::generic_err(format!("Overflow calculating constant product: {}", e))
-    })?;
-
-    let return_amount: Uint256 = (Decimal256::from_ratio(ask_pool, 1u8)
-        - Decimal256::from_ratio(
-            cp,
-            offer_pool.checked_add(offer_amount).map_err(|e| {
-                StdError::generic_err(format!("Overflow in pool calculation: {}", e))
-            })?,
-        ))
-    .numerator()
-        / Decimal256::one().denominator();
-
-    let price_ratio = Decimal256::from_ratio(ask_pool, offer_pool);
-    let ideal_return = offer_amount
-        .checked_mul(price_ratio.numerator())
-        .map_err(|e| StdError::generic_err(format!("Overflow calculating spread: {}", e)))?
-        .checked_div(price_ratio.denominator())
-        .map_err(|e| StdError::generic_err(format!("Division error calculating spread: {}", e)))?;
-
-    let spread_amount: Uint256 = if ideal_return > return_amount {
-        ideal_return - return_amount
-    } else {
-        Uint256::zero()
-    };
-
-    let commission_amount: Uint256 = return_amount
-        .checked_mul(commission_rate.numerator())
-        .map_err(|e| StdError::generic_err(format!("Overflow calculating commission: {}", e)))?
-        .checked_div(commission_rate.denominator())
-        .map_err(|e| {
-            StdError::generic_err(format!("Division error calculating commission: {}", e))
-        })?;
-
-    let final_return_amount: Uint256 = return_amount
-        .checked_sub(commission_amount)
-        .map_err(|e| StdError::generic_err(format!("Underflow subtracting commission: {}", e)))?;
-
-    Ok((
-        final_return_amount.try_into()?,
-        spread_amount.try_into()?,
-        commission_amount.try_into()?,
-    ))
-}
-
-/// Fixed-point scale applied to every cumulative-price increment.
-///
-/// Without scaling, `reserve_other / reserve_self` is integer-truncated to zero
-/// whenever `reserve_other < reserve_self / time_elapsed`. For asymmetric pools
-/// that produces a permanently-zero cumulative on one side and a useless TWAP
-/// downstream. Multiplying the numerator by `1_000_000` before the divide
-/// preserves 6 decimal places of precision in the accumulator — the same
-/// 1e6 fixed-point scale as `factory::usd_price::RATE_PRECISION`, so
-/// consumers can compute per-pool TWAPs without re-multiplying.
-///
-/// Any change here MUST be propagated to `RATE_PRECISION` AND to a
-/// coordinated migration that resets `price{0,1}_cumulative_last` on
-/// every deployed pool.
-pub const PRICE_ACCUMULATOR_SCALE: u128 = 1_000_000;
-
-pub fn update_price_accumulator(
-    pool_state: &mut PoolState,
-    current_time: u64,
-) -> Result<(), ContractError> {
-    let time_elapsed = current_time.saturating_sub(pool_state.block_time_last);
-    if time_elapsed > 0 && !pool_state.reserve0.is_zero() && !pool_state.reserve1.is_zero() {
-        // Lift to Uint256 for the (reserve · scale · time) multiplications so
-        // we don't have to reason about whether `reserve · 1e6` fits in u128.
-        // The final increment narrows back to Uint128 — at any plausible
-        // reserve / time-elapsed combination the per-step increment is well
-        // below u128::MAX, and the saturating_add on the accumulator catches
-        // the (astronomically unlikely) long-tail case.
-        let scale = Uint256::from(PRICE_ACCUMULATOR_SCALE);
-        let elapsed = Uint256::from(time_elapsed as u128);
-        let r0 = Uint256::from(pool_state.reserve0);
-        let r1 = Uint256::from(pool_state.reserve1);
-        let price0_increment_u256 = r1
-            .checked_mul(scale)
-            .map_err(ContractError::from)?
-            .checked_mul(elapsed)
-            .map_err(ContractError::from)?
-            .checked_div(r0)
-            .map_err(|_| ContractError::DivideByZero)?;
-        let price1_increment_u256 = r0
-            .checked_mul(scale)
-            .map_err(ContractError::from)?
-            .checked_mul(elapsed)
-            .map_err(ContractError::from)?
-            .checked_div(r1)
-            .map_err(|_| ContractError::DivideByZero)?;
-        let price0_increment: Uint128 = price0_increment_u256.try_into().unwrap_or(Uint128::MAX);
-        let price1_increment: Uint128 = price1_increment_u256.try_into().unwrap_or(Uint128::MAX);
-        pool_state.price0_cumulative_last = pool_state
-            .price0_cumulative_last
-            .saturating_add(price0_increment);
-        pool_state.price1_cumulative_last = pool_state
-            .price1_cumulative_last
-            .saturating_add(price1_increment);
-        pool_state.block_time_last = current_time;
+/// Extract the ask (`token_out`) denom string from a `TokenType`.
+fn denom_of(t: &crate::asset::TokenType) -> String {
+    use crate::asset::TokenType;
+    match t {
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom.clone(),
     }
-
-    Ok(())
 }
 
-/// Reverse swap: computes the required offer amount for a desired ask amount.
-pub fn compute_offer_amount(
-    offer_pool: Uint128,
-    ask_pool: Uint128,
-    ask_amount: Uint128,
-    commission_rate: Decimal,
-) -> StdResult<(Uint128, Uint128, Uint128)> {
-    let offer_pool: Uint256 = offer_pool.into();
-    let ask_pool: Uint256 = ask_pool.into();
-    let ask_amount: Uint256 = ask_amount.into();
-    let commission_rate = decimal2decimal256(commission_rate)?;
-
-    let one_minus_commission = Decimal256::one()
-        .checked_sub(commission_rate)
-        .map_err(|_| StdError::generic_err("Commission rate >= 100%"))?;
-    let ask_amount_before_commission =
-        (Decimal256::from_ratio(ask_amount, 1u8) / one_minus_commission).numerator()
-            / Decimal256::one().denominator();
-
-    let cp: Uint256 = offer_pool
-        .checked_mul(ask_pool)
-        .map_err(|_| StdError::generic_err("Constant product overflow"))?;
-    let new_ask_pool = ask_pool
-        .checked_sub(ask_amount_before_commission)
-        .map_err(|_| StdError::generic_err("Insufficient liquidity in pool"))?;
-
-    let new_offer_pool = cp
-        .checked_div(new_ask_pool)
-        .map_err(|_| StdError::generic_err("Division error"))?;
-
-    let offer_amount = new_offer_pool
-        .checked_sub(offer_pool)
-        .map_err(|_| StdError::generic_err("Invalid offer amount calculation"))?;
-
-    let expected_offer_amount = ask_amount_before_commission
-        .checked_mul(offer_pool)
-        .map_err(|_| StdError::generic_err("Expected offer amount overflow"))?
-        .checked_div(ask_pool)
-        .map_err(|_| StdError::generic_err("Expected offer amount division error"))?;
-    let spread_amount: Uint256 = offer_amount.saturating_sub(expected_offer_amount);
-
-    let commission_amount: Uint256 = ask_amount_before_commission
-        .checked_mul(commission_rate.numerator())
-        .map_err(|_| StdError::generic_err("Commission calculation overflow"))?
-        .checked_div(commission_rate.denominator())
-        .map_err(|_| StdError::generic_err("Commission calculation division error"))?;
-
-    Ok((
-        offer_amount.try_into()?,
-        spread_amount.try_into()?,
-        commission_amount.try_into()?,
-    ))
-}
-
-pub fn assert_max_spread(
+/// Derive the `token_out_min_amount` slippage floor for a native-pool
+/// swap, taking the MORE PROTECTIVE (max) of two independently-derived
+/// floors:
+///
+/// 1. an **on-chain estimate floor** — `estimated_out * (1 -
+///    effective_max_spread)`, where `estimated_out` is the expected output
+///    at CURRENT pool state (queried at the call site via
+///    [`estimate_swap_out`] — see [`compute_token_out_min`]); and
+/// 2. a **belief-price floor** — `expected_ask * (1 - effective_max_spread)`
+///    where `expected_ask = offer_amount / belief_price` (the same
+///    convention the retired internal `assert_max_spread` used), only when
+///    the caller supplies a `belief_price`.
+///
+/// The result is `max(estimate_floor, belief_floor)`.
+///
+/// IMPORTANT — the estimate floor is NOT sandwich/front-running
+/// protection. `estimated_out` is queried at CURRENT pool state, i.e.
+/// AFTER any front-run in an earlier tx of the same block has already
+/// moved the price, so `estimate_floor = estimated_out * (1 - spread)`
+/// merely bounds the swap's own price impact relative to that
+/// (already-manipulated) state. It guarantees the swap never dispatches
+/// with `token_out_min_amount = 0` against a functioning pool, but a
+/// caller who wants real protection against a prior-tx sandwich MUST
+/// supply a `belief_price` derived from an off-chain quote (the
+/// belief_floor), or route through the multi-hop router, which enforces
+/// an end-to-end `minimum_receive`. The post-threshold commit path
+/// (`commit::post_threshold`) requires `belief_price` for exactly this
+/// reason (H-3).
+///
+/// The function stays PURE and testable: the on-chain estimate is passed
+/// in as `estimated_out` (the query is done by the caller, which holds the
+/// querier + pool_id + denoms). A zero `estimated_out` (e.g. the estimate
+/// query was unavailable) simply contributes a zero estimate floor, so
+/// `max(0, belief_floor) == belief_floor` — the belief floor still binds.
+///
+/// The existing hard-cap validation (5% / 10%-with-`allow_high`) and the
+/// zero-belief-price rejection are preserved: a `max_spread` above the cap
+/// still errors, and a `belief_price` of exactly zero is rejected.
+pub fn derive_token_out_min(
+    offer_amount: Uint128,
+    estimated_out: Uint128,
     belief_price: Option<Decimal>,
     max_spread: Option<Decimal>,
     allow_high_max_spread: Option<bool>,
-    offer_amount: Uint128,
-    return_amount: Uint128,
-    spread_amount: Uint128,
-) -> Result<(), ContractError> {
+) -> Result<Uint128, ContractError> {
     let default_spread = Decimal::from_str(DEFAULT_SLIPPAGE)?;
-
     let max_spread = max_spread.unwrap_or(default_spread);
     let hard_cap = if allow_high_max_spread.unwrap_or(false) {
         Decimal::percent(10)
@@ -229,178 +116,245 @@ pub fn assert_max_spread(
         return Err(ContractError::InvalidBeliefPrice {});
     }
 
-    if let Some(belief_price) = belief_price {
-        let inverse = belief_price.inv().ok_or_else(|| {
-            ContractError::Std(StdError::generic_err("Invalid belief price: zero"))
-        })?;
+    // `effective_max_spread` is clamped to the hard cap. After the check
+    // above this equals `max_spread`, but computing the min explicitly
+    // keeps the floor safe even if the cap logic is ever relaxed to warn
+    // instead of reject.
+    let effective_max_spread = max_spread.min(hard_cap);
+    let keep = Decimal::one()
+        .checked_sub(effective_max_spread)
+        .unwrap_or_default();
 
-        let expected_return = offer_amount
-            .checked_mul(inverse.numerator())
-            .map_err(|_| ContractError::Std(StdError::generic_err("Expected return overflow")))?
-            .checked_div(inverse.denominator())
-            .map_err(|_| {
-                ContractError::Std(StdError::generic_err("Expected return division error"))
+    // (1) On-chain estimate floor: `estimated_out * (1 - spread)`.
+    let estimate_floor = estimated_out.multiply_ratio(keep.numerator(), keep.denominator());
+
+    // (2) Belief-price floor: `(offer / belief_price) * (1 - spread)`.
+    let belief_floor = match belief_price {
+        Some(bp) => {
+            // expected_ask = offer_amount / belief_price = offer_amount * inv(bp)
+            let inverse = bp.inv().ok_or_else(|| {
+                ContractError::Std(StdError::generic_err("Invalid belief price: zero"))
             })?;
-        let spread_amount = expected_return
-            .checked_sub(return_amount)
-            .unwrap_or_else(|_| Uint128::zero());
+            let expected_ask = offer_amount
+                .checked_mul(inverse.numerator())?
+                .checked_div(inverse.denominator())
+                .map_err(|_| ContractError::DivideByZero)?;
+            expected_ask.multiply_ratio(keep.numerator(), keep.denominator())
+        }
+        None => Uint128::zero(),
+    };
 
-        if expected_return.is_zero() {
-            return Err(ContractError::MaxSpreadAssertion {});
-        }
+    // Take the MORE PROTECTIVE of the two floors.
+    Ok(estimate_floor.max(belief_floor))
+}
 
-        if return_amount < expected_return
-            && Decimal::from_ratio(spread_amount, expected_return) > max_spread
-        {
-            return Err(ContractError::MaxSpreadAssertion {});
-        }
-    } else {
-        let total_amount = return_amount
-            .checked_add(spread_amount)
-            .map_err(|_| ContractError::Std(StdError::generic_err("Spread total overflow")))?;
-        if total_amount.is_zero() {
-            return Err(ContractError::MaxSpreadAssertion {});
-        }
-        if Decimal::from_ratio(spread_amount, total_amount) > max_spread {
-            return Err(ContractError::MaxSpreadAssertion {});
-        }
+/// Query the poolmanager for the expected output of swapping `token_in`
+/// for `ask_denom` through `pool_id` at CURRENT pool state.
+///
+/// FAIL-SOFT: any query error (the estimate endpoint being unavailable on
+/// a given chain build, a transient failure, etc.) resolves to `zero`,
+/// which [`derive_token_out_min`] treats as "no estimate floor" so the
+/// belief-price floor and the hard-cap validation still bind. On a
+/// functioning Osmosis pool the estimate always resolves, so the estimate
+/// floor is the load-bearing protection whenever the caller passes no
+/// `belief_price`.
+pub fn estimate_swap_out<C: CustomQuery>(
+    querier: &QuerierWrapper<C>,
+    pool_id: u64,
+    token_in: &Coin,
+    ask_denom: &str,
+) -> Uint128 {
+    // Osmosis coin string is `{amount}{denom}` (e.g. "100000000ubluechip").
+    let token_in_str = format!("{}{}", token_in.amount, token_in.denom);
+    let routes = vec![SwapAmountInRoute {
+        pool_id,
+        token_out_denom: ask_denom.to_string(),
+    }];
+    // `sender` is DEPRECATED on the request and unused by the estimate;
+    // pass empty.
+    match PoolmanagerQuerier::new(querier)
+        .estimate_swap_exact_amount_in(String::new(), pool_id, token_in_str, routes)
+    {
+        Ok(resp) => Uint128::from_str(&resp.token_out_amount).unwrap_or_default(),
+        Err(_) => Uint128::zero(),
     }
+}
 
-    Ok(())
+/// Shared orchestration for BOTH swap sites (SimpleSwap and the
+/// post-threshold commit swap): query the on-chain estimate, then derive
+/// the `max(estimate_floor, belief_floor)` slippage floor. Keeps the two
+/// call sites byte-identical so the protection can't drift between them.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_token_out_min<C: CustomQuery>(
+    querier: &QuerierWrapper<C>,
+    pool_id: u64,
+    token_in: &Coin,
+    ask_denom: &str,
+    belief_price: Option<Decimal>,
+    max_spread: Option<Decimal>,
+    allow_high_max_spread: Option<bool>,
+) -> Result<Uint128, ContractError> {
+    let estimated_out = estimate_swap_out(querier, pool_id, token_in, ask_denom);
+    let token_out_min = derive_token_out_min(
+        token_in.amount,
+        estimated_out,
+        belief_price,
+        max_spread,
+        allow_high_max_spread,
+    )?;
+    // CARRY-OVER 2 — reject a zero slippage floor. `derive_token_out_min`
+    // stays fail-soft (a failed estimate query contributes a zero estimate
+    // floor, and a caller may legitimately pass no `belief_price`), but the
+    // COMBINATION of `estimated_out == 0` AND no `belief_price` collapses the
+    // floor to zero, which would dispatch `MsgSwapExactAmountIn` with
+    // `token_out_min_amount = 0` — an unprotected swap with no
+    // sandwich/slippage guard. Both swap sites route through this helper, so
+    // rejecting here closes that residual at a single choke point. On a
+    // functioning Osmosis pool the estimate always resolves non-zero, so this
+    // only fires when the estimate is genuinely unavailable and the caller
+    // supplied no belief price.
+    if token_out_min.is_zero() {
+        return Err(ContractError::MaxSpreadAssertion {});
+    }
+    Ok(token_out_min)
+}
+
+/// Outcome of the FIX-G relative liquidity circuit breaker.
+///
+/// H-1: the breaker must be able to LATCH the pool paused
+/// (`POOL_PAUSED` + `POOL_PAUSED_AUTO`) and have that write survive. A
+/// handler that returns `Err` has ALL of its storage writes rolled back by
+/// the CosmWasm VM, so the old "save the pause flags, then `return Err`"
+/// shape never actually paused the pool on-chain — the save was reverted by
+/// the very error it returned (it only appeared to work under the
+/// non-reverting unit-test mock storage). The breaker therefore reports its
+/// outcome as a value and lets the caller decide the response: on `Tripped`
+/// the caller returns `Ok` (refunding any attached funds) so the latched
+/// pause persists; on `Proceed` it continues with the swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakerOutcome {
+    /// Live liquidity is healthy (or no snapshot / query unavailable);
+    /// continue dispatching the swap.
+    Proceed,
+    /// A side fell below the floor. The breaker has already persisted the
+    /// latched pause; the caller MUST return `Ok` (refunding attached
+    /// offer funds) so the pause is not rolled back, and MUST NOT dispatch
+    /// the swap.
+    Tripped,
+}
+
+/// FIX G — native relative circuit breaker.
+///
+/// Queries the LIVE per-side liquidity of the native GAMM pool (`pool_id`)
+/// via the poolmanager `total_pool_liquidity` query and compares each side
+/// against the amount seeded at threshold-crossing ([`SEED_LIQUIDITY`]). If
+/// EITHER side has fallen below [`BREAKER_FLOOR_PERCENT`]% of its seeded
+/// amount, the pool is auto-paused (`POOL_PAUSED` + `POOL_PAUSED_AUTO` set
+/// to `true`) and [`BreakerOutcome::Tripped`] is returned. Manual admin
+/// `Unpause` clears both flags. Replaces the retired absolute
+/// `MINIMUM_LIQUIDITY` guard, which is meaningless on a native pool.
+///
+/// Called at the START of swap routing on BOTH swap sites (SimpleSwap here,
+/// and the post-threshold commit path), before dispatching the swap.
+///
+/// H-1: on a trip the pause writes are persisted here and the caller
+/// returns `Ok` so the latch survives (an `Err` from the caller would roll
+/// the pause back). The caller is responsible for refunding any attached
+/// offer funds in that `Ok` response, since no revert-based auto-refund
+/// occurs.
+///
+/// Two fail-soft short-circuits (return [`BreakerOutcome::Proceed`], breaker
+/// not applied):
+/// - `SEED_LIQUIDITY` unset — a pre-breaker or pre-threshold pool has no
+///   snapshot to compare against.
+/// - the `total_pool_liquidity` query errors — a transient/unavailable query
+///   must not brick every swap; the per-swap `token_out_min_amount` floor
+///   still protects the individual trade.
+///
+/// A side missing entirely from the query response reads as zero liquidity
+/// and therefore trips the breaker — the correct, conservative behaviour if
+/// the pool has been drained of one side.
+pub fn enforce_liquidity_breaker<C: CustomQuery>(
+    storage: &mut dyn Storage,
+    querier: &QuerierWrapper<C>,
+    pool_id: u64,
+    bluechip_denom: &str,
+    creator_denom: &str,
+) -> Result<BreakerOutcome, ContractError> {
+    let (seed_osmo, seed_creator) = match SEED_LIQUIDITY.may_load(storage)? {
+        Some(seed) => seed,
+        None => return Ok(BreakerOutcome::Proceed),
+    };
+
+    let liquidity = match PoolmanagerQuerier::new(querier).total_pool_liquidity(pool_id) {
+        Ok(resp) => resp.liquidity,
+        Err(_) => return Ok(BreakerOutcome::Proceed),
+    };
+
+    // Resolve each side's current amount by denom; a side absent from the
+    // response reads as zero (drained), which trips the breaker.
+    let current_of = |denom: &str| -> Uint128 {
+        liquidity
+            .iter()
+            .find(|c| c.denom == denom)
+            .and_then(|c| Uint128::from_str(&c.amount).ok())
+            .unwrap_or_default()
+    };
+    let current_osmo = current_of(bluechip_denom);
+    let current_creator = current_of(creator_denom);
+
+    // `current < BREAKER_FLOOR_PERCENT% of seed`  ⇔
+    // `current * 100 < seed * BREAKER_FLOOR_PERCENT`.
+    // `saturating_mul` keeps the comparison well-defined for huge balances:
+    // a saturated `current * 100` is enormous, so a healthy side never trips.
+    let floor_pct = Uint128::new(BREAKER_FLOOR_PERCENT);
+    let hundred = Uint128::new(100);
+    let below_floor = |current: Uint128, seed: Uint128| -> bool {
+        current.saturating_mul(hundred) < seed.saturating_mul(floor_pct)
+    };
+
+    if below_floor(current_osmo, seed_osmo) || below_floor(current_creator, seed_creator) {
+        // Latch the pause. The caller returns `Ok` so this write survives.
+        POOL_PAUSED.save(storage, &true)?;
+        POOL_PAUSED_AUTO.save(storage, &true)?;
+        return Ok(BreakerOutcome::Tripped);
+    }
+    Ok(BreakerOutcome::Proceed)
+}
+
+/// Build the `Ok` response a swap site returns when the breaker latches the
+/// pool paused (H-1): refund the attached offer coin to the sender (there is
+/// no revert-based auto-refund on an `Ok` path) and emit the auto-pause
+/// attributes. Kept here so both swap sites produce an identical response.
+pub fn breaker_tripped_refund_response(
+    refund_to: &Addr,
+    refund_denom: &str,
+    refund_amount: Uint128,
+    pool_id: u64,
+    action: &str,
+) -> Response {
+    let mut resp = Response::new()
+        .add_attribute("action", action.to_string())
+        .add_attribute("pool_id", pool_id.to_string())
+        .add_attribute("auto_paused", "true")
+        .add_attribute("refund_to", refund_to.to_string())
+        .add_attribute("refund_denom", refund_denom.to_string())
+        .add_attribute("refund_amount", refund_amount.to_string());
+    if !refund_amount.is_zero() {
+        resp = resp.add_message(BankMsg::Send {
+            to_address: refund_to.to_string(),
+            amount: vec![Coin {
+                denom: refund_denom.to_string(),
+                amount: refund_amount,
+            }],
+        });
+    }
+    resp
 }
 
 // ---------------------------------------------------------------------------
-// Swap orchestration (CW20 hook + reentrancy/rate-limit wrapper + handler)
+// Swap orchestration (reentrancy/rate-limit wrapper + native-pool dispatch)
 // ---------------------------------------------------------------------------
-
-pub fn execute_swap_cw20(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    cw20_msg: Cw20ReceiveMsg,
-) -> Result<Response, ContractError> {
-    // Gate: IS_THRESHOLD_HIT is set at threshold-crossing time, so
-    // pre-threshold swaps are rejected here.
-    if !IS_THRESHOLD_HIT.load(deps.storage)? {
-        return Err(ContractError::ShortOfThreshold {});
-    }
-    if cw20_msg.amount.is_zero() {
-        return Err(ContractError::ZeroAmount {});
-    }
-    let contract_addr = info.sender.clone();
-    match from_json(&cw20_msg.msg) {
-        Ok(Cw20HookMsg::Swap {
-            belief_price,
-            max_spread,
-            allow_high_max_spread,
-            to,
-            transaction_deadline,
-        }) => {
-            // Enforce the transaction deadline BEFORE the cross-contract
-            // balance query so an expired Receive-hook tx fails fast
-            // instead of paying for a `query_token_balance_strict`
-            // round-trip before reverting. `simple_swap` re-checks the
-            // deadline as defense-in-depth so any future entry point
-            // that bypasses this gate still rejects.
-            enforce_transaction_deadline(env.block.time, transaction_deadline)?;
-
-            // Single-shot load of the four core state items. The same
-            // `PoolCtx` is handed to `simple_swap` below so the swap
-            // handler doesn't re-read POOL_INFO / POOL_STATE /
-            // POOL_FEE_STATE — nothing writes between here and there,
-            // so the values are guaranteed identical.
-            let ctx = PoolCtx::load(deps.storage)?;
-            // Authorisation + offer-side lookup in one pass, so the
-            // balance-verify step below can use the same index without
-            // re-scanning the pair.
-            let offer_index = ctx
-                .info
-                .pool_info
-                .asset_infos
-                .iter()
-                .position(|t| {
-                    matches!(t, TokenType::CreatorToken { contract_addr } if *contract_addr == info.sender)
-                })
-                .ok_or(ContractError::Unauthorized {})?;
-            // confirm the CW20 actually transferred the
-            // claimed `cw20_msg.amount` before letting `simple_swap`
-            // credit the offer side. The pool's CW20 is factory-minted
-            // and trusted today, but a hostile CW20 could dispatch
-            // Receive hooks with fabricated amounts and drain the
-            // opposite reserve at AMM rates, so we verify as
-            // defense-in-depth. We
-            // verify by comparing the pool's actual CW20 balance to the
-            // pre-Receive invariant
-            // balance == reserve_X + fee_reserve_X + creator_pot.X
-            // plus the claimed `cw20_msg.amount`. A SHORTFALL means
-            // either no real transfer, a fee-on-transfer skim, or a
-            // negative rebase — all attacks/edges we want to reject.
-            // We use `<` (not `!=`) so unsolicited donations to the pool
-            // (`balance > expected`) don't block legitimate swaps; that
-            // surplus is benign orphan liquidity and doesn't enable an
-            // exploit beyond letting the attacker swap their own
-            // donation at market rate.
-            //
-            // Creator pools also benefit defensively: although their
-            // CW20 is auto-minted by the pool itself (no malicious
-            // admin), folding the check in at the shared entry point
-            // closes any future regression vector — same posture as
-            // creator-pool's deposit/add paths already routing through
-            // `*_with_verify`.
-            let creator_pot = CREATOR_FEE_POT.may_load(deps.storage)?.unwrap_or_default();
-            let (reserve_offer, fee_reserve_offer, pot_offer) = if offer_index == 0 {
-                (
-                    ctx.state.reserve0,
-                    ctx.fees.fee_reserve_0,
-                    creator_pot.amount_0,
-                )
-            } else {
-                (
-                    ctx.state.reserve1,
-                    ctx.fees.fee_reserve_1,
-                    creator_pot.amount_1,
-                )
-            };
-            let expected_min = reserve_offer
-                .checked_add(fee_reserve_offer)?
-                .checked_add(pot_offer)?
-                .checked_add(cw20_msg.amount)?;
-            let actual_balance = pool_factory_interfaces::asset::query_token_balance_strict(
-                &deps.querier,
-                &info.sender,
-                &env.contract.address,
-            )?;
-            if actual_balance < expected_min {
-                return Err(ContractError::Cw20SwapBalanceMismatch {
-                    cw20: info.sender.to_string(),
-                    expected_min,
-                    actual: actual_balance,
-                    claimed_amount: cw20_msg.amount,
-                });
-            }
-
-            let to_addr = to.map(|a| deps.api.addr_validate(&a)).transpose()?;
-            let validated_sender = deps.api.addr_validate(&cw20_msg.sender)?;
-            simple_swap(
-                deps,
-                env,
-                info,
-                validated_sender,
-                TokenInfo {
-                    info: TokenType::CreatorToken { contract_addr },
-                    amount: cw20_msg.amount,
-                },
-                belief_price,
-                max_spread,
-                allow_high_max_spread,
-                to_addr,
-                transaction_deadline,
-                Some(ctx),
-            )
-        }
-        Err(err) => Err(ContractError::Std(err)),
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 pub fn simple_swap(
@@ -418,29 +372,10 @@ pub fn simple_swap(
 ) -> Result<Response, ContractError> {
     enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
-    // Run under the shared `with_reentrancy_guard` helper
-    // (pool_core::generic), which owns the load → check → save(true) →
-    // run → save(false) pattern and clears the lock unconditionally on
-    // both success and error paths so mock-test storage doesn't leak a
-    // stuck lock across test cases.
     with_reentrancy_guard(deps, move |mut deps| {
-        // defense-in-depth threshold gate. The current entry points
-        // already gate on IS_THRESHOLD_HIT (creator-pool dispatcher via
-        // query_check_commit, CW20 hook at the top of execute_swap_cw20),
-        // so this check is idempotent against existing call sites. The
-        // point is to close the future-regression vector where a new
-        // entry point (router-friendly variant, batch swap, etc.) might
-        // forget the gate. Checked before the PoolCtx load so a
-        // pre-threshold call rejects without paying for the four-item
-        // state read.
         if !IS_THRESHOLD_HIT.load(deps.storage)? {
             return Err(ContractError::ShortOfThreshold {});
         }
-        // `preloaded_ctx` lets the CW20 Receive path hand over the
-        // PoolCtx it already loaded for balance verification instead of
-        // re-reading the same four items. Nothing writes between that
-        // load and this point (the reentrancy guard only touches
-        // REENTRANCY_LOCK), so a preloaded ctx is always current.
         let ctx = match preloaded_ctx {
             Some(ctx) => ctx,
             None => PoolCtx::load(deps.storage)?,
@@ -460,47 +395,8 @@ pub fn simple_swap(
     })
 }
 
-/// Loads the pool context and runs the swap. Kept as the plain-args
-/// entry so callers (and tests) that don't already hold a `PoolCtx` get
-/// the same behavior as `execute_simple_swap_with_ctx` with a fresh
-/// load. Gates on IS_THRESHOLD_HIT before loading state so pre-threshold
-/// calls reject cheaply.
-#[allow(clippy::too_many_arguments)]
-pub fn execute_simple_swap(
-    deps: &mut DepsMut,
-    env: Env,
-    info: MessageInfo,
-    sender: Addr,
-    offer_asset: TokenInfo,
-    belief_price: Option<Decimal>,
-    max_spread: Option<Decimal>,
-    allow_high_max_spread: Option<bool>,
-    to: Option<Addr>,
-) -> Result<Response, ContractError> {
-    if !IS_THRESHOLD_HIT.load(deps.storage)? {
-        return Err(ContractError::ShortOfThreshold {});
-    }
-    let ctx = PoolCtx::load(deps.storage)?;
-    execute_simple_swap_with_ctx(
-        deps,
-        env,
-        info,
-        sender,
-        offer_asset,
-        belief_price,
-        max_spread,
-        allow_high_max_spread,
-        to,
-        ctx,
-    )
-}
-
-/// The swap handler body. Takes the four core state items as an
-/// already-loaded `PoolCtx` so hot paths that loaded them earlier in the
-/// same tx (the CW20 Receive hook's balance-verify step) don't pay for a
-/// second read. Callers are responsible for the IS_THRESHOLD_HIT gate —
-/// both public wrappers (`simple_swap`, `execute_simple_swap`) enforce it
-/// before delegating here.
+/// Builds the native-pool swap SubMsg. Callers enforce the
+/// IS_THRESHOLD_HIT gate before delegating here.
 #[allow(clippy::too_many_arguments)]
 fn execute_simple_swap_with_ctx(
     deps: &mut DepsMut,
@@ -516,21 +412,24 @@ fn execute_simple_swap_with_ctx(
 ) -> Result<Response, ContractError> {
     let PoolCtx {
         info: pool_info,
-        state: mut pool_state,
-        fees: mut pool_fee_state,
+        state: _pool_state,
         specs: pool_specs,
     } = ctx;
 
-    // The rate-limit check shares PoolCtx's POOL_SPECS load rather than
-    // issuing a redundant POOL_SPECS.load of its own. USER_LAST_COMMIT
-    // writes here are reverted by the chain if the swap fails downstream.
     check_rate_limit(deps, &env, &pool_specs, &sender)?;
 
-    let (offer_index, offer_pool, ask_pool) =
+    // Resolve which side is being offered and the ask denom.
+    let (offer_denom, ask_denom) =
         if offer_asset.info.equal(&pool_info.pool_info.asset_infos[0]) {
-            (0usize, pool_state.reserve0, pool_state.reserve1)
+            (
+                denom_of(&pool_info.pool_info.asset_infos[0]),
+                denom_of(&pool_info.pool_info.asset_infos[1]),
+            )
         } else if offer_asset.info.equal(&pool_info.pool_info.asset_infos[1]) {
-            (1usize, pool_state.reserve1, pool_state.reserve0)
+            (
+                denom_of(&pool_info.pool_info.asset_infos[1]),
+                denom_of(&pool_info.pool_info.asset_infos[0]),
+            )
         } else {
             return Err(ContractError::AssetMismatch {});
         };
@@ -538,292 +437,193 @@ fn execute_simple_swap_with_ctx(
     if POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::PoolPausedLowLiquidity {});
     }
-    // Post-threshold-crossing cooldown. Set inside the threshold-crossing
-    // commit handler to (crossing_block + POST_THRESHOLD_COOLDOWN_BLOCKS + 1),
-    // so the crossing block plus the next N blocks are gated. Eliminates
-    // the atomic same-block sandwich on the freshly-seeded pool. Unset
-    // before the threshold crossing, so the may_load default of 0 makes
-    // this a no-op until then.
-    let cooldown_until = POST_THRESHOLD_COOLDOWN_UNTIL_BLOCK
+
+    // The native pool id must be set (it is, once IS_THRESHOLD_HIT is true
+    // and the create-pool reply landed).
+    let pool_id = POOL_ID
         .may_load(deps.storage)?
-        .unwrap_or(0);
-    if env.block.height < cooldown_until {
-        return Err(ContractError::PostThresholdCooldownActive {
-            until_block: cooldown_until,
-        });
-    }
-    // Per-tx swap cap ramp. After the cooldown ends, each swap is capped
-    // at a fraction of the offer-side reserve, ramping from 0.5% up to
-    // "unrestricted" over POST_THRESHOLD_SWAP_RAMP_BLOCKS blocks. Bounds
-    // per-tx MEV on the freshly-seeded pool while still allowing
-    // legitimate first traders to participate. Returns None (skips the
-    // check) for pre-threshold pools (cooldown_until == 0) and for
-    // pools past the ramp window.
-    if let Some(cap) =
-        crate::state::post_threshold_swap_cap(cooldown_until, env.block.height, offer_pool)
-    {
-        if offer_asset.amount > cap {
-            return Err(ContractError::PostThresholdSwapCapExceeded {
-                offer: offer_asset.amount,
-                cap,
-            });
+        .ok_or(ContractError::ShortOfThreshold {})?;
+
+    // FIX G — trip the native relative circuit breaker BEFORE dispatching
+    // the swap: if either side of the live pool has fallen below
+    // BREAKER_FLOOR_PERCENT% of its seeded liquidity, this auto-pauses the
+    // pool and rejects. Shares the exact helper with the post-threshold
+    // commit swap path so the protection can't drift between the two sites.
+    // The breaker keys on the CANONICAL pair sides ([0] = bluechip Native,
+    // [1] = creator) so it matches `SEED_LIQUIDITY = (seed_osmo, seed_creator)`
+    // regardless of the swap DIRECTION (`offer_denom`/`ask_denom` flip on a
+    // sell).
+    //
+    // H-1: on a trip the breaker has already latched the pause; we return
+    // `Ok` (refunding the attached offer coin) so the pause persists — an
+    // `Err` here would roll the pause write back.
+    match enforce_liquidity_breaker(
+        deps.storage,
+        &deps.querier,
+        pool_id,
+        &denom_of(&pool_info.pool_info.asset_infos[0]),
+        &denom_of(&pool_info.pool_info.asset_infos[1]),
+    )? {
+        BreakerOutcome::Proceed => {}
+        BreakerOutcome::Tripped => {
+            return Ok(breaker_tripped_refund_response(
+                &sender,
+                &offer_denom,
+                offer_asset.amount,
+                pool_id,
+                "swap_auto_paused_low_liquidity",
+            ));
         }
     }
-    // Drain guard: reject swaps when either side is below MINIMUM_LIQUIDITY.
-    // Don't try to persist POOL_PAUSED here — returning Err would revert the
-    // save, so it's dead state. The reserve check alone is sufficient to
-    // block every swap path; admins unlock the pool by restoring reserves or
-    // by calling the factory's explicit UnpausePool route if POOL_PAUSED was
-    // ever set by a successful admin action.
-    if pool_state.reserve0 < MINIMUM_LIQUIDITY || pool_state.reserve1 < MINIMUM_LIQUIDITY {
-        return Err(ContractError::InsufficientReserves {});
-    }
 
-    let (return_amt, spread_amt, commission_amt) =
-        compute_swap(offer_pool, ask_pool, offer_asset.amount, pool_specs.lp_fee)?;
+    let token_in = Coin {
+        denom: offer_denom.clone(),
+        amount: offer_asset.amount,
+    };
 
-    // Reject dust swaps where the constant-product math floored
-    // return_amt to zero. Without this, the trader's offer would be
-    // absorbed into the pool while they receive nothing — effectively
-    // donating to LPs. Better to surface the "offer too small" error
-    // and let the caller bump their size or abandon.
-    if return_amt.is_zero() {
-        return Err(ContractError::ZeroAmount {});
-    }
-
-    assert_max_spread(
+    // Slippage floor = max(on-chain-estimate floor, belief-price floor).
+    // The estimate is queried against the live native pool at `pool_id`;
+    // both floors share the same shared helper as the post-threshold
+    // commit swap so protection can't drift between the two sites.
+    let token_out_min_amount = compute_token_out_min(
+        &deps.querier,
+        pool_id,
+        &token_in,
+        &ask_denom,
         belief_price,
         max_spread,
         allow_high_max_spread,
-        offer_asset.amount,
-        return_amt.checked_add(commission_amt)?,
-        spread_amt,
     )?;
+    let pool_addr = pool_info.pool_info.contract_addr.clone();
+    let receiver = to.unwrap_or_else(|| sender.clone());
 
-    let offer_pool_post = offer_pool.checked_add(offer_asset.amount)?;
-    let ask_pool_post = ask_pool.checked_sub(return_amt.checked_add(commission_amt)?)?;
+    let payload = SwapForwardPayload {
+        receiver: receiver.clone(),
+        token_out_denom: ask_denom.clone(),
+        sender: sender.clone(),
+        offer_amount: offer_asset.amount,
+        offer_denom: offer_denom.clone(),
+    };
 
-    if ask_pool_post < MINIMUM_LIQUIDITY {
-        return Err(ContractError::InsufficientReserves {});
-    }
+    let swap_msg = swap_exact_amount_in_msg(
+        &pool_addr,
+        pool_id,
+        &token_in,
+        &ask_denom,
+        token_out_min_amount,
+    );
+    let submsg = SubMsg::reply_on_success(swap_msg, REPLY_ID_SWAP_FORWARD)
+        .with_payload(to_json_binary(&payload)?);
 
-    // TWAP: accumulate price using OLD reserves before updating
-    update_price_accumulator(&mut pool_state, env.block.time.seconds())?;
-
-    if offer_index == 0 {
-        pool_state.reserve0 = offer_pool_post;
-        pool_state.reserve1 = ask_pool_post;
-    } else {
-        pool_state.reserve0 = ask_pool_post;
-        pool_state.reserve1 = offer_pool_post;
-    }
-
-    update_pool_fee_growth(
-        &mut pool_fee_state,
-        &pool_state,
-        offer_index,
-        commission_amt,
-    )?;
-    POOL_FEE_STATE.save(deps.storage, &pool_fee_state)?;
-    POOL_STATE.save(deps.storage, &pool_state)?;
-
-    // Update analytics counters
+    // Bump swap analytics optimistically (offer-side volume known now;
+    // ask-side volume is finalized in the reply). If the swap SubMsg
+    // fails, the whole tx reverts and this write is rolled back.
     let mut analytics = POOL_ANALYTICS.may_load(deps.storage)?.unwrap_or_default();
     analytics.total_swap_count += 1;
-    if offer_index == 0 {
+    if offer_denom == denom_of(&pool_info.pool_info.asset_infos[0]) {
         analytics.total_volume_0 = analytics.total_volume_0.saturating_add(offer_asset.amount);
-        analytics.total_volume_1 = analytics.total_volume_1.saturating_add(return_amt);
     } else {
         analytics.total_volume_1 = analytics.total_volume_1.saturating_add(offer_asset.amount);
-        analytics.total_volume_0 = analytics.total_volume_0.saturating_add(return_amt);
     }
     analytics.last_trade_block = env.block.height;
     analytics.last_trade_timestamp = env.block.time.seconds();
     POOL_ANALYTICS.save(deps.storage, &analytics)?;
 
-    let ask_asset_info = if offer_index == 0 {
-        pool_info.pool_info.asset_infos[1].clone()
-    } else {
-        pool_info.pool_info.asset_infos[0].clone()
-    };
+    Ok(Response::new().add_submessage(submsg).add_attributes(vec![
+        ("action", "swap".to_string()),
+        ("sender", sender.to_string()),
+        ("receiver", receiver.to_string()),
+        ("offer_asset", offer_denom),
+        ("ask_asset", ask_denom),
+        ("offer_amount", offer_asset.amount.to_string()),
+        ("token_out_min_amount", token_out_min_amount.to_string()),
+        ("pool_id", pool_id.to_string()),
+        ("pool_contract", pool_addr.to_string()),
+        ("block_height", env.block.height.to_string()),
+        ("block_time", env.block.time.seconds().to_string()),
+    ]))
+}
 
-    // Lazy-evaluate sender.clone() so the clone is skipped when `to` is Some.
-    let receiver = to.unwrap_or_else(|| sender.clone());
-    let msgs = if !return_amt.is_zero() {
-        vec![TokenInfo {
-            info: ask_asset_info.clone(),
-            amount: return_amt,
-        }
-        .into_msg(&deps.querier, receiver.clone())?]
-    } else {
-        vec![]
-    };
+/// Decode a `MsgSwapExactAmountInResponse` from a reply's SubMsg result,
+/// preferring the typed `msg_responses` entry and falling back to the
+/// deprecated `data` field for pre-CosmWasm-2.0 chains. Returns the
+/// `token_out_amount`.
+pub fn parse_swap_out_amount(result: &SubMsgResult) -> StdResult<Uint128> {
+    let response = result.clone().into_result().map_err(StdError::generic_err)?;
 
-    // Effective price: how much ask per unit of offer the trader received
-    let effective_price = if !offer_asset.amount.is_zero() {
-        Decimal::from_ratio(return_amt, offer_asset.amount).to_string()
+    let bytes: Vec<u8> = response
+        .msg_responses
+        .iter()
+        .find(|r| r.type_url == SWAP_EXACT_AMOUNT_IN_RESPONSE_TYPE)
+        .map(|r| r.value.to_vec())
+        .or_else(|| {
+            #[allow(deprecated)]
+            response.data.as_ref().map(|d| d.to_vec())
+        })
+        .ok_or_else(|| {
+            StdError::generic_err("swap reply: no MsgSwapExactAmountInResponse in reply")
+        })?;
+
+    let decoded = MsgSwapExactAmountInResponse::decode(bytes.as_slice()).map_err(|e| {
+        StdError::generic_err(format!("swap reply: failed to decode response: {}", e))
+    })?;
+
+    Uint128::from_str(&decoded.token_out_amount).map_err(|e| {
+        StdError::generic_err(format!("swap reply: invalid token_out_amount: {}", e))
+    })
+}
+
+/// Reply handler for `REPLY_ID_SWAP_FORWARD`: forward the swapped-out
+/// tokens to the receiver recorded in the SubMsg payload, and finalize
+/// the ask-side analytics volume.
+pub fn handle_swap_forward_reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
+    let payload: SwapForwardPayload = cosmwasm_std::from_json(&msg.payload)?;
+    let token_out_amount = parse_swap_out_amount(&msg.result)?;
+
+    // Finalize ask-side volume (the offer side was recorded at dispatch).
+    let pool_info = POOL_INFO_LOAD(deps.storage)?;
+    let mut analytics = POOL_ANALYTICS.may_load(deps.storage)?.unwrap_or_default();
+    let asset0_denom = denom_of(&pool_info.pool_info.asset_infos[0]);
+    if payload.token_out_denom == asset0_denom {
+        analytics.total_volume_0 = analytics.total_volume_0.saturating_add(token_out_amount);
+    } else {
+        analytics.total_volume_1 = analytics.total_volume_1.saturating_add(token_out_amount);
+    }
+    POOL_ANALYTICS.save(deps.storage, &analytics)?;
+
+    let mut msgs: Vec<cosmwasm_std::CosmosMsg> = vec![];
+    if !token_out_amount.is_zero() {
+        msgs.push(cosmwasm_std::CosmosMsg::Bank(BankMsg::Send {
+            to_address: payload.receiver.to_string(),
+            amount: vec![Coin {
+                denom: payload.token_out_denom.clone(),
+                amount: token_out_amount,
+            }],
+        }));
+    }
+
+    let effective_price = if !payload.offer_amount.is_zero() {
+        Decimal::from_ratio(token_out_amount, payload.offer_amount).to_string()
     } else {
         "0".to_string()
     };
 
     Ok(Response::new().add_messages(msgs).add_attributes(vec![
-        ("action", "swap".to_string()),
-        ("sender", sender.to_string()),
-        ("receiver", receiver.to_string()),
-        ("offer_asset", offer_asset.info.to_string()),
-        ("ask_asset", ask_asset_info.to_string()),
-        ("offer_amount", offer_asset.amount.to_string()),
-        ("return_amount", return_amt.to_string()),
-        ("spread_amount", spread_amt.to_string()),
-        ("commission_amount", commission_amt.to_string()),
+        ("action", "swap_forward".to_string()),
+        ("sender", payload.sender.to_string()),
+        ("receiver", payload.receiver.to_string()),
+        ("offer_amount", payload.offer_amount.to_string()),
+        ("offer_denom", payload.offer_denom),
+        ("return_amount", token_out_amount.to_string()),
+        ("token_out_denom", payload.token_out_denom),
         ("effective_price", effective_price),
-        ("reserve0_after", pool_state.reserve0.to_string()),
-        ("reserve1_after", pool_state.reserve1.to_string()),
-        (
-            "total_fee_collected_0",
-            pool_fee_state.total_fees_collected_0.to_string(),
-        ),
-        (
-            "total_fee_collected_1",
-            pool_fee_state.total_fees_collected_1.to_string(),
-        ),
-        (
-            "pool_contract",
-            pool_state.pool_contract_address.to_string(),
-        ),
-        ("block_height", env.block.height.to_string()),
         ("block_time", env.block.time.seconds().to_string()),
-        ("total_swap_count", analytics.total_swap_count.to_string()),
     ]))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compute_swap_zero_offer_returns_zero() {
-        let (ret, spread, commission) = compute_swap(
-            Uint128::new(1_000_000),
-            Uint128::new(1_000_000),
-            Uint128::zero(),
-            Decimal::permille(3),
-        )
-        .unwrap();
-        assert_eq!(ret, Uint128::zero());
-        assert_eq!(spread, Uint128::zero());
-        assert_eq!(commission, Uint128::zero());
-    }
-
-    #[test]
-    fn compute_swap_preserves_xy_k() {
-        // Balanced pools: 1M each, 0.3% fee. Offer 10k.
-        let offer_pool = Uint128::new(1_000_000);
-        let ask_pool = Uint128::new(1_000_000);
-        let offer_amount = Uint128::new(10_000);
-        let k_before = offer_pool.u128() * ask_pool.u128();
-
-        let (return_amt, _, commission) =
-            compute_swap(offer_pool, ask_pool, offer_amount, Decimal::permille(3)).unwrap();
-
-        // After swap: pool_offer = offer_pool + offer_amount, pool_ask =
-        // ask_pool - (return + commission). Commission stays in the pool, so
-        // the ask-side reserve only drops by `return_amt` (LP-visible k grows
-        // by commission). Verify the bare x*y=k invariant on the pre-fee
-        // deltas instead.
-        let post_offer = offer_pool + offer_amount;
-        let post_ask = ask_pool - (return_amt + commission);
-        assert!(
-            post_offer.u128() * post_ask.u128() >= k_before,
-            "x*y*k invariant broken"
-        );
-    }
-
-    #[test]
-    fn compute_swap_overflow_guard() {
-        // Uint128 offer_pool near the cap: multiplying offer_pool * ask_pool
-        // must use u256 arithmetic internally — verify it doesn't panic or
-        // saturate silently. Uint128::MAX/1M * Uint128::MAX/1M in u128 would
-        // overflow; pool-core must use Uint256.
-        let big = Uint128::new(u128::MAX / 2);
-        let r = compute_swap(big, big, Uint128::new(1000), Decimal::permille(3));
-        // Any result is fine as long as we don't panic.
-        assert!(r.is_ok() || r.is_err());
-    }
-
-    #[test]
-    fn compute_offer_amount_roundtrips_compute_swap() {
-        let offer_pool = Uint128::new(5_000_000);
-        let ask_pool = Uint128::new(5_000_000);
-        let offer = Uint128::new(12_345);
-        let fee = Decimal::permille(3);
-
-        let (ret, _, _) = compute_swap(offer_pool, ask_pool, offer, fee).unwrap();
-        let (inferred_offer, _, _) = compute_offer_amount(offer_pool, ask_pool, ret, fee).unwrap();
-
-        // compute_offer_amount should recover the offer within rounding
-        // (integer floor can lose 1-2 units).
-        let diff = if offer > inferred_offer {
-            offer - inferred_offer
-        } else {
-            inferred_offer - offer
-        };
-        assert!(diff <= Uint128::new(2), "roundtrip drifted by {}", diff);
-    }
-
-    #[test]
-    fn assert_max_spread_ok_within_threshold() {
-        // total = ret + spread = 1000; spread = 5 → 0.5% < 1% max
-        let r = assert_max_spread(
-            None,
-            Some(Decimal::percent(1)),
-            None,
-            Uint128::new(1_000_000),
-            Uint128::new(995),
-            Uint128::new(5),
-        );
-        assert!(r.is_ok());
-    }
-
-    #[test]
-    fn assert_max_spread_rejects_over_threshold() {
-        // total = 1000; spread = 20 → 2% > 1% max
-        let r = assert_max_spread(
-            None,
-            Some(Decimal::percent(1)),
-            None,
-            Uint128::new(1_000_000),
-            Uint128::new(980),
-            Uint128::new(20),
-        );
-        assert!(matches!(r, Err(ContractError::MaxSpreadAssertion {})));
-    }
-
-    #[test]
-    fn assert_max_spread_zero_belief_price_is_rejected() {
-        let r = assert_max_spread(
-            Some(Decimal::zero()),
-            None,
-            None,
-            Uint128::new(1),
-            Uint128::new(1),
-            Uint128::zero(),
-        );
-        assert!(matches!(r, Err(ContractError::InvalidBeliefPrice {})));
-    }
-
-    #[test]
-    fn assert_max_spread_with_belief_price_honors_inverse() {
-        // belief_price = 0.5 → inverse = 2 → expected_return = offer * 2
-        // offer = 100, expected = 200, got 190 → spread = 10 → 5% > default 0.5% → reject
-        let r = assert_max_spread(
-            Some(Decimal::from_ratio(1u128, 2u128)),
-            Some(Decimal::permille(5)),
-            None, // 0.5% tolerance
-            Uint128::new(100),
-            Uint128::new(190),
-            Uint128::zero(),
-        );
-        assert!(matches!(r, Err(ContractError::MaxSpreadAssertion {})));
-    }
+// Small load helper so the reply doesn't need the full POOL_INFO import
+// surface duplicated; keeps the module's import list minimal.
+#[allow(non_snake_case)]
+fn POOL_INFO_LOAD(storage: &dyn cosmwasm_std::Storage) -> StdResult<crate::state::PoolInfo> {
+    crate::state::POOL_INFO.load(storage)
 }

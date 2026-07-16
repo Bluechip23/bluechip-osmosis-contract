@@ -95,20 +95,6 @@ pub struct SimulationResponse {
 }
 
 #[cw_serde]
-pub struct ReverseSimulationResponse {
-    pub offer_amount: Uint128,
-    pub spread_amount: Uint128,
-    pub commission_amount: Uint128,
-}
-
-#[cw_serde]
-pub struct CumulativePricesResponse {
-    pub assets: [TokenInfo; 2],
-    pub price0_cumulative_last: Uint128,
-    pub price1_cumulative_last: Uint128,
-}
-
-#[cw_serde]
 pub struct FeeInfoResponse {
     pub fee_info: CommitFeeInfo,
 }
@@ -128,24 +114,6 @@ pub struct PoolFeeStateResponse {
     pub fee_growth_global_1: Decimal,
     pub total_fees_collected_0: Uint128,
     pub total_fees_collected_1: Uint128,
-}
-
-#[cw_serde]
-pub struct PositionResponse {
-    pub position_id: String,
-    pub liquidity: Uint128,
-    pub owner: Addr,
-    pub fee_growth_inside_0_last: Decimal,
-    pub fee_growth_inside_1_last: Decimal,
-    pub created_at: u64,
-    pub last_fee_collection: u64,
-    pub unclaimed_fees_0: Uint128,
-    pub unclaimed_fees_1: Uint128,
-}
-
-#[cw_serde]
-pub struct PositionsResponse {
-    pub positions: Vec<PositionResponse>,
 }
 
 #[cw_serde]

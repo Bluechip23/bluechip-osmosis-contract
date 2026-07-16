@@ -9,6 +9,12 @@ exclude = [
     # cargo-fuzz crate uses libFuzzer + nightly; excluded from the
     # default workspace so stable `cargo build` doesn't try to compile it.
     "fuzz",
+    # osmosis-test-tube integration harness: links the Osmosis chain binary
+    # (a heavy Go shared library) and needs pre-built optimized wasm
+    # artifacts, so it is excluded from the default workspace. Run it
+    # explicitly from `integration-tests/` in an environment that has the
+    # test binary + `artifacts/*.wasm` (see integration-tests/README.md).
+    "integration-tests",
 ]
 
 resolver = "2"
@@ -33,6 +39,16 @@ integer-sqrt = "0.1"
 proptest = "1.0"
 cw20 = "2.0.0"
 cw20-base = { version = "2.0.0", features = ["library"] }
+# Osmosis-native message bindings: TokenFactory (creator token),
+# GAMM balancer pool creation (the AMM venue), and poolmanager swaps
+# (post-threshold commit routing). 0.27 is the newest release that
+# compiles on the workspace's Rust 1.75 toolchain against cosmwasm-std 2.x.
+osmosis-std = "0.27.0"
+# Protobuf decoding for osmosis-std reply responses
+# (MsgCreateBalancerPoolResponse / MsgSwapExactAmountInResponse). Pinned
+# to the same prost major osmosis-std 0.27 uses so the derived
+# `prost::Message` impls line up.
+prost = { version = "0.13", default-features = false, features = ["prost-derive"] }
 easy-addr = { path = "packages/easy-addr" }
 
 [workspace.metadata.scripts]

@@ -5,10 +5,8 @@ use cosmwasm_schema::{cw_serde, QueryResponses};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_json_binary, Addr, Binary, Deps, Env, Order, QueryRequest, StdResult, Timestamp, Uint128,
-    WasmQuery,
+    to_json_binary, Addr, Binary, Deps, Env, Order, StdResult, Timestamp, Uint128,
 };
-use cw20::{Cw20QueryMsg, TokenInfoResponse};
 use cw_storage_plus::Bound;
 use pool_factory_interfaces::FactoryQueryMsg;
 
@@ -18,7 +16,9 @@ pub struct CreatorTokenInfoResponse {
     pub symbol: String,
     pub decimals: u8,
     pub total_supply: Uint128,
-    pub token_address: Addr,
+    /// The creator token's native TokenFactory bank denom. (Pre-migration
+    /// this was `token_address: Addr`, the CW20 contract address.)
+    pub token_denom: String,
 }
 
 /// Per-pool creation diagnostics. Useful for off-chain tooling that watches
@@ -173,29 +173,36 @@ pub fn query_pool_creation_status(
 pub fn query_creator_token_info(deps: Deps, pool_id: u64) -> StdResult<CreatorTokenInfoResponse> {
     let pool = POOLS_BY_ID.load(deps.storage, pool_id)?;
 
-    let token_addr = pool
+    let token_denom = pool
         .pool_token_info
         .iter()
         .find_map(|t| match t {
-            TokenType::CreatorToken { contract_addr } => Some(contract_addr.clone()),
+            TokenType::CreatorToken { denom } => Some(denom.clone()),
             _ => None,
         })
         .ok_or_else(|| {
             cosmwasm_std::StdError::generic_err("No creator token found for this pool")
         })?;
 
-    let token_info: TokenInfoResponse =
-        deps.querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
-            contract_addr: token_addr.to_string(),
-            msg: to_json_binary(&Cw20QueryMsg::TokenInfo {})?,
-        }))?;
+    // The creator token is a native TokenFactory denom now — there is no
+    // CW20 contract to smart-query for name/symbol. Total supply comes
+    // from the bank module; name/symbol are not carried on-chain for a
+    // bare TokenFactory denom (they'd require a separate x/bank metadata
+    // record), so they are reported empty here. Decimals are fixed at 6
+    // (the protocol calibrates the threshold payout / mint caps for
+    // 6-decimal creator tokens; see `validate_creator_token_info`).
+    let total_supply = deps
+        .querier
+        .query_supply(token_denom.clone())
+        .map(|c| c.amount)
+        .unwrap_or_else(|_| Uint128::zero());
 
     Ok(CreatorTokenInfoResponse {
-        name: token_info.name,
-        symbol: token_info.symbol,
-        decimals: token_info.decimals,
-        total_supply: token_info.total_supply,
-        token_address: token_addr,
+        name: String::new(),
+        symbol: String::new(),
+        decimals: 6,
+        total_supply,
+        token_denom,
     })
 }
 

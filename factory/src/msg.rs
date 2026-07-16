@@ -11,9 +11,11 @@ use crate::state::FactoryInstantiate;
 #[cw_serde]
 pub struct CreatePoolReplyMsg {
     pub pool_id: u64,
+    /// Pool pair. Index 0 = bluechip `Native`. Index 1 = `CreatorToken`
+    /// PLACEHOLDER — the pool creates its own TokenFactory denom from
+    /// `subdenom` and overwrites the slot. Must be wire-compatible with
+    /// the pool's `PoolInstantiateMsg`.
     pub pool_token_info: [TokenType; 2],
-    // The token contract code ID used for the tokens in the pool
-    pub cw20_token_contract_id: u64,
     pub used_factory_addr: Addr,
     //gets populated inside reply
     pub threshold_payout: Option<Binary>,
@@ -21,11 +23,34 @@ pub struct CreatePoolReplyMsg {
     pub commit_fee_info: CommitFeeInfo,
     /// Commit threshold, USD-denominated (6 decimals).
     pub commit_threshold_limit_usd: Uint128,
-    pub token_address: Addr,
-    //address called by the pool to mint new liquidity position NFTs.
-    pub position_nft_address: Addr,
+    /// TokenFactory subdenom for the creator token. The pool creates
+    /// `factory/{pool_addr}/{subdenom}` and becomes its denom admin.
+    /// Replaces the old `token_address` (CW20 contract) and
+    /// `cw20_token_contract_id`.
+    pub subdenom: String,
+    /// Creator-chosen token display name / ticker / decimals, forwarded from
+    /// `CreatorTokenInfo` so the pool can register bank denom `Metadata`
+    /// (via `MsgSetDenomMetadata`) at instantiate — otherwise explorers and
+    /// wallets show the raw `factory/{addr}/{sub}` micro-denom with no name
+    /// or decimal scaling (M-01). Must stay wire-compatible with the pool's
+    /// `PoolInstantiateMsg`; `#[serde(default)]` keeps old create messages
+    /// deserializing (a pool receiving empty strings simply skips metadata).
+    #[serde(default)]
+    pub token_name: String,
+    #[serde(default)]
+    pub token_symbol: String,
+    #[serde(default)]
+    pub token_decimals: u8,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
+    /// FIX E — uosmo amount of the native GAMM pool-creation fee, forwarded
+    /// from the factory config's `gamm_pool_creation_fee.amount`. The pool
+    /// pins it as `CREATION_FEE_RESERVE_TARGET` and funds the fee from the
+    /// protocol's retained 1% commit fee rather than the seed or the creator.
+    /// Must stay wire-compatible with the pool's `PoolInstantiateMsg`.
+    /// `#[serde(default)]` keeps old serialized create messages valid.
+    #[serde(default)]
+    pub gamm_pool_creation_fee_amount: Uint128,
 }
 
 #[cw_serde]
@@ -86,14 +111,6 @@ pub enum ExecuteMsg {
         pool_id: u64,
     },
     CancelEmergencyWithdrawPool {
-        pool_id: u64,
-    },
-    /// forwards `SweepUnclaimedEmergencyShares {}`
-    /// to a pool whose 1-year claim dormancy has elapsed. Admin-only;
-    /// the pool itself verifies both the dormancy and the
-    /// factory-as-sender invariants before sweeping its unclaimed
-    /// residual to the bluechip wallet.
-    SweepUnclaimedEmergencyPool {
         pool_id: u64,
     },
     RecoverPoolStuckStates {

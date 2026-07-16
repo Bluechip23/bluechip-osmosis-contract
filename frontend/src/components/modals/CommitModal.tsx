@@ -65,13 +65,43 @@ const CommitModal: React.FC<TokenModalProps> = ({
                 ? ((Date.now() + parseFloat(deadline) * 60 * 1000) * 1_000_000).toString()
                 : null;
 
+            // Post-threshold a commit swaps its net bluechip through the native
+            // pool. The pool now REQUIRES an explicit belief_price on that path
+            // (there is no end-to-end minimum_receive backstop as there is on
+            // the multi-hop router), so derive one from a live simulation taken
+            // at submit time. Fixing belief_price here — rather than relying on
+            // the pool's execution-time estimate — is what actually bounds
+            // sandwiching: if the price moves against the user before the tx
+            // lands, the swap reverts instead of filling at the worse price.
+            // Pre-threshold commits do not swap and leave belief_price null.
+            let beliefPrice: string | null = null;
+            if (isThresholdCrossed) {
+                const sim = await client.queryContractSmart(token.poolAddress, {
+                    simulation: {
+                        offer_asset: {
+                            info: { bluechip: { denom: bluechipDenom } },
+                            amount: amountInMicroUnits
+                        }
+                    }
+                });
+                const expectedOut = Number(sim?.return_amount ?? 0);
+                if (!Number.isFinite(expectedOut) || expectedOut <= 0) {
+                    setStatus('Error: could not quote this commit (insufficient pool liquidity?)');
+                    setLoading(false);
+                    return;
+                }
+                // belief_price = offer / expected_out (offer-per-ask), the
+                // convention the pool uses to build its slippage floor.
+                beliefPrice = (Number(amountInMicroUnits) / expectedOut).toFixed(18);
+            }
+
             const commitMsg = {
                 asset: {
                     info: { bluechip: { denom: bluechipDenom } },
                     amount: amountInMicroUnits
                 },
                 transaction_deadline: deadlineInNs,
-                belief_price: null as string | null,
+                belief_price: beliefPrice,
                 max_spread: (isThresholdCrossed && maxSpread && parseFloat(maxSpread) > 0)
                     ? maxSpread : null as string | null
             };

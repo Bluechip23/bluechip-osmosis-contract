@@ -18,7 +18,7 @@
 use crate::asset::TokenType;
 use crate::pool_struct::{PoolDetails, ThresholdPayoutAmounts};
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Binary, Decimal, StdResult, Storage, Timestamp, Uint128};
+use cosmwasm_std::{Addr, Binary, Coin, Decimal, StdResult, Storage, Timestamp, Uint128};
 use cw_storage_plus::{Item, Map};
 use pool_factory_interfaces::PoolStateResponseForFactory;
 
@@ -30,6 +30,16 @@ pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config")
 // finalize step writes the pool registry.
 pub const PENDING_CONFIG: Item<PendingConfig> = Item::new("pending_config");
 pub const POOL_COUNTER: Item<u64> = Item::new("pool_counter");
+
+/// M-05 — one-time gate for the legacy registry back-fill in `migrate`.
+/// Fresh deployments set this `true` at instantiate (they maintain PAIRS /
+/// POOL_ID_BY_ADDRESS through `register_pool` from day one, so no back-fill
+/// is ever needed), which makes `migrate` skip the O(N) registry walk
+/// entirely. A genuinely-legacy contract upgraded from pre-index code has
+/// this unset, so its FIRST `migrate` runs the back-fill once and then sets
+/// the flag; every subsequent `migrate` skips it. This removes the
+/// "unbounded walk re-run on every migration" upgrade-liveness hazard.
+pub const REGISTRY_BACKFILL_DONE: Item<bool> = Item::new("registry_backfill_done");
 
 // Three coupled pool-registry maps. They MUST stay in sync — every pool
 // that exists must appear in all three. Always go through `register_pool`
@@ -167,6 +177,19 @@ pub struct FactoryInstantiate {
     /// Setting this to zero disables the fee entirely (legitimate
     /// configuration choice for permissioned deployments).
     pub pool_creation_fee: Uint128,
+    /// GAMM pool-creation fee that the chain's `x/gamm` module auto-charges
+    /// when `MsgCreateBalancerPool` executes at threshold crossing. The
+    /// pool contract must hold this coin at that moment, so the factory
+    /// collects it from the creator at `Create` time (IN ADDITION to the
+    /// flat `pool_creation_fee` above) and forwards it into the pool's
+    /// instantiate `funds`. The pool holds it until threshold crossing.
+    /// Zero amount disables collection (e.g. test environments where the
+    /// gamm create fee is waived).
+    ///
+    /// `#[serde(default)]` lets pre-this-field factory records deserialize
+    /// with an empty (zero) coin.
+    #[serde(default = "default_gamm_pool_creation_fee")]
+    pub gamm_pool_creation_fee: Coin,
     /// Per-pool threshold-payout splits applied when a commit pool
     /// crosses its threshold. The sum is also used as the CW20
     /// mint cap pinned at create time, so changing these values
@@ -215,6 +238,14 @@ pub fn default_emergency_withdraw_delay_seconds() -> u64 {
 
 pub fn default_twap_window_seconds() -> u64 {
     600
+}
+
+/// Default (zero) GAMM pool-creation fee — collection disabled.
+pub fn default_gamm_pool_creation_fee() -> Coin {
+    Coin {
+        denom: String::new(),
+        amount: Uint128::zero(),
+    }
 }
 
 #[cw_serde]
@@ -285,7 +316,9 @@ pub struct PoolUpgrade {
 fn token_fingerprint(t: &TokenType) -> String {
     match t {
         TokenType::Native { denom } => format!("n:{}", denom),
-        TokenType::CreatorToken { contract_addr } => format!("c:{}", contract_addr),
+        // The creator token is a TokenFactory bank denom now; still tagged
+        // `c:` so it stays in a disjoint namespace from plain natives.
+        TokenType::CreatorToken { denom } => format!("c:{}", denom),
     }
 }
 
@@ -325,6 +358,30 @@ pub fn register_pool(
     pool_address: &Addr,
     pool_details: &PoolDetails,
 ) -> StdResult<()> {
+    // L-01 — the four registry maps must agree, so guard EVERY key against
+    // pre-existence, not just `PAIRS`. Today `pool_id` comes from a monotonic
+    // counter and `pool_address` is deterministic, so these can't collide in
+    // the current create flow — but a `save` is a blind overwrite, and a
+    // future change to how ids/addresses are assigned (or a mistaken second
+    // call for the same pool) would otherwise silently clobber a prior pool's
+    // registry entry with no error. Fail closed on any pre-existing key so
+    // the "one entry per pool in all maps" invariant is hard-locked here
+    // rather than assumed by call sites.
+    //
+    // Also pin the address invariant the reverse index depends on: the
+    // `pool_address` parameter MUST equal the address embedded in
+    // `pool_details`. If they diverged, `POOL_ID_BY_ADDRESS` (keyed by the
+    // parameter) and consumers reading `pool_details.creator_pool_addr`
+    // would disagree about the pool's address — and the migrate back-fill,
+    // which keys the reverse index off `pool_details.creator_pool_addr`,
+    // would produce a second, divergent entry.
+    if pool_address != &pool_details.creator_pool_addr {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "register_pool: pool_address {} does not match pool_details.creator_pool_addr {}",
+            pool_address, pool_details.creator_pool_addr
+        )));
+    }
+
     let pair_key = canonical_pair_key(&pool_details.pool_token_info);
     if let Some(existing) = PAIRS.may_load(storage, pair_key.clone())? {
         return Err(cosmwasm_std::StdError::generic_err(format!(
@@ -332,6 +389,19 @@ pub fn register_pool(
             existing, pair_key.0, pair_key.1
         )));
     }
+    if POOLS_BY_ID.has(storage, pool_id) {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "duplicate pool_id: {} is already registered",
+            pool_id
+        )));
+    }
+    if POOL_ID_BY_ADDRESS.has(storage, pool_address.clone()) {
+        return Err(cosmwasm_std::StdError::generic_err(format!(
+            "duplicate pool address: {} is already registered",
+            pool_address
+        )));
+    }
+
     PAIRS.save(storage, pair_key, &pool_id)?;
 
     POOLS_BY_ID.save(storage, pool_id, pool_details)?;
@@ -344,8 +414,7 @@ pub fn register_pool(
         .pool_token_info
         .iter()
         .map(|t| match t {
-            TokenType::Native { denom } => denom.clone(),
-            TokenType::CreatorToken { contract_addr } => contract_addr.to_string(),
+            TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom.clone(),
         })
         .collect();
 

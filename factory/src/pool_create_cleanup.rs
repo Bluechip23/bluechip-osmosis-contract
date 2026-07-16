@@ -1,6 +1,4 @@
-use cosmwasm_std::{to_json_binary, Addr, CosmosMsg, DepsMut, SubMsgResponse, WasmMsg};
-use cw20::Cw20ExecuteMsg;
-use pool_factory_interfaces::cw721_msgs::{Action, Cw721ExecuteMsg};
+use cosmwasm_std::{Addr, DepsMut, SubMsgResponse};
 
 use crate::error::ContractError;
 
@@ -84,33 +82,4 @@ pub fn extract_contract_address(
             e
         )))
     })
-}
-
-pub fn give_pool_ownership_cw20_and_nft(
-    token_addr: &Addr,
-    nft_addr: &Addr,
-    pool_addr: &Addr,
-) -> Result<Vec<CosmosMsg>, ContractError> {
-    let pool_addr_str = pool_addr.to_string();
-    Ok(vec![
-        WasmMsg::Execute {
-            contract_addr: token_addr.to_string(),
-            msg: to_json_binary(&Cw20ExecuteMsg::UpdateMinter {
-                new_minter: Some(pool_addr_str.clone()),
-            })?,
-            funds: vec![],
-        }
-        .into(),
-        WasmMsg::Execute {
-            contract_addr: nft_addr.to_string(),
-            msg: to_json_binary(&Cw721ExecuteMsg::<()>::UpdateOwnership(
-                Action::TransferOwnership {
-                    new_owner: pool_addr_str,
-                    expiry: None,
-                },
-            ))?,
-            funds: vec![],
-        }
-        .into(),
-    ])
 }

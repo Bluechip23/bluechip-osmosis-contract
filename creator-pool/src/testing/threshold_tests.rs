@@ -5,13 +5,10 @@ use crate::state::{
     CommitLimitInfo, CreatorExcessLiquidity, DistributionState, ExpectedFactory, RecoveryType,
     COMMITFEEINFO, COMMIT_INFO, COMMIT_LEDGER, COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION,
     DISTRIBUTION_STATE, EXPECTED_FACTORY, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT, POOL_PAUSED,
-    POOL_STATE, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
 };
-use crate::testing::swap_tests::with_factory_oracle;
-use crate::{
-    contract::execute,
-    testing::liquidity_tests::{setup_pool_post_threshold, setup_pool_storage},
-};
+use crate::contract::execute;
+use crate::testing::fixtures::{setup_pool_post_threshold, setup_pool_storage, with_factory_oracle};
 use cosmwasm_std::testing::{mock_dependencies_with_balance, MockApi, MockQuerier, MockStorage};
 use cosmwasm_std::{
     coin, BankMsg, Binary, Coin, Decimal, OwnedDeps, SystemError, Timestamp, WasmQuery,
@@ -19,7 +16,7 @@ use cosmwasm_std::{
 use cosmwasm_std::{
     from_json,
     testing::{message_info, mock_dependencies, mock_env},
-    to_json_binary, Addr, ContractResult, CosmosMsg, SystemResult, Uint128, WasmMsg,
+    to_json_binary, Addr, ContractResult, CosmosMsg, SystemResult, Uint128,
 };
 
 pub fn setup_pool_with_excess_config(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>) {
@@ -131,14 +128,14 @@ fn test_threshold_with_excess_creates_position() {
         "USD raised after commit: {}",
         USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap()
     );
-    println!(
-        "Bluechip reserve: {}",
-        POOL_STATE.load(&deps.storage).unwrap().reserve0
-    );
 
+    // FIX C: the over-cap bluechip is recorded as a time-locked creator
+    // entitlement to the RAW excess coins (bluechip + creator tokens),
+    // which remain parked in the contract's bank balance.
     match CREATOR_EXCESS_POSITION.load(&deps.storage) {
         Ok(excess_position) => {
             assert!(excess_position.bluechip_amount > Uint128::zero());
+            assert!(excess_position.token_amount > Uint128::zero());
 
             let fee_info = COMMITFEEINFO.load(&deps.storage).unwrap();
             assert_eq!(excess_position.creator, fee_info.creator_wallet_address);
@@ -150,17 +147,12 @@ fn test_threshold_with_excess_creates_position() {
         Err(_) => panic!("Creator excess position should exist"),
     }
 
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-
-    // With the 20% excess swap cap, reserve0 won't be inflated by the full
-    // excess. It should still be larger than the seed amount from the cap
-    // (max_bluechip_lock_per_pool = 100_000) plus the capped swap portion.
-    assert!(pool_state.reserve0 > Uint128::zero());
-    // Verify a refund message was generated for the capped excess
+    // Verify the entire post-fee excess is refunded to the crosser via a
+    // BankMsg::Send (there is no inline swap anymore).
     let has_refund = res.messages.iter().any(|submsg| {
         matches!(&submsg.msg, CosmosMsg::Bank(BankMsg::Send { to_address, .. }) if to_address == "final_committer")
     });
-    assert!(has_refund, "Should refund excess above the 20% swap cap");
+    assert!(has_refund, "Should refund the post-fee excess to the crosser");
 }
 
 #[test]
@@ -178,7 +170,6 @@ fn test_claim_excess_before_unlock_fails() {
                 bluechip_amount: Uint128::new(50_000_000_000),
                 token_amount: Uint128::new(175_000_000_000),
                 unlock_time: env.block.time.plus_seconds(14 * 86400), // 14 days from now
-                excess_nft_id: None,
             },
         )
         .unwrap();
@@ -213,15 +204,19 @@ fn test_claim_excess_after_unlock_succeeds() {
 
     let unlock_time = env.block.time.minus_seconds(100);
 
+    // FIX C: the creator claims the RAW earmarked coins — `bluechip_amount`
+    // (bluechip denom) + `token_amount` (creator denom) — that were parked
+    // in the contract at crossing. No LP-share proportion / query anymore.
+    let bluechip_amount = Uint128::new(50_000_000_000);
+    let token_amount = Uint128::new(175_000_000_000);
     CREATOR_EXCESS_POSITION
         .save(
             &mut deps.storage,
             &CreatorExcessLiquidity {
                 creator: Addr::unchecked("creator"),
-                bluechip_amount: Uint128::new(50_000_000_000),
-                token_amount: Uint128::new(175_000_000_000),
+                bluechip_amount,
+                token_amount,
                 unlock_time,
-                excess_nft_id: None,
             },
         )
         .unwrap();
@@ -232,30 +227,28 @@ fn test_claim_excess_after_unlock_succeeds() {
     };
 
     let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
-    // Should have 2 messages: bank send for bluechip + CW20 transfer for creator tokens
-    assert_eq!(res.messages.len(), 2);
+
+    // The claim sends exactly one BankMsg::Send carrying BOTH raw coins to
+    // the creator.
+    assert_eq!(res.messages.len(), 1);
     match &res.messages[0].msg {
         CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
             assert_eq!(to_address, "creator");
-            assert_eq!(amount[0].amount, Uint128::new(50_000_000_000));
+            let bluechip = amount
+                .iter()
+                .find(|c| c.denom == "ubluechip")
+                .expect("bluechip coin present");
+            assert_eq!(bluechip.amount, bluechip_amount);
+            let creator_coin = amount
+                .iter()
+                .find(|c| c.denom == crate::testing::fixtures::CREATOR_DENOM)
+                .expect("creator-token coin present");
+            assert_eq!(creator_coin.amount, token_amount);
         }
-        _ => panic!("Expected Bank Send message for bluechip"),
-    }
-    match &res.messages[1].msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) => {
-            let transfer_msg: cw20::Cw20ExecuteMsg = from_json(msg).unwrap();
-            match transfer_msg {
-                cw20::Cw20ExecuteMsg::Transfer { recipient, amount } => {
-                    assert_eq!(recipient, "creator");
-                    assert_eq!(amount, Uint128::new(175_000_000_000));
-                }
-                _ => panic!("Expected CW20 Transfer message"),
-            }
-        }
-        _ => panic!("Expected Wasm Execute message for creator token"),
+        _ => panic!("Expected Bank Send message for the raw excess coins"),
     }
 
-    // Excess position should be cleared
+    // Excess position should be cleared (one-shot).
     let excess = CREATOR_EXCESS_POSITION.load(&deps.storage);
     assert!(excess.is_err());
 }
@@ -275,7 +268,6 @@ fn test_claim_excess_wrong_user_fails() {
                 bluechip_amount: Uint128::new(50_000_000_000),
                 token_amount: Uint128::new(175_000_000_000),
                 unlock_time: env.block.time.minus_seconds(100), // Already unlocked
-                excess_nft_id: None,
             },
         )
         .unwrap();
@@ -367,11 +359,9 @@ fn test_no_excess_when_under_cap() {
 
     execute(deps.as_mut(), env, info, msg).unwrap();
 
+    // Under the cap: no creator-excess entitlement is recorded.
     let excess = CREATOR_EXCESS_POSITION.load(&deps.storage);
     assert!(excess.is_err());
-
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    assert!(pool_state.reserve0 < Uint128::new(10_000_000_000_000));
 }
 
 fn check_correct_factory(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>) {
@@ -460,41 +450,11 @@ fn test_commit_threshold_overshoot_split() {
                     i, to_address, amount
                 );
             }
-            CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr, msg, ..
-            }) => {
-                println!(
-                    "Message {}: Wasm Execute to {} with msg: {}",
-                    i,
-                    contract_addr,
-                    String::from_utf8_lossy(msg.as_slice())
-                );
-            }
             _ => println!("Message {}: Other type", i),
         }
     }
 
-    let has_transfer = res.messages.iter().any(|submsg| {
-        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &submsg.msg {
-            let msg_str = String::from_utf8_lossy(msg.as_slice());
-            msg_str.contains("transfer")
-        } else {
-            false
-        }
-    });
-    let binding = "0".to_string();
-    let return_amt_str = res
-        .attributes
-        .iter()
-        .find(|a| a.key == "bluechip_excess_returned")
-        .map(|a| &a.value)
-        .unwrap_or(&binding);
-    println!("Return amount from attributes: {}", return_amt_str);
     assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
-    println!("\n=== Pool State After ===");
-    println!("reserve0: {}", pool_state.reserve0);
-    println!("reserve1: {}", pool_state.reserve1);
     assert_eq!(
         USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(),
         Uint128::new(25_000_000_000)
@@ -532,38 +492,30 @@ fn test_commit_threshold_overshoot_split() {
             .value,
         "5000000"
     );
-    let bluechip_excess = attrs
-        .iter()
-        .find(|a| a.key == "swap_amount_bluechip")
-        .unwrap()
-        .value
-        .clone();
-    let return_amt = attrs
-        .iter()
-        .find(|a| a.key == "bluechip_excess_returned")
-        .unwrap()
-        .value
-        .clone();
 
-    println!("\n=== Swap Details ===");
-    println!("Native excess to swap: {}", bluechip_excess);
-    println!("CW20 returned: {}", return_amt);
+    // Phase-2: the whole post-fee excess is refunded to the crosser via a
+    // BankMsg::Send (no inline swap). Confirm the refund attribute is
+    // present and non-zero, and that a matching refund message to "whale"
+    // was emitted.
+    let refunded = attrs
+        .iter()
+        .find(|a| a.key == "bluechip_excess_refunded")
+        .expect("bluechip_excess_refunded attribute must be present")
+        .value
+        .clone();
+    assert_ne!(refunded, "0", "excess should be refunded on overshoot");
+    let has_refund = res.messages.iter().any(|submsg| {
+        matches!(&submsg.msg, CosmosMsg::Bank(BankMsg::Send { to_address, .. }) if to_address == "whale")
+    });
+    assert!(has_refund, "overshoot must refund the post-fee excess to the crosser");
+
     let sub = COMMIT_INFO.load(&deps.storage, &info.sender).unwrap();
-    // With 20% excess swap cap, total_paid_bluechip will be less than commit_amount
-    // because the refunded portion is not counted. It should include the threshold
-    // portion plus whatever capped excess was actually swapped.
+    // Only the threshold portion is recorded in commit-info (the excess was
+    // refunded, not committed). bluechip_to_threshold = $1 gap at $1/token
+    // = 1_000_000 ubluechip; value_to_threshold = 1_000_000 USD micros.
     assert!(sub.total_paid_bluechip <= commit_amount);
     assert!(sub.total_paid_bluechip > Uint128::zero());
-    assert_eq!(sub.total_paid_usd, Uint128::new(5_000_000));
-
-    if has_transfer {
-        println!("SUCCESS: CW20 transfer found!");
-    } else {
-        println!(
-            "ISSUE: No CW20 transfer found despite return_amt = {}",
-            return_amt_str
-        );
-    }
+    assert_eq!(sub.total_paid_usd, Uint128::new(1_000_000));
 }
 
 #[test]
@@ -987,29 +939,38 @@ fn test_accumulated_bluechips_respected() {
 
     execute(deps.as_mut(), env.clone(), info, msg).unwrap();
 
-    let pool_state = POOL_STATE.load(&deps.storage).unwrap();
+    // FIX C: the over-cap accumulated bluechip is recorded as a RAW
+    // creator-excess entitlement. The earmark math is:
+    //   bluechip_amount = NATIVE_RAISED_AT_CROSS - max_bluechip_lock_per_pool
+    //   token_amount    = pool_seed_amount * bluechip_amount / NATIVE_RAISED
+    // NATIVE_RAISED is unchanged by trigger_threshold_payout, so its
+    // post-execute value equals the value read at cross time.
+    let native_raised = crate::state::NATIVE_RAISED_FROM_COMMIT
+        .load(&deps.storage)
+        .unwrap();
+    let cap = Uint128::new(100_000); // max_bluechip_lock_per_pool (excess config)
 
-    println!("Reserve0: {}", pool_state.reserve0);
-    // Reserves should be at the cap, NOT the full accumulated amount
-    assert_eq!(
-        pool_state.reserve0,
-        Uint128::new(100_000),
-        "Pool reserves should be capped at max_bluechip_lock_per_pool"
-    );
-
-    // The excess should be stored in the creator excess position
     let excess = crate::state::CREATOR_EXCESS_POSITION
         .load(&deps.storage)
         .unwrap();
-    assert!(
-        excess.bluechip_amount > Uint128::zero(),
-        "Excess bluechip should be stored for creator to claim later"
+    let expected_excess_bluechip = native_raised.checked_sub(cap).unwrap();
+    assert_eq!(
+        excess.bluechip_amount, expected_excess_bluechip,
+        "bluechip_amount = NATIVE_RAISED - max_bluechip_lock_per_pool"
     );
-    // Total (capped reserves + excess) should account for all accumulated bluechips
-    assert!(
-        pool_state.reserve0 + excess.bluechip_amount > Uint128::new(40_000_000_000),
-        "Total bluechips (reserves + excess) should reflect accumulated amount"
+    // token_amount is the proportional creator-token earmark.
+    let pool_seed_amount = crate::state::THRESHOLD_PAYOUT_AMOUNTS
+        .load(&deps.storage)
+        .unwrap()
+        .pool_seed_amount;
+    assert_eq!(
+        excess.token_amount,
+        pool_seed_amount.multiply_ratio(expected_excess_bluechip, native_raised),
+        "token_amount = pool_seed_amount * bluechip_amount / NATIVE_RAISED"
     );
+    // Sanity: the accumulated bluechip is well above the cap, so a real
+    // over-raise entitlement is recorded.
+    assert!(excess.bluechip_amount > Uint128::new(40_000_000_000));
 }
 
 #[test]
@@ -1365,6 +1326,179 @@ fn test_commit_rejects_below_post_threshold_floor() {
 }
 
 // ===========================================================================
+// FIX D — emergency drain PRESERVES the creator-excess earmark, and the
+// creator can still claim the raw excess AFTER a drain.
+// ===========================================================================
+#[test]
+fn test_emergency_drain_preserves_creator_excess_and_claim_survives_drain() {
+    use crate::state::{CreatorExcessLiquidity, CREATOR_EXCESS_POSITION};
+
+    // The contract's bank balance holds the time-locked earmark PLUS extra
+    // residual on both denoms, PLUS the seed LP shares.
+    let earmark_bluechip = Uint128::new(30_000_000_000);
+    let earmark_creator = Uint128::new(7_000_000_000);
+    let extra_bluechip = Uint128::new(5_000_000_000);
+    let extra_creator = Uint128::new(2_000_000_000);
+    let lp_shares = Uint128::new(1_000_000);
+
+    let mut deps = mock_dependencies_with_balance(&[
+        Coin {
+            denom: "ubluechip".to_string(),
+            amount: earmark_bluechip + extra_bluechip,
+        },
+        Coin {
+            denom: crate::testing::fixtures::CREATOR_DENOM.to_string(),
+            amount: earmark_creator + extra_creator,
+        },
+        Coin {
+            denom: "gamm/pool/1".to_string(),
+            amount: lp_shares,
+        },
+    ]);
+    setup_pool_post_threshold(&mut deps); // POOL_ID=1, factory "factory_contract"
+
+    let mut env = mock_env();
+    CREATOR_EXCESS_POSITION
+        .save(
+            &mut deps.storage,
+            &CreatorExcessLiquidity {
+                creator: Addr::unchecked("creator"),
+                bluechip_amount: earmark_bluechip,
+                token_amount: earmark_creator,
+                unlock_time: env.block.time.plus_seconds(100),
+            },
+        )
+        .unwrap();
+
+    // Factory answers the delay + bluechip-wallet queries the drain issues.
+    deps.querier.update_wasm(move |query| match query {
+        WasmQuery::Smart { msg, .. } => {
+            #[cosmwasm_schema::cw_serde]
+            enum Probe {
+                PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
+            }
+            match from_json(msg) {
+                Ok(Probe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::EmergencyWithdrawDelaySeconds {},
+                )) => SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&pool_factory_interfaces::EmergencyWithdrawDelayResponse {
+                        delay_seconds: 86_400,
+                    })
+                    .unwrap(),
+                )),
+                Ok(Probe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+                )) => SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&pool_factory_interfaces::BluechipWalletResponse {
+                        address: Addr::unchecked("drain_recipient"),
+                    })
+                    .unwrap(),
+                )),
+                _ => SystemResult::Err(SystemError::InvalidRequest {
+                    error: "unmocked wasm query".to_string(),
+                    request: Binary::default(),
+                }),
+            }
+        }
+        _ => SystemResult::Err(SystemError::InvalidRequest {
+            error: "unsupported".to_string(),
+            request: Binary::default(),
+        }),
+    });
+
+    let factory_info = message_info(&Addr::unchecked("factory_contract"), &[]);
+
+    // Phase 1: initiate (pause + arm timelock).
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        factory_info.clone(),
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+
+    // Phase 2: drain after the timelock elapses.
+    env.block.time = env.block.time.plus_seconds(86_401);
+    let drain_res = execute(
+        deps.as_mut(),
+        env.clone(),
+        factory_info,
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+
+    // The drain sweeps ONLY the residual bank balances (earmark excluded)
+    // plus the LP shares to the bluechip wallet.
+    let sent_amount = |denom: &str| -> Uint128 {
+        drain_res
+            .messages
+            .iter()
+            .filter_map(|m| match &m.msg {
+                CosmosMsg::Bank(BankMsg::Send { to_address, amount }) if to_address == "drain_recipient" => {
+                    amount.iter().find(|c| c.denom == denom).map(|c| c.amount)
+                }
+                _ => None,
+            })
+            .fold(Uint128::zero(), |acc, x| acc + x)
+    };
+    assert_eq!(
+        sent_amount("ubluechip"),
+        extra_bluechip,
+        "drain must EXCLUDE the earmarked bluechip"
+    );
+    assert_eq!(
+        sent_amount(crate::testing::fixtures::CREATOR_DENOM),
+        extra_creator,
+        "drain must EXCLUDE the earmarked creator tokens"
+    );
+    assert_eq!(
+        sent_amount("gamm/pool/1"),
+        lp_shares,
+        "drain sweeps the full LP shares"
+    );
+
+    // Pool is drained but the earmark record SURVIVES.
+    assert!(crate::state::EMERGENCY_DRAINED.load(&deps.storage).unwrap());
+    let surviving = CREATOR_EXCESS_POSITION.load(&deps.storage).unwrap();
+    assert_eq!(surviving.bluechip_amount, earmark_bluechip);
+    assert_eq!(surviving.token_amount, earmark_creator);
+
+    // The creator can still claim the raw earmark AFTER the drain (unlock
+    // has passed by now). The claim is not gated by the drained/paused
+    // state (FIX D).
+    let claim_res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&Addr::unchecked("creator"), &[]),
+        ExecuteMsg::ClaimCreatorExcessLiquidity {
+            transaction_deadline: None,
+        },
+    )
+    .expect("creator must be able to claim earmark post-drain");
+    assert_eq!(claim_res.messages.len(), 1);
+    match &claim_res.messages[0].msg {
+        CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+            assert_eq!(to_address, "creator");
+            assert_eq!(
+                amount.iter().find(|c| c.denom == "ubluechip").unwrap().amount,
+                earmark_bluechip
+            );
+            assert_eq!(
+                amount
+                    .iter()
+                    .find(|c| c.denom == crate::testing::fixtures::CREATOR_DENOM)
+                    .unwrap()
+                    .amount,
+                earmark_creator
+            );
+        }
+        _ => panic!("expected a BankMsg::Send of the raw earmark to the creator"),
+    }
+    // One-shot: the position is cleared after the claim.
+    assert!(CREATOR_EXCESS_POSITION.load(&deps.storage).is_err());
+}
+
+// ===========================================================================
 // NATIVE_RAISED_FROM_COMMIT stores net-of-fees, not gross
 // ===========================================================================
 //
@@ -1522,8 +1656,8 @@ mod native_raised_net_semantics_tests {
     /// "with excess" branch) must store ONLY the
     /// `threshold_portion_after_fees` — NOT the gross
     /// `bluechip_to_threshold`, NOT the full `amount_after_fees`. The
-    /// excess (post-fee) goes through the AMM swap inline and lands
-    /// in `pool_state.reserve0` directly, NOT in NATIVE_RAISED.
+    /// excess (post-fee) is refunded to the crosser (Phase-2: no inline
+    /// swap), so it never lands in NATIVE_RAISED.
     #[test]
     fn threshold_crossing_stores_only_threshold_portion_after_fees() {
         let mut deps = mock_dependencies_with_balance(&[Coin {
@@ -1605,18 +1739,19 @@ mod native_raised_net_semantics_tests {
         );
     }
 
-    /// `trigger_threshold_payout` reads NATIVE_RAISED_FROM_COMMIT
-    /// directly into `pools_bluechip_seed` with NO `(1 - fee_rate)`
-    /// recovery multiply. End-to-end: a pre-seeded NATIVE_RAISED of
-    /// 1_000_000 (under the max_bluechip_lock_per_pool cap) must produce
-    /// `pool_state.reserve0 = 1_000_000` after threshold-cross — a
-    /// gross-based recovery multiply would produce `1_000_000 * 0.94 =
-    /// 940_000`, which this test asserts we do not.
+    /// Phase-2 repurpose: `trigger_threshold_payout` reads
+    /// NATIVE_RAISED_FROM_COMMIT directly (no `(1 - fee_rate)` recovery
+    /// multiply). Internal reserves are gone, so we can no longer assert on
+    /// `pool_state.reserve0`; instead we assert the surviving observable
+    /// effects: IS_THRESHOLD_HIT flips true, and — because the seeded
+    /// NATIVE_RAISED (1_000_000) is UNDER the cap (10_000_000_000) — NO
+    /// CREATOR_EXCESS_POSITION entitlement is recorded.
     #[test]
     fn trigger_threshold_payout_reads_native_raised_directly_no_recovery_multiply() {
         use crate::generic_helpers::trigger_threshold_payout;
         use crate::state::{
-            COMMIT_LIMIT_INFO, POOL_FEE_STATE, POOL_INFO, POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS,
+            CREATOR_EXCESS_POSITION, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, POOL_INFO,
+            THRESHOLD_PAYOUT_AMOUNTS,
         };
 
         let mut deps = mock_dependencies();
@@ -1624,8 +1759,7 @@ mod native_raised_net_semantics_tests {
 
         // Seed NATIVE_RAISED with a value below max_bluechip_lock_per_pool
         // (which is 10_000_000_000 in setup_pool_storage). This entire
-        // amount becomes `pools_bluechip_seed`
-        // and lands as `pool_state.reserve0` (no excess carve-off).
+        // amount is the seed with no excess carve-off.
         let seeded_net = Uint128::new(1_000_000);
         NATIVE_RAISED_FROM_COMMIT
             .save(&mut deps.storage, &seeded_net)
@@ -1634,54 +1768,39 @@ mod native_raised_net_semantics_tests {
         // Pre-load required items (as production would have at threshold-
         // cross time).
         let pool_info = POOL_INFO.load(&deps.storage).unwrap();
-        let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-        let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
         let commit_config = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
         let payout = THRESHOLD_PAYOUT_AMOUNTS.load(&deps.storage).unwrap();
         let fee_info = COMMITFEEINFO.load(&deps.storage).unwrap();
 
         let _payout_msgs = trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
-            &mut pool_state,
-            &mut pool_fee_state,
             &commit_config,
             &payout,
             &fee_info,
-            // Live wallet not under test here; mirror the snapshot so
-            // assertions on the bluechip-reward recipient continue to
-            // resolve against the test fixture's bluechip wallet addr.
+            // Live wallet not under test here; mirror the snapshot.
             &fee_info.bluechip_wallet_address,
+            Decimal::permille(3),
             &mock_env(),
         )
         .expect("trigger_threshold_payout must succeed");
 
-        // Net invariant: pool_state.reserve0 == NATIVE_RAISED_FROM_COMMIT
-        // (provided we're under the cap, which we are: 1M ≪ 10B).
-        // A gross-based recovery multiply would produce
-        // 1_000_000 * 0.94 = 940_000.
-        assert_eq!(
-            pool_state.reserve0, seeded_net,
-            "pool_state.reserve0 must equal NATIVE_RAISED directly. \
-             Got reserve0={}, seeded={}. (A recovery multiply would produce 940_000.)",
-            pool_state.reserve0, seeded_net
+        // The load-bearing no-double-mint gate flipped.
+        assert!(
+            IS_THRESHOLD_HIT.load(&deps.storage).unwrap(),
+            "IS_THRESHOLD_HIT must be true after a successful trigger"
         );
 
-        // Defense-in-depth: the `gross * (1 - fee_rate)`
-        // recovery result is explicitly NOT what we got.
-        let recovery_multiplied_seed = seeded_net.checked_mul_floor(Decimal::percent(94)).unwrap();
-        assert_ne!(
-            pool_state.reserve0, recovery_multiplied_seed,
-            "regression guard: must not produce a recovery-multiplied seed"
-        );
-
-        // pool_state.reserve1 lands the full `payout.pool_seed_amount`
-        // creator-token allocation (this is independent of the
-        // net-of-fees semantics of reserve0, included as a sanity check
-        // that the payout math is correct on the other side too).
-        assert_eq!(
-            pool_state.reserve1, payout.pool_seed_amount,
-            "creator-token side of seed should be the full pool_seed_amount"
+        // Under the cap: no creator-excess entitlement is recorded (a
+        // gross-based recovery multiply is irrelevant now — the branch
+        // that would record an excess never fires here).
+        assert!(
+            CREATOR_EXCESS_POSITION
+                .may_load(&deps.storage)
+                .unwrap()
+                .is_none(),
+            "NATIVE_RAISED under the cap must not record a creator-excess entitlement"
         );
     }
 
@@ -1703,8 +1822,8 @@ mod native_raised_net_semantics_tests {
         use crate::commit::threshold_crossing::process_threshold_hit_exact;
         use crate::msg::CommitFeeInfo;
         use crate::state::{
-            CommitLimitInfo, PoolAnalytics, PoolInfo, IS_THRESHOLD_HIT, POOL_FEE_STATE, POOL_INFO,
-            POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS,
+            CommitLimitInfo, PoolAnalytics, PoolInfo, PoolSpecs, IS_THRESHOLD_HIT, POOL_INFO,
+            POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
         };
 
         let mut deps = mock_dependencies();
@@ -1717,8 +1836,7 @@ mod native_raised_net_semantics_tests {
         IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
 
         let pool_info: PoolInfo = POOL_INFO.load(&deps.storage).unwrap();
-        let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-        let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
+        let pool_specs: PoolSpecs = POOL_SPECS.load(&deps.storage).unwrap();
         let commit_config: CommitLimitInfo = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
         let payout = THRESHOLD_PAYOUT_AMOUNTS.load(&deps.storage).unwrap();
         let fee_info: CommitFeeInfo = COMMITFEEINFO.load(&deps.storage).unwrap();
@@ -1737,8 +1855,7 @@ mod native_raised_net_semantics_tests {
             Uint128::new(1_000_000),
             Uint128::new(5_000_000),
             commit_config.commit_amount_for_threshold_usd,
-            &mut pool_state,
-            &mut pool_fee_state,
+            &pool_specs,
             &pool_info,
             &commit_config,
             &payout,
@@ -1769,8 +1886,7 @@ mod native_raised_net_semantics_tests {
         use crate::commit::threshold_payout::trigger_threshold_payout;
         use crate::msg::CommitFeeInfo;
         use crate::state::{
-            CommitLimitInfo, IS_THRESHOLD_HIT, POOL_FEE_STATE, POOL_INFO, POOL_STATE,
-            THRESHOLD_PAYOUT_AMOUNTS,
+            CommitLimitInfo, IS_THRESHOLD_HIT, POOL_INFO, THRESHOLD_PAYOUT_AMOUNTS,
         };
 
         let mut deps = mock_dependencies();
@@ -1785,21 +1901,19 @@ mod native_raised_net_semantics_tests {
         IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
 
         let pool_info = POOL_INFO.load(&deps.storage).unwrap();
-        let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-        let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
         let commit_config: CommitLimitInfo = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
         let payout = THRESHOLD_PAYOUT_AMOUNTS.load(&deps.storage).unwrap();
         let fee_info: CommitFeeInfo = COMMITFEEINFO.load(&deps.storage).unwrap();
 
         let err = trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
-            &mut pool_state,
-            &mut pool_fee_state,
             &commit_config,
             &payout,
             &fee_info,
             &fee_info.bluechip_wallet_address,
+            Decimal::permille(3),
             &mock_env(),
         )
         .unwrap_err();
@@ -1821,8 +1935,7 @@ mod native_raised_net_semantics_tests {
         use crate::commit::threshold_payout::trigger_threshold_payout;
         use crate::msg::CommitFeeInfo;
         use crate::state::{
-            CommitLimitInfo, IS_THRESHOLD_HIT, POOL_FEE_STATE, POOL_INFO, POOL_STATE,
-            THRESHOLD_PAYOUT_AMOUNTS,
+            CommitLimitInfo, IS_THRESHOLD_HIT, POOL_INFO, THRESHOLD_PAYOUT_AMOUNTS,
         };
 
         let mut deps = mock_dependencies();
@@ -1844,21 +1957,19 @@ mod native_raised_net_semantics_tests {
         );
 
         let pool_info = POOL_INFO.load(&deps.storage).unwrap();
-        let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-        let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
         let commit_config: CommitLimitInfo = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
         let payout = THRESHOLD_PAYOUT_AMOUNTS.load(&deps.storage).unwrap();
         let fee_info: CommitFeeInfo = COMMITFEEINFO.load(&deps.storage).unwrap();
 
         trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
-            &mut pool_state,
-            &mut pool_fee_state,
             &commit_config,
             &payout,
             &fee_info,
             &fee_info.bluechip_wallet_address,
+            Decimal::permille(3),
             &mock_env(),
         )
         .expect("trigger_threshold_payout must succeed on a clean pool");
@@ -1889,8 +2000,8 @@ mod crossed_at_snapshot_tests {
     use crate::commit::threshold_payout::trigger_threshold_payout;
     use crate::msg::CommitFeeInfo;
     use crate::state::{
-        CommitLimitInfo, PoolInfo, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_FEE_STATE,
-        POOL_INFO, POOL_STATE, THRESHOLD_CROSSED_AT, THRESHOLD_PAYOUT_AMOUNTS,
+        CommitLimitInfo, PoolInfo, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_INFO,
+        THRESHOLD_CROSSED_AT, THRESHOLD_PAYOUT_AMOUNTS,
     };
 
     #[test]
@@ -1911,8 +2022,6 @@ mod crossed_at_snapshot_tests {
         );
 
         let pool_info: PoolInfo = POOL_INFO.load(&deps.storage).unwrap();
-        let mut pool_state = POOL_STATE.load(&deps.storage).unwrap();
-        let mut pool_fee_state = POOL_FEE_STATE.load(&deps.storage).unwrap();
         let commit_config: CommitLimitInfo = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
         let payout = THRESHOLD_PAYOUT_AMOUNTS.load(&deps.storage).unwrap();
         let fee_info: CommitFeeInfo = COMMITFEEINFO.load(&deps.storage).unwrap();
@@ -1921,13 +2030,13 @@ mod crossed_at_snapshot_tests {
 
         trigger_threshold_payout(
             &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
             &pool_info,
-            &mut pool_state,
-            &mut pool_fee_state,
             &commit_config,
             &payout,
             &fee_info,
             &fee_info.bluechip_wallet_address,
+            Decimal::permille(3),
             &env,
         )
         .expect("trigger_threshold_payout must succeed");

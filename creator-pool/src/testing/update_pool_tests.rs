@@ -8,7 +8,7 @@ use crate::{
     error::ContractError,
     msg::{ExecuteMsg, PoolConfigUpdate},
     state::{COMMIT_LIMIT_INFO, MAX_MIN_COMMIT_USD},
-    testing::liquidity_tests::setup_pool_storage,
+    testing::fixtures::setup_pool_storage,
 };
 
 #[test]

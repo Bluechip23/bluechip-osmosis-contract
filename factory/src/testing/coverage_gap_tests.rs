@@ -45,6 +45,10 @@ fn default_factory_config() -> FactoryInstantiate {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: Uint128::new(CREATION_FEE),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     }
@@ -91,7 +95,7 @@ fn create_pool_refunds_surplus_to_sender() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
+                    denom: String::from("WILL_BE_CREATED_BY_FACTORY"),
                 },
             ],
         },
@@ -147,7 +151,7 @@ fn create_pool_exact_pay_emits_no_refund() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
+                    denom: String::from("WILL_BE_CREATED_BY_FACTORY"),
                 },
             ],
         },

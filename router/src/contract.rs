@@ -13,8 +13,7 @@ use cw2::set_contract_version;
 
 use crate::error::RouterError;
 use crate::execution::{
-    execute_assert_received, execute_multi_hop, execute_receive_cw20, execute_swap_operation,
-    handle_reply,
+    execute_assert_received, execute_multi_hop, execute_swap_operation, handle_reply,
 };
 use crate::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::simulation::simulate_multi_hop;
@@ -74,12 +73,12 @@ pub fn execute(
         } => execute_propose_config_update(deps, env, info, admin, factory_addr),
         ExecuteMsg::UpdateConfig {} => execute_apply_config_update(deps, env, info),
         ExecuteMsg::CancelConfigUpdate {} => execute_cancel_config_update(deps, info),
-        ExecuteMsg::Receive(cw20_msg) => execute_receive_cw20(deps, env, info, cw20_msg),
         ExecuteMsg::ExecuteSwapOperation {
             operation,
             hop_index,
             to,
-        } => execute_swap_operation(deps, env, info, operation, hop_index, to),
+            offer_baseline,
+        } => execute_swap_operation(deps, env, info, operation, hop_index, to, offer_baseline),
         ExecuteMsg::AssertReceived {
             ask_info,
             recipient,

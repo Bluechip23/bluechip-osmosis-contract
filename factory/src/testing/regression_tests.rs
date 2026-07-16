@@ -9,8 +9,7 @@ use cosmwasm_std::{
 use crate::asset::TokenType;
 use crate::error::ContractError;
 use crate::execute::{
-    encode_reply_id, execute, instantiate, pool_creation_reply, FINALIZE_POOL, MINT_CREATE_POOL,
-    SET_TOKENS,
+    encode_reply_id, execute, instantiate, pool_creation_reply, FINALIZE_POOL,
 };
 use crate::mock_querier::WasmMockQuerier;
 use crate::msg::{CreatorTokenInfo, ExecuteMsg};
@@ -59,6 +58,10 @@ fn default_factory_config() -> FactoryInstantiate {
         usd_quote_denom: "uusdc".to_string(),
         twap_window_seconds: 600,
         pool_creation_fee: Uint128::new(1_000_000),
+        gamm_pool_creation_fee: cosmwasm_std::Coin {
+            denom: String::new(),
+            amount: Uint128::zero(),
+        },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
     }
@@ -101,7 +104,7 @@ fn register_test_pool_addr(
                         denom: "ubluechip".to_string(),
                     },
                     TokenType::CreatorToken {
-                        contract_addr: Addr::unchecked("token"),
+                        denom: String::from("token"),
                     },
                 ],
                 creator_pool_addr: pool_addr.clone(),
@@ -540,7 +543,7 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
+                    denom: String::from("WILL_BE_CREATED_BY_FACTORY"),
                 },
             ],
         },
@@ -554,27 +557,14 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
     let create_res = execute(deps.as_mut(), env.clone(), admin_info.clone(), create_msg_1).unwrap();
     let pool_id_1 = POOL_COUNTER.load(&deps.storage).unwrap();
 
-    // Complete the reply chain for pool 1, threading the creation
-    // payload from each step's response into the next Reply.
-    let token_1 = make_addr("token_addr_1");
-    let token_reply = create_instantiate_reply(
-        encode_reply_id(pool_id_1, SET_TOKENS),
-        token_1.as_str(),
-        creation_payload(&create_res),
-    );
-    let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
-    let nft_1 = make_addr("nft_addr_1");
-    let nft_reply = create_instantiate_reply(
-        encode_reply_id(pool_id_1, MINT_CREATE_POOL),
-        nft_1.as_str(),
-        creation_payload(&res),
-    );
-    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
+    // Phase-2 single-step reply chain for pool 1: the create handler
+    // dispatched the pool instantiate directly (reply id FINALIZE_POOL);
+    // its reply finalizes/registers the pool. No NFT or CW20 step.
     let pool_1 = make_addr("pool_addr_1");
     let pool_reply = create_instantiate_reply(
         encode_reply_id(pool_id_1, FINALIZE_POOL),
         pool_1.as_str(),
-        creation_payload(&res),
+        creation_payload(&create_res),
     );
     pool_creation_reply(deps.as_mut(), env.clone(), pool_reply).unwrap();
 
@@ -591,7 +581,7 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked("WILL_BE_CREATED_BY_FACTORY"),
+                    denom: String::from("WILL_BE_CREATED_BY_FACTORY"),
                 },
             ],
         },
@@ -622,26 +612,12 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
     let pool_id_2 = POOL_COUNTER.load(&deps.storage).unwrap();
     assert_ne!(pool_id_1, pool_id_2, "Second pool should get a new ID");
 
-    // Complete the reply chain for pool 2
-    let token_2 = make_addr("token_addr_2");
-    let token_reply = create_instantiate_reply(
-        encode_reply_id(pool_id_2, SET_TOKENS),
-        token_2.as_str(),
-        creation_payload(&create_res),
-    );
-    let res = pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), token_reply).unwrap();
-    let nft_2 = make_addr("nft_addr_2");
-    let nft_reply = create_instantiate_reply(
-        encode_reply_id(pool_id_2, MINT_CREATE_POOL),
-        nft_2.as_str(),
-        creation_payload(&res),
-    );
-    let res = pool_creation_reply(deps.as_mut(), env_after_cooldown.clone(), nft_reply).unwrap();
+    // Phase-2 single-step reply chain for pool 2.
     let pool_2 = make_addr("pool_addr_2");
     let pool_reply = create_instantiate_reply(
         encode_reply_id(pool_id_2, FINALIZE_POOL),
         pool_2.as_str(),
-        creation_payload(&res),
+        creation_payload(&create_res),
     );
     pool_creation_reply(deps.as_mut(), env_after_cooldown, pool_reply).unwrap();
 
@@ -813,7 +789,7 @@ fn test_create_commit_pool_rejects_non_bluechip_funds() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked(
+                    denom: String::from(
                         crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL,
                     ),
                 },
@@ -923,7 +899,7 @@ fn test_create_commit_pool_disabled_fee_rejects_attached_funds() {
                         denom: "ubluechip".to_string(),
                     },
                     TokenType::CreatorToken {
-                        contract_addr: Addr::unchecked(
+                        denom: String::from(
                             crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL,
                         ),
                     },
@@ -1009,14 +985,17 @@ fn test_propose_upgrade_dedups_pool_ids() {
 }
 
 // ---------------------------------------------------------------------------
-// The CW20 address minted by the factory (via the SET_TOKENS reply)
-// must be persisted into POOLS_BY_ID — leaving every commit pool's
-// registry entry with the placeholder string would break downstream
-// consumers. This test pins the invariant: registry's
-// CreatorToken address matches the SubMsg-instantiated CW20.
+// Post phase-1 migration: the creator token is a pool-owned TokenFactory
+// native denom `factory/{pool_addr}/{subdenom}`. `finalize_pool` must
+// persist that REAL denom into POOLS_BY_ID (and the derived asset_strings
+// snapshot) — leaving the caller placeholder would break downstream
+// consumers. This test pins the invariant: the registry's CreatorToken
+// denom equals the deterministic pool-owned denom, not the placeholder.
+// (Reworked from `test_pool_details_persists_real_creator_token_address`,
+// which asserted the removed CW20-address handoff.)
 // ---------------------------------------------------------------------------
 #[test]
-fn test_pool_details_persists_real_creator_token_address() {
+fn test_pool_details_persists_real_creator_token_denom() {
     use crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL;
 
     let mut deps = mock_deps_with_querier(&[]);
@@ -1025,8 +1004,9 @@ fn test_pool_details_persists_real_creator_token_address() {
     let env = mock_env();
     let admin_info = message_info(&admin_addr(), &creation_fee_funds());
 
-    // Caller-supplied pair carries the SENTINEL — the factory mints the
-    // CW20 itself and rewrites the address downstream.
+    // Caller-supplied pair carries a placeholder in the CreatorToken slot —
+    // the pool creates the real TokenFactory denom at instantiate and the
+    // factory rewrites the slot in `finalize_pool`.
     let create_msg = ExecuteMsg::Create {
         pool_msg: CreatePool {
             pool_token_info: [
@@ -1034,7 +1014,7 @@ fn test_pool_details_persists_real_creator_token_address() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked(CREATOR_TOKEN_SENTINEL),
+                    denom: String::from(CREATOR_TOKEN_SENTINEL),
                 },
             ],
         },
@@ -1048,68 +1028,55 @@ fn test_pool_details_persists_real_creator_token_address() {
     let create_res = execute(deps.as_mut(), env.clone(), admin_info, create_msg).unwrap();
     let pool_id = POOL_COUNTER.load(&deps.storage).unwrap();
 
-    // Walk the reply chain, threading the creation payload from each
-    // step's response. The address fed into SET_TOKENS is the one
-    // we expect to find in POOLS_BY_ID at the end.
-    let real_token_addr = make_addr("freshly_instantiated_cw20");
-    let token_reply = create_instantiate_reply(
-        encode_reply_id(pool_id, SET_TOKENS),
-        real_token_addr.as_str(),
-        creation_payload(&create_res),
-    );
-    let res = pool_creation_reply(deps.as_mut(), env.clone(), token_reply).unwrap();
-    let nft_addr = make_addr("freshly_instantiated_cw721");
-    let nft_reply = create_instantiate_reply(
-        encode_reply_id(pool_id, MINT_CREATE_POOL),
-        nft_addr.as_str(),
-        creation_payload(&res),
-    );
-    let res = pool_creation_reply(deps.as_mut(), env.clone(), nft_reply).unwrap();
+    // Phase-2 single-step reply chain: the pool-instantiate reply
+    // (reply id FINALIZE_POOL) finalizes and registers the pool. No NFT
+    // or CW20 step.
     let pool_addr = make_addr("freshly_instantiated_pool");
     let pool_reply = create_instantiate_reply(
         encode_reply_id(pool_id, FINALIZE_POOL),
         pool_addr.as_str(),
-        creation_payload(&res),
+        creation_payload(&create_res),
     );
     pool_creation_reply(deps.as_mut(), env, pool_reply).unwrap();
 
-    // Invariant: PoolDetails.pool_token_info[1] must be the REAL CW20,
-    // not the sentinel placeholder.
+    // The creator denom is deterministic: `factory/{pool_addr}/{subdenom}`
+    // where subdenom = symbol.to_lowercase() => "test".
+    let expected_denom = format!("factory/{}/test", pool_addr);
+
+    // Invariant: PoolDetails.pool_token_info[1] must be the REAL pool-owned
+    // TokenFactory denom, not the placeholder.
     let details = POOLS_BY_ID.load(&deps.storage, pool_id).unwrap();
-    let creator_token_addr = match &details.pool_token_info[1] {
-        TokenType::CreatorToken { contract_addr } => contract_addr.clone(),
+    let creator_denom = match &details.pool_token_info[1] {
+        TokenType::CreatorToken { denom } => denom.clone(),
         _ => panic!(
             "expected CreatorToken at pool_token_info[1], got: {:?}",
             details.pool_token_info[1]
         ),
     };
     assert_ne!(
-        creator_token_addr.as_str(),
+        creator_denom.as_str(),
         CREATOR_TOKEN_SENTINEL,
-        "regression: PoolDetails persisted the sentinel instead of the real CW20 address"
+        "regression: PoolDetails persisted the placeholder instead of the real denom"
     );
     assert_eq!(
-        creator_token_addr, real_token_addr,
-        "PoolDetails CreatorToken address must equal the SubMsg-instantiated CW20"
+        creator_denom, expected_denom,
+        "PoolDetails CreatorToken denom must equal the pool-owned TokenFactory denom"
     );
 
     // The asset_strings stored in POOLS_BY_CONTRACT_ADDRESS (used by
     // off-chain query consumers) is derived from pool_token_info — it
-    // must also have the real address, not the sentinel.
+    // must also carry the real denom, not the placeholder.
     let snapshot = POOLS_BY_CONTRACT_ADDRESS
         .load(&deps.storage, pool_addr)
         .unwrap();
     assert!(
-        snapshot
-            .assets
-            .iter()
-            .any(|a| a == real_token_addr.as_str()),
-        "POOLS_BY_CONTRACT_ADDRESS.assets must include the real CW20 address; got: {:?}",
+        snapshot.assets.iter().any(|a| a == &expected_denom),
+        "POOLS_BY_CONTRACT_ADDRESS.assets must include the real denom; got: {:?}",
         snapshot.assets
     );
     assert!(
         !snapshot.assets.iter().any(|a| a == CREATOR_TOKEN_SENTINEL),
-        "POOLS_BY_CONTRACT_ADDRESS.assets must not retain the sentinel; got: {:?}",
+        "POOLS_BY_CONTRACT_ADDRESS.assets must not retain the placeholder; got: {:?}",
         snapshot.assets
     );
 }
@@ -1133,7 +1100,7 @@ fn test_create_rejects_all_numeric_symbol() {
                         denom: "ubluechip".to_string(),
                     },
                     TokenType::CreatorToken {
-                        contract_addr: Addr::unchecked(
+                        denom: String::from(
                             crate::execute::pool_lifecycle::create::CREATOR_TOKEN_SENTINEL,
                         ),
                     },
@@ -1173,7 +1140,7 @@ fn test_commit_pool_create_rate_limit_per_address() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    contract_addr: Addr::unchecked(CREATOR_TOKEN_SENTINEL),
+                    denom: String::from(CREATOR_TOKEN_SENTINEL),
                 },
             ],
         },
@@ -1484,7 +1451,7 @@ mod pair_uniqueness_tests {
                 denom: "ubluechip".to_string(),
             },
             TokenType::CreatorToken {
-                contract_addr: Addr::unchecked(collision_string),
+                denom: String::from(collision_string),
             },
         ];
         assert_ne!(
@@ -1560,6 +1527,95 @@ mod pair_uniqueness_tests {
         );
     }
 
+    /// L-01 — register_pool must fail closed on EVERY registry key, not just
+    /// PAIRS: a duplicate pool_id, a duplicate pool address, and a
+    /// pool_address that disagrees with pool_details.creator_pool_addr are
+    /// each rejected (with a distinct pair each time so the PAIRS guard is
+    /// not what trips). Guards the four-map invariant against a future
+    /// id/address-assignment regression silently clobbering a prior entry.
+    #[test]
+    fn register_pool_guards_every_registry_key() {
+        let mut deps = mock_deps_with_querier(&[]);
+        setup_factory(&mut deps);
+
+        let pair_a = [
+            TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            TokenType::Native {
+                denom: "uatom".to_string(),
+            },
+        ];
+        let pool1 = pool_details_for(pair_a.clone(), 1);
+        register_pool(
+            deps.as_mut().storage,
+            1,
+            &pool1.creator_pool_addr.clone(),
+            &pool1,
+        )
+        .expect("first registration must succeed");
+
+        // (1) Same pool_id, DIFFERENT pair + DIFFERENT address → the pair
+        // guard passes, so the pool_id guard must be what rejects.
+        let pair_b = [
+            TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            TokenType::Native {
+                denom: "uusdc".to_string(),
+            },
+        ];
+        let mut pool_dupe_id = pool_details_for(pair_b.clone(), 1);
+        // Give it a distinct address so only the pool_id collides.
+        pool_dupe_id.creator_pool_addr = make_addr("distinct_addr_for_dupe_id");
+        let err = register_pool(
+            deps.as_mut().storage,
+            1,
+            &pool_dupe_id.creator_pool_addr.clone(),
+            &pool_dupe_id,
+        )
+        .expect_err("duplicate pool_id must be rejected");
+        assert!(
+            err.to_string().contains("duplicate pool_id"),
+            "expected duplicate pool_id error, got: {}",
+            err
+        );
+
+        // (2) DIFFERENT pair + DIFFERENT pool_id but SAME address as pool 1 →
+        // the address guard must reject.
+        let mut pool_dupe_addr = pool_details_for(pair_b.clone(), 2);
+        pool_dupe_addr.creator_pool_addr = pool1.creator_pool_addr.clone();
+        let err = register_pool(
+            deps.as_mut().storage,
+            2,
+            &pool_dupe_addr.creator_pool_addr.clone(),
+            &pool_dupe_addr,
+        )
+        .expect_err("duplicate pool address must be rejected");
+        assert!(
+            err.to_string().contains("duplicate pool address"),
+            "expected duplicate pool address error, got: {}",
+            err
+        );
+
+        // (3) pool_address parameter disagrees with
+        // pool_details.creator_pool_addr → the consistency guard must reject
+        // before any map is touched.
+        let pool_mismatch = pool_details_for(pair_b, 3);
+        let err = register_pool(
+            deps.as_mut().storage,
+            3,
+            &make_addr("some_other_address"),
+            &pool_mismatch,
+        )
+        .expect_err("address mismatch must be rejected");
+        assert!(
+            err.to_string().contains("does not match"),
+            "expected address-mismatch error, got: {}",
+            err
+        );
+    }
+
     /// Migrate back-fill: after instantiating the factory and seeding
     /// `POOLS_BY_ID` directly with two distinct pools (different pairs),
     /// migrate must populate `PAIRS` with one entry per pair.
@@ -1581,7 +1637,7 @@ mod pair_uniqueness_tests {
                 denom: "ubluechip".to_string(),
             },
             TokenType::CreatorToken {
-                contract_addr: make_addr("creator_token_xyz"),
+                denom: make_addr("creator_token_xyz").to_string(),
             },
         ];
 
@@ -1608,6 +1664,11 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Simulate a genuine pre-index legacy contract: it predates
+        // REGISTRY_BACKFILL_DONE, so the one-time gate (M-05) is unset and
+        // the back-fill must run. (`setup_factory`'s modern instantiate set
+        // the flag; clear it to model the legacy scenario faithfully.)
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
 
         assert_eq!(
@@ -1666,6 +1727,9 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Model a pre-index legacy contract (see M-05): clear the one-time
+        // back-fill gate so the walk runs.
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
 
         // First-seen (lowest pool_id) wins.
@@ -1726,6 +1790,11 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
+        // Model a pre-index legacy contract (see M-05): clear the gate so the
+        // FIRST migrate runs the back-fill. The first migrate then SETS the
+        // gate, so the second migrate below must skip the walk (backfilled=0)
+        // — which is exactly the idempotency this test pins.
+        crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("first migrate ok");
         // Second migrate: stored version was just written to CONTRACT_VERSION
         // (current). Reset to an older value so the migrate handler accepts

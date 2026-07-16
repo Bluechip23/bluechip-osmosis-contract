@@ -39,15 +39,15 @@ use cosmwasm_std::{
     MessageInfo, Reply, ReplyOn, Response, StdError, SubMsg, SubMsgResult, Timestamp, Uint128,
     WasmMsg,
 };
-use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use pool_factory_interfaces::asset::{TokenInfo, TokenType};
 use pool_factory_interfaces::routing::{
-    FactoryRouteQueryMsg, PoolSwapCw20HookMsg, PoolSwapExecuteMsg, SwapOperation,
+    FactoryRouteQueryMsg, PoolSwapExecuteMsg, PoolSwapQueryMsg, RouterPoolCommitStatus,
+    SwapOperation,
 };
 use pool_factory_interfaces::RegisteredPoolResponse;
 
 use crate::error::RouterError;
-use crate::msg::{Cw20HookMsg, ExecuteMsg};
+use crate::msg::ExecuteMsg;
 use crate::state::{CONFIG, MAX_HOPS};
 
 /// Reply IDs are offset by this base so that future router features can
@@ -63,10 +63,12 @@ struct HopReplyPayload {
     pool_addr: String,
 }
 
-/// Public entry: native bluechip offer for the first hop.
-///
-/// The caller must attach exactly one coin matching the first hop's
-/// declared offer denom; that coin's amount is used as the route input.
+/// Public entry: native offer for the first hop. The creator token is a
+/// TokenFactory bank denom now, so BOTH sides (bluechip and creator) are
+/// offered the same way — the caller attaches exactly one coin matching
+/// the first hop's declared offer denom, and that coin's amount is the
+/// route input. (Pre-migration a creator-token first hop had to arrive
+/// via a CW20 `Send` through a now-removed `execute_receive_cw20` entry.)
 pub fn execute_multi_hop(
     deps: DepsMut,
     env: Env,
@@ -77,12 +79,11 @@ pub fn execute_multi_hop(
     recipient: Option<String>,
 ) -> Result<Response, RouterError> {
     let first_op = operations.first().ok_or(RouterError::EmptyRoute)?;
+    // Both variants are native bank denoms — attached as funds and
+    // extracted identically.
     let offer_amount = match &first_op.offer_asset_info {
-        TokenType::Native { denom } => extract_native_offer(&info, denom)?,
-        TokenType::CreatorToken { .. } => {
-            return Err(RouterError::Std(StdError::generic_err(
-                "ExecuteMultiHop is for native offers; use cw20::Send for CW20-offered routes",
-            )));
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => {
+            extract_native_offer(&info, denom)?
         }
     };
 
@@ -96,54 +97,6 @@ pub fn execute_multi_hop(
         deadline,
         recipient,
     )
-}
-
-/// Public entry: CW20 offer for the first hop, dispatched via
-/// `cw20::Send`. The CW20 contract has already transferred the offer
-/// amount to the router by the time this handler runs.
-pub fn execute_receive_cw20(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    cw20_msg: Cw20ReceiveMsg,
-) -> Result<Response, RouterError> {
-    let hook: Cw20HookMsg = from_json(&cw20_msg.msg)?;
-    match hook {
-        Cw20HookMsg::ExecuteMultiHop {
-            operations,
-            minimum_receive,
-            deadline,
-            recipient,
-        } => {
-            let first_op = operations.first().ok_or(RouterError::EmptyRoute)?;
-            match &first_op.offer_asset_info {
-                TokenType::CreatorToken { contract_addr } => {
-                    if *contract_addr != info.sender {
-                        return Err(RouterError::Std(StdError::generic_err(format!(
-                            "first hop offer cw20 ({}) does not match sender ({})",
-                            contract_addr, info.sender
-                        ))));
-                    }
-                }
-                TokenType::Native { .. } => {
-                    return Err(RouterError::Std(StdError::generic_err(
-                        "first hop is native; do not call cw20::Send for native offers",
-                    )));
-                }
-            }
-            let user = deps.api.addr_validate(&cw20_msg.sender)?;
-            start_multi_hop(
-                deps,
-                env,
-                user,
-                cw20_msg.amount,
-                operations,
-                minimum_receive,
-                deadline,
-                recipient,
-            )
-        }
-    }
 }
 
 /// Shared route setup. Validates the route, captures the recipient's
@@ -217,16 +170,38 @@ fn start_multi_hop(
     let last_idx = operations.len() - 1;
     let mut messages: Vec<SubMsg> = Vec::with_capacity(operations.len() + 1);
 
+    // M-03 — snapshot the router's PRE-route balance of each hop's offer
+    // denom so each hop swaps only the funds THIS route produces, never a
+    // pre-existing/donated balance. For the FIRST hop's offer denom the
+    // snapshot already includes the just-attached `offer_amount` (funds are
+    // credited before `execute` runs), so subtract it back out to recover
+    // the true pre-existing baseline. Every hop then swaps
+    // `current_offer_balance - offer_baseline`, which equals the attached
+    // input on hop 0 and the prior hop's output on later hops — even when a
+    // denom repeats across non-adjacent hops, because each hop consumes its
+    // full computed input and later inflows of that denom come only from
+    // subsequent hops.
+    let first_offer_info = &operations[0].offer_asset_info;
+
     for (idx, op) in operations.iter().enumerate() {
         let to = if idx == last_idx {
             recipient_addr.to_string()
         } else {
             env.contract.address.to_string()
         };
+        let snapshot = op
+            .offer_asset_info
+            .query_pool_strict(&deps.querier, env.contract.address.clone())?;
+        let offer_baseline = if op.offer_asset_info.equal(first_offer_info) {
+            snapshot.saturating_sub(offer_amount)
+        } else {
+            snapshot
+        };
         let exec_op = ExecuteMsg::ExecuteSwapOperation {
             operation: op.clone(),
             hop_index: idx as u32,
             to,
+            offer_baseline,
         };
         let payload: Binary = to_json_binary(&HopReplyPayload {
             hop_index: idx as u32,
@@ -290,6 +265,7 @@ pub fn execute_swap_operation(
     operation: SwapOperation,
     hop_index: u32,
     to: String,
+    offer_baseline: Uint128,
 ) -> Result<Response, RouterError> {
     if info.sender != env.contract.address {
         return Err(RouterError::Unauthorized);
@@ -304,22 +280,33 @@ pub fn execute_swap_operation(
     let offer_balance = operation
         .offer_asset_info
         .query_pool_strict(&deps.querier, env.contract.address.clone())?;
-    if offer_balance.is_zero() {
+
+    // M-03 — swap only the funds THIS route produced for this hop, not the
+    // router's whole balance of the offer denom. `offer_baseline` is the
+    // pre-route balance snapshotted by `start_multi_hop`; the delta is the
+    // attached input (hop 0) or the prior hop's output (later hops). A
+    // pre-existing/donated balance sits below the baseline and is left
+    // untouched. `saturating_sub` is defensive — the balance can only have
+    // grown by this route's inflows since the snapshot, so it never
+    // underflows in practice.
+    let swap_input = offer_balance.saturating_sub(offer_baseline);
+    if swap_input.is_zero() {
         return Err(RouterError::HopFailed {
             hop_index: hop_index as usize,
             pool_addr: operation.pool_addr.clone(),
-            reason: "router holds zero balance of the offer token at hop start".to_string(),
+            reason: "router holds zero route-generated balance of the offer token at hop start"
+                .to_string(),
         });
     }
 
-    let pool_msg = build_pool_swap_msg(&operation, offer_balance, to_addr.to_string())?;
+    let pool_msg = build_pool_swap_msg(&operation, swap_input, to_addr.to_string())?;
 
     Ok(Response::new()
         .add_message(pool_msg)
         .add_attribute("action", "execute_swap_operation")
         .add_attribute("hop_index", hop_index.to_string())
         .add_attribute("pool", operation.pool_addr)
-        .add_attribute("offer_amount", offer_balance)
+        .add_attribute("offer_amount", swap_input)
         .add_attribute("to", to_addr))
 }
 
@@ -434,6 +421,26 @@ fn validate_route_pools_registered(
                 pool_addr: op.pool_addr.clone(),
             });
         }
+
+        // L-02 — reject a route through a pre-threshold pool up front,
+        // mirroring the simulation path (`simulate_multi_hop`). A commit
+        // pool that has not crossed its threshold cannot be swapped through;
+        // without this check the route would still revert atomically at the
+        // pool, but as an opaque wrapped `HopFailed` rather than the
+        // actionable `PoolInCommitPhase` the frontend gets from simulation.
+        // Checking here keeps simulate and execute in agreement.
+        let commit_status: RouterPoolCommitStatus = deps.querier.query_wasm_smart(
+            op.pool_addr.clone(),
+            &PoolSwapQueryMsg::IsFullyCommited {},
+        )?;
+        if let RouterPoolCommitStatus::InProgress { raised, target } = commit_status {
+            return Err(RouterError::PoolInCommitPhase {
+                hop_index: idx,
+                pool_addr: op.pool_addr.clone(),
+                raised,
+                target,
+            });
+        }
     }
     Ok(())
 }
@@ -505,8 +512,12 @@ fn build_pool_swap_msg(
     offer_amount: Uint128,
     to: String,
 ) -> Result<CosmosMsg, RouterError> {
+    // Both the bluechip side and the creator TokenFactory side are native
+    // bank denoms now, so every hop is a `SimpleSwap` with the offer denom
+    // attached as funds. (Pre-migration the `CreatorToken` arm routed
+    // through a CW20 `Send` + `PoolSwapCw20HookMsg::Swap`.)
     match &operation.offer_asset_info {
-        TokenType::Native { denom } => {
+        TokenType::Native { denom } | TokenType::CreatorToken { denom } => {
             let exec = PoolSwapExecuteMsg::SimpleSwap {
                 offer_asset: TokenInfo {
                     info: operation.offer_asset_info.clone(),
@@ -524,24 +535,6 @@ fn build_pool_swap_msg(
                     denom: denom.clone(),
                     amount: offer_amount,
                 }],
-            }))
-        }
-        TokenType::CreatorToken { contract_addr } => {
-            let hook = PoolSwapCw20HookMsg::Swap {
-                belief_price: None,
-                max_spread: Some(per_hop_max_spread()),
-                to: Some(to),
-                transaction_deadline: None,
-            };
-            let send = Cw20ExecuteMsg::Send {
-                contract: operation.pool_addr.clone(),
-                amount: offer_amount,
-                msg: to_json_binary(&hook)?,
-            };
-            Ok(CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: contract_addr.to_string(),
-                msg: to_json_binary(&send)?,
-                funds: vec![],
             }))
         }
     }
