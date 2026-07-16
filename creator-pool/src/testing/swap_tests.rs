@@ -1770,6 +1770,80 @@ fn test_post_threshold_commit_requires_belief_price() {
     );
 }
 
+/// H-2 — once the pool has crossed its threshold, a commit must forward its
+/// FULL 1% bluechip fee to the wallet and never top up the creation-fee
+/// reserve again, even when the configured reserve target still leaves
+/// "room" above what was actually retained. Pre-fix, `reserve_bluechip_fee`
+/// used `CREATION_FEE_RESERVE_TARGET` as the ceiling, so a live gamm fee
+/// below the target left `room > 0` and post-threshold commits kept
+/// siphoning bluechip into the (now-unspendable) pool reserve.
+#[test]
+fn test_h2_post_threshold_commit_forwards_full_bluechip_fee() {
+    use crate::mock_querier::mock_deps_estimate;
+    use crate::state::{BLUECHIP_FEE_RESERVED, CREATION_FEE_RESERVE_TARGET};
+
+    let mut deps = mock_deps_estimate(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_post_threshold(&mut deps); // IS_THRESHOLD_HIT = true
+    deps.querier
+        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+
+    // Simulate post-crossing state where the configured target (100 OSMO)
+    // still sits ABOVE what was actually retained (10 OSMO) — i.e. room > 0.
+    // Pre-fix this would have caused continued retention.
+    CREATION_FEE_RESERVE_TARGET
+        .save(&mut deps.storage, &Uint128::new(100_000_000))
+        .unwrap();
+    BLUECHIP_FEE_RESERVED
+        .save(&mut deps.storage, &Uint128::new(10_000_000))
+        .unwrap();
+
+    let commit_amount = Uint128::new(100_000_000); // 1% bluechip fee = 1_000_000
+    let info = message_info(
+        &Addr::unchecked("commiter"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: commit_amount,
+        }],
+    );
+    let msg = ExecuteMsg::Commit {
+        asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: commit_amount,
+        },
+        transaction_deadline: None,
+        belief_price: Some(Decimal::one()),
+        max_spread: None,
+    };
+
+    let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // The FULL 1% bluechip fee (1_000_000) is bank-sent to the wallet — not
+    // partially retained.
+    let full_fee_to_wallet = res.messages.iter().any(|m| matches!(
+        &m.msg,
+        cosmwasm_std::CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount })
+            if to_address == "bluechip_treasury"
+                && amount.iter().any(|c| c.denom == "ubluechip" && c.amount == Uint128::new(1_000_000))
+    ));
+    assert!(
+        full_fee_to_wallet,
+        "post-threshold commit must forward the full 1% bluechip fee to the wallet; msgs: {:?}",
+        res.messages
+    );
+
+    // The reserve is untouched post-threshold (no further retention).
+    assert_eq!(
+        BLUECHIP_FEE_RESERVED.load(&deps.storage).unwrap(),
+        Uint128::new(10_000_000),
+        "post-threshold commit must not grow BLUECHIP_FEE_RESERVED"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // FIX B — COMMITTER_COUNT is O(1) and EXACT across repeat committers
 // ---------------------------------------------------------------------------
