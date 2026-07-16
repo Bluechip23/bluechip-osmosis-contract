@@ -2,8 +2,20 @@
 
 **Scope:** `factory`, `creator-pool`, `router`, `packages/pool-core`, `packages/pool-factory-interfaces`
 **Target chain:** Osmosis (CosmWasm 2.x, osmosis-std 0.27, x/gamm + x/tokenfactory + x/poolmanager + x/twap)
-**Commit / branch:** `claude/bluechip-osmosis-audit-1iom52`
+**Branches:** Round 1 `claude/bluechip-osmosis-audit-1iom52`; **Round 2 `claude/bluechip-osmosis-audit-666nb5` (current)**
 **Reviewer posture:** Tier-1 (Trail of Bits / OtterSec) rigor; findings traced to specific lines.
+
+> **Round 2 (current branch) — status.** A second review pass on top of the
+> Round 1 remediations surfaced three more issues, all now **fixed** on
+> `…-666nb5`: **H-1** the FIX-G circuit breaker never latched on-chain
+> (save-then-`Err` was rolled back by the VM); **H-2** post-threshold
+> over-retention of the 1% bluechip fee when the live gamm fee is below the
+> configured target; **H-3** the estimate-only slippage floor gives no
+> sandwich protection without a `belief_price` (this is the earlier **M-02**,
+> now resolved on the commit path). See
+> [Round 2 findings](#round-2-findings-current-branch). The Round 1 sections
+> below are retained as the historical record; where a finding was later
+> superseded it is flagged inline.
 
 ---
 
@@ -13,7 +25,7 @@ The migration off the internal AMM/CW20 onto Osmosis-native modules is, on the w
 
 **The single most important issue is not an attacker exploit — it is a latent bricking condition at the most fragile moment in the whole lifecycle: the threshold crossing.** The native GAMM pool is created with `SubMsg::reply_on_success(MsgCreateBalancerPool)`. The `x/gamm` module charges the chain's `PoolCreationFee` (1000 OSMO on Osmosis mainnet, governance-adjustable) *on top of* the seeded liquidity. The contract funds this from a reserve that is (a) defaulted to **zero**, (b) **never validated** against the live chain param, and (c) filled only from 1% of commits. If the configured `gamm_pool_creation_fee` is less than the live chain fee — which is the default, and which a single governance vote can cause post-deployment — the create reverts, which reverts the entire crossing tx, and the pool becomes **permanently stuck pre-threshold.** Because pre-threshold pools have **no refund or withdrawal path** (emergency withdraw is explicitly disabled pre-threshold and no cancel/refund handler exists), every committer's funds in that pool are permanently locked. This is the top item to resolve before board submission (H-01, H-02).
 
-Beyond that, the material items are: the creator token's on-chain denom metadata (name/symbol/decimals) is **never registered** — the creator's chosen name is effectively discarded except for deriving the subdenom, so explorers/wallets show a raw `factory/{addr}/{sub}` denom (M-01); the "estimate-derived" slippage floor does not actually protect against sandwiching for users who don't pass a `belief_price` (M-02); the router sweeps its whole balance per hop, making stray funds claimable (M-03); and the factory `migrate()` lacks a cw2 contract-name check and does an unbounded registry back-fill that can eventually make the factory un-upgradeable (M-04, M-05).
+Beyond that, the material items are: the creator token's on-chain denom metadata (name/symbol/decimals) is **never registered** — the creator's chosen name is effectively discarded except for deriving the subdenom, so explorers/wallets show a raw `factory/{addr}/{sub}` denom (M-01); the "estimate-derived" slippage floor does not actually protect against sandwiching for users who don't pass a `belief_price` (M-02 — **now fixed in Round 2 as H-3**); the router sweeps its whole balance per hop, making stray funds claimable (M-03); and the factory `migrate()` lacks a cw2 contract-name check and does an unbounded registry back-fill that can eventually make the factory un-upgradeable (M-04, M-05).
 
 **Recommendation:** Do not deploy to mainnet until H-01/H-02 are resolved (validate/provision the GAMM creation fee and add a pre-threshold exit path), and M-01 is resolved (set denom metadata) since it directly defeats one of the product's stated requirements. The remaining Medium/Low items are hardening.
 
@@ -32,8 +44,17 @@ Beyond that, the material items are: the creator token's on-chain denom metadata
 | **L-02** — execution skips `IsFullyCommited` | **Fixed** | `validate_route_pools_registered` now queries `IsFullyCommited` per hop and rejects a pre-threshold pool up front with `PoolInCommitPhase`, matching the simulation path (simulate/execute now agree). |
 | **L-01** — `register_pool` guards only `PAIRS` | **Fixed** | `register_pool` now rejects a duplicate `pool_id`, a duplicate pool address, and a `pool_address` that disagrees with `pool_details.creator_pool_addr` — every registry key is fail-closed, not a blind overwrite. Covered by a new regression test. |
 | **L-05** — stale "anchor-exclusion" doc | **Fixed (doc)** | Corrected the `build_upgrade_batch` / propose doc comments: there is no anchor-pool concept in this factory. The "anchor pool" belonged to the pre-migration `bluechip-contracts` design and does not exist post-Osmosis-migration; no anchor resolution runs anywhere. |
+| **H-1** — circuit breaker never latches (Round 2) | **Fixed** | `enforce_liquidity_breaker` saved `POOL_PAUSED`/`POOL_PAUSED_AUTO` then returned `Err`, which the CosmWasm VM rolls back — so the auto-pause never persisted on-chain (it only "worked" under the non-reverting unit-test mock). The breaker now returns a `BreakerOutcome`; on a trip it persists the latch and each swap site returns `Ok`, refunding the attached offer coin via a shared helper. Regression test asserts the latch persists and rejects the next swap. |
+| **H-2** — post-threshold fee over-retention (Round 2) | **Fixed** | Post-threshold the 1% bluechip fee kept topping up `BLUECHIP_FEE_RESERVED` whenever the live gamm fee was below `CREATION_FEE_RESERVE_TARGET` (`room > 0`), stranding protocol revenue in the pool. Reservation is now gated on `!threshold_already_hit`, so every post-threshold commit forwards its full 1% to the wallet. Dedicated regression test added. |
+| **M-02 / H-3** — estimate floor not anti-sandwich (Round 2) | **Fixed** | Post-threshold commits (the un-routed retail buy) now **require** an explicit `belief_price`; the misleading "closes the no-belief-price sandwich hole" comments are corrected to state the estimate floor is a liveness/zero-quote guard only. `SimpleSwap` still accepts `belief_price: null` for the router (protected end-to-end by `minimum_receive`). The reference frontend derives `belief_price` from a live `Simulation` at submit time. |
 
-All four crates build clean and the full test suite passes (creator-pool 140, factory 103, pool-core 8, router 22 — 273 total, 0 failures). Remaining open items: **L-03** (router single-step admin rotation) and **L-04** (config apply re-runs a live TWAP probe) — both intentionally left per owner discussion; see "Remaining Low findings" for detail.
+All crates build clean and the full test suite passes on the current branch
+(**creator-pool 145, factory 103, pool-core 8, router 22 — 0 failures**),
+including a crossing-conservation property test
+(`creator-pool/src/testing/invariant_tests.rs`) and an excluded
+`osmosis-test-tube` end-to-end harness (`integration-tests/`). Remaining open
+items: **L-03** (router single-step admin rotation) and **L-04** (config apply
+re-runs a live TWAP probe) — both intentionally left per owner discussion.
 
 ---
 
@@ -43,18 +64,53 @@ All four crates build clean and the full test suite passes (creator-pool 140, fa
 |---|---|
 | Still one factory creating all the GMMs? | **Yes.** Single `factory` contract, monotonic `POOL_COUNTER`, `register_pool` writes the registry. Each pool is its own contract instance that creates one native GAMM pool at crossing. |
 | GMMs only become active after the 25k threshold? | **Yes.** The native GAMM pool is *created* only inside `trigger_threshold_payout` at crossing. Before that, `POOL_ID` is unset and `SimpleSwap` rejects with `ShortOfThreshold`. Threshold is USD-valued via x/twap (default $25k, configurable). |
-| Do creators still get to name their token? | **Partially — see M-01.** `name`/`symbol`/`decimals` are validated, but only the lowercased `symbol` is used (to derive the subdenom). No `MsgSetDenomMetadata` is ever sent, so the name/symbol/decimals are **not** registered on-chain. |
+| Do creators still get to name their token? | **Yes (M-01 fixed).** `name`/`symbol`/`decimals` are validated and now registered on-chain via `MsgSetDenomMetadata` at instantiate (dispatched `reply_on_error` so it can never brick pool creation), so wallets/explorers show the chosen name/symbol and 6-decimal scaling. |
 | Minting event on crossing to creator / committers / bluechip / pool? | **Yes.** `trigger_threshold_payout` mints the four canonical splits: creator 325B, bluechip 25B, pool-seed 350B (to the pool for AMM seeding), commit-return 500B (funds the committer airdrop). All via TokenFactory `MsgMint`. |
 | Cap on how far above threshold the crossing tx can go? | **Yes.** The crossing commit counts only `value_to_threshold` toward the raise; the entire post-fee **excess is refunded** to the crosser (`threshold_crossing.rs:102-112`). You cannot over-shoot the recorded raise. |
 | Gate holding excess OSMO up to the max, eventually to creator? | **Yes.** When net raised > `max_bluechip_lock_per_pool`, the excess OSMO + proportional creator tokens are time-locked in `CREATOR_EXCESS_POSITION` and claimed by the creator after `unlock_time` via `ClaimCreatorExcessLiquidity`. |
 | Post-threshold commit still available, kicking out 1% bluechip + 5% creator fee? | **Yes.** Fees are split in the dispatcher for **every** path; post-threshold the net-of-fees remainder is swapped for creator tokens via `MsgSwapExactAmountIn` and forwarded to the committer. |
 | Is commit the only tx available pre-threshold? | **Yes.** `SimpleSwap`, `ClaimCreatorExcessLiquidity`, `ContinueDistribution`, etc. are all gated on `IS_THRESHOLD_HIT` / post-crossing state. Only `Commit` (and factory-admin ops) work pre-threshold. |
-| Fully compatible with Osmosis? | **Mostly.** Message construction (tokenfactory/gamm/poolmanager/twap via osmosis-std 0.27) is correct. Two caveats: the GAMM creation-fee provisioning (H-01) and missing denom metadata (M-01). |
-| Will explorers pick up the pools & transactions? | **Pools: yes** (native GAMM pool). **Swaps: yes**, but attributed to the *pool contract* as `sender`, followed by a separate `BankMsg::Send` to the user (explorer shows the contract swapping, not the EOA). **Creator token: shows as a denom but with no name/symbol/decimals** until M-01 is fixed. |
+| Fully compatible with Osmosis? | **Yes.** Message construction (tokenfactory/gamm/poolmanager/twap via osmosis-std 0.27) is correct; the two prior caveats — GAMM creation-fee provisioning (H-01) and denom metadata (M-01) — are both fixed. On-chain validation of the reply protobuf decodes + native seeding is covered by the `osmosis-test-tube` harness (`integration-tests/`). |
+| Will explorers pick up the pools & transactions? | **Pools: yes** (native GAMM pool). **Swaps: yes**, but attributed to the *pool contract* as `sender`, followed by a separate `BankMsg::Send` to the user (explorer shows the contract swapping, not the EOA — see I-07). **Creator token: yes** — the denom now carries name/symbol/6-dec metadata (M-01 fixed). |
 
 ---
 
-## Findings
+## Round 2 findings (current branch)
+
+Three issues found on top of the Round 1 remediations, all **fixed** on
+`…-666nb5`. A key methodology note that motivated H-1: the pool crate had
+**no `cw-multi-test` integration coverage** — every test ran against
+`mock_dependencies`, which does *not* emulate the SDK's revert-on-`Err`. That
+blind spot is exactly what hid H-1, so a crossing-conservation property test
+and an `osmosis-test-tube` harness were added alongside the fixes.
+
+### [MEDIUM] H-1 — FIX-G circuit breaker never latches on-chain (save-then-`Err` is rolled back)
+- **Severity:** Medium — **Fixed**
+- **Category:** State consistency / broken safety control
+- **Files:** `packages/pool-core/src/swap.rs` (`enforce_liquidity_breaker`), reached from the `SimpleSwap` and `creator-pool/src/commit/post_threshold.rs` sites.
+- **Description:** On a low-liquidity trip the breaker did `POOL_PAUSED.save(true)` + `POOL_PAUSED_AUTO.save(true)` and then `return Err(PoolPausedLowLiquidity)`. Because that `Err` propagates out of `execute`, the CosmWasm VM rolls back **all** storage writes from the message — including the two pause saves. So the pool was **never actually latched paused**; `POOL_PAUSED_AUTO` was write-only dead state, and the documented "manual admin `Unpause` required" behaviour never occurred. The only test that "proved" it passed solely because `mock_dependencies` does not revert on `Err`.
+- **Impact:** Not fund theft (the breaker still fails *closed* per-call — each low-liquidity swap reverts). But the pool self-heals the instant liquidity recovers, monitors watching pause state never see the trip, and any handler gated only on `POOL_PAUSED` isn't halted during the low window.
+- **Fix:** `enforce_liquidity_breaker` now returns a `BreakerOutcome`; on `Tripped` it persists the pause and the caller returns `Ok`, refunding the attached offer coin via `breaker_tripped_refund_response`. A regression test asserts the pause **persists** and the next swap is rejected at the pause gate.
+
+### [MEDIUM] H-2 — Post-threshold over-retention of the 1% bluechip fee strands protocol revenue
+- **Severity:** Medium — **Fixed**
+- **Category:** Fund accounting
+- **Files:** `creator-pool/src/commit/threshold_payout.rs` (reserve pin), `creator-pool/src/commit.rs` (`reserve_bluechip_fee` ceiling).
+- **Description:** During funding the 1% bluechip fee is retained in-pool up to `CREATION_FEE_RESERVE_TARGET` (the **configured** amount). At crossing the code pinned `BLUECHIP_FEE_RESERVED` to the **live** `creation_fee`, not the target. Whenever the live gamm fee was below the configured target, `room = target − creation_fee > 0`, so **every post-threshold commit kept retaining** its bluechip fee instead of sending it to the wallet — up to `room` per pool of protocol revenue stranded in the pool (recoverable only via emergency drain). This triggers under exactly the "over-provision the target as a safety margin" configuration the H-01 fix encourages.
+- **Fix:** Reservation is gated on `!threshold_already_hit`, so once the pool has crossed, the full 1% always flows to the wallet. The crossing commit is still pre-threshold at that point and makes its final top-up before the crossing consumes the reserve. Dedicated regression test added.
+
+### [MEDIUM] H-3 — Slippage floor is computed on-chain: no sandwich protection without `belief_price`
+- **Severity:** Medium — **Fixed** (this is the earlier **M-02**)
+- **Category:** Oracle/price trust / MEV
+- **Files:** `packages/pool-core/src/swap.rs` (`compute_token_out_min` / `derive_token_out_min`), `creator-pool/src/commit/post_threshold.rs`.
+- **Description:** `token_out_min = max(estimate_floor, belief_floor)`, where `estimate_floor` uses the poolmanager quote **at execution-time pool state**. A front-run in an earlier tx of the same block moves the pool, so the estimate reflects the already-degraded price and the floor is satisfied by the sandwiched fill. Without a caller-supplied `belief_price`, there is no manipulation-resistant bound — yet the code comments claimed the estimate floor "closes the no-belief-price sandwich hole."
+- **Impact:** Value extraction on every contract-routed swap/commit submitted without a `belief_price`. Post-threshold commits are most exposed (no `minimum_receive` backstop, unlike the router).
+- **Fix:** Post-threshold commits now **require** `belief_price` (`BeliefPriceRequired`), checked after the `POOL_ID` gate so "not yet seeded" still reads as `ShortOfThreshold`. Comments corrected to describe the estimate floor as a liveness/zero-quote guard only. `SimpleSwap` retains `belief_price: null` support for the router (end-to-end `minimum_receive`). The reference frontend derives `belief_price` from a live `Simulation` quote at submit time.
+- **Residual (accepted):** a *direct* `SimpleSwap` (not via the router) with `belief_price: null` still relies only on the estimate floor. Fully closing this without breaking the router needs a router-coordinated per-hop `token_out_min`; documented for the owner.
+
+---
+
+## Findings (Round 1)
 
 ### [HIGH] H-01 — GAMM `PoolCreationFee` under-provisioning bricks threshold crossing and permanently locks committed funds
 - **Severity:** High (escalates to **Critical** if deployed with the default/zero fee)
@@ -102,6 +158,7 @@ All four crates build clean and the full test suite passes (creator-pool 140, fa
 ---
 
 ### [MEDIUM] M-02 — "Estimate-derived" slippage floor provides no real sandwich protection when `belief_price` is omitted
+> **SUPERSEDED — fixed in Round 2 as H-3 (see [Round 2 findings](#round-2-findings-current-branch)).** Post-threshold commits now require a `belief_price`; the misleading comments are corrected. The description below is retained as the original finding.
 - **Severity:** Medium
 - **Category:** Oracle/price trust / MEV
 - **Files:** `packages/pool-core/src/swap.rs:60-210` (`derive_token_out_min`, `compute_token_out_min`, `estimate_swap_out`); post-threshold commit path `creator-pool/src/commit/post_threshold.rs:79-87`
@@ -195,9 +252,13 @@ All four crates build clean and the full test suite passes (creator-pool 140, fa
 | `pool_osmo_balance == pools_bluechip_seed + reserved` through crossing | **Yes** | Verified algebraically across fees → refund → seed → creation-fee → remit for both the no-cap and over-cap branches; no brick on the balance side, earmark fully backed. |
 | Threshold-payout splits are canonical (325B/25B/350B/500B = 1.2T) | **Yes** | Enforced at factory config, at pool instantiate, and again at runtime in `trigger_threshold_payout`. |
 | Committer distribution conserves supply | **Yes** | Floor-division dust is settled to the creator on the final batch, gated on `distributed_so_far > 0` to avoid double-mint on legacy state. |
-| Native GAMM pool created iff threshold crossed | **Conditionally** | Holds logically, **but** the create can revert and brick the crossing under H-01. |
+| Native GAMM pool created iff threshold crossed | **Yes** | H-01 fixed: the seed reserves the **live** chain fee, so the create no longer bricks on a mis-set/changed fee; property-tested conservation confirms the seed is always positive and fully funded. |
+| OSMO conserved through crossing (`seed + fee + leftover + earmark == raised + reserved`) | **Yes** | Pinned by a 400-case property test (`invariant_tests.rs`) across over-cap / non-over-cap / shortfall branches. |
+| Circuit-breaker auto-pause latches on a trip | **Yes** | H-1 fixed — the pause now persists (breaker returns `Ok` + refund instead of `Err`); previously it was silently rolled back. |
+| Post-threshold commit forwards the full 1% bluechip fee | **Yes** | H-2 fixed — reservation gated on `!threshold_already_hit`; regression-tested. |
+| User swaps/commits carry a manipulation-resistant slippage bound | **Yes (commit)** | H-3 fixed — post-threshold commits require `belief_price`. Direct `SimpleSwap` with `belief_price: null` is an accepted residual (router uses `minimum_receive`). |
 | Creator excess always backed by contract balance | **Yes** | FIX-C/FIX-E leave exactly `excess_bluechip` after seeding + fee; drain excludes the earmark (`saturating_sub`). |
-| Pre-threshold funds recoverable | **NO** | H-02 — no exit path. |
+| Pre-threshold funds recoverable | **NO (by design)** | H-02 — permanent pre-threshold commitment is the intended economic model (owner-confirmed). |
 | One pool per unordered pair | **Yes** | `canonical_pair_key` + `PAIRS` guard; creator denom is per-pool unique so collisions are structurally impossible. |
 | `NotifyThresholdCrossed` callable only by the registered pool, once | **Yes** | Address check + `POOL_THRESHOLD_CROSSED` idempotency gate. |
 
@@ -211,18 +272,27 @@ All four crates build clean and the full test suite passes (creator-pool 140, fa
 | `Propose/Apply/Cancel *Config`, `UpgradePools`, `Pause/Unpause`, `EmergencyWithdraw*`, `Recover*` | factory | admin-only (48h timelock on config/upgrade) | Low (auth + timelock verified) |
 | `NotifyThresholdCrossed` | factory | registered-pool-only + idempotent | Low |
 | `PruneRateLimits` | factory | permissionless | Low (bounded batch) |
-| `migrate` | factory | wasmd admin | **Medium** (M-04/M-05) |
-| `Commit` | creator-pool | permissionless | **High** (H-01/H-02 lifecycle risk; M-02 MEV) |
-| `SimpleSwap` | creator-pool | permissionless, post-threshold | **Medium** (M-02 sandwich) |
+| `migrate` | factory | wasmd admin | Low (M-04 cw2-name check + M-05 one-time back-fill gate both fixed) |
+| `Commit` | creator-pool | permissionless | Low (H-01 fixed; H-02 pre-threshold lock is owner-confirmed design; H-3 belief_price now required post-threshold) |
+| `SimpleSwap` | creator-pool | permissionless, post-threshold | Low (H-1 breaker latches; direct-swap `belief_price: null` residual documented under H-3) |
 | `ContinueDistribution` / `SelfRecoverDistribution` / `ClaimFailedDistribution` | creator-pool | permissionless (rate-limited) | Low |
 | `ClaimCreatorExcessLiquidity` | creator-pool | creator-only + timelock | Low |
 | `UpdateConfigFromFactory` / admin ops | creator-pool | factory-only | Low |
-| `ExecuteMultiHop` | router | permissionless | **Medium** (M-03 sweep) |
+| `ExecuteMultiHop` | router | permissionless | Low (M-03 whole-balance sweep fixed via per-hop `offer_baseline`) |
 | `ExecuteSwapOperation` / `AssertReceived` | router | self-only | Low |
 
 ---
 
 ## Recommendations Summary (highest severity first)
+
+> **Current status (branch `…-666nb5`):** every High/Medium item below is
+> **resolved** — H-01, M-01, M-03, M-04, M-05, L-01, L-02, L-05 in Round 1;
+> H-1, H-2, and M-02/H-3 in Round 2. **H-02** (pre-threshold funds
+> non-recoverable) is **not** a code change — the owner confirmed permanent
+> pre-threshold commitment as the intended economic model; it must be
+> surfaced in the commit UX and disclosed in the submission. **L-03** and
+> **L-04** are intentionally left. The numbered list below is the original
+> recommendation set, retained for traceability.
 
 1. **H-01** — Validate/provision the GAMM `PoolCreationFee`: reject a zero/under-set `gamm_pool_creation_fee`, ideally live-probe `x/gamm` params at config time and require `configured >= live_fee` with margin. **Blocking for mainnet.**
 2. **H-02** — Add a pre-threshold committer refund / pool-cancel path so committed funds are always recoverable. **Blocking for mainnet** (or an explicit, documented design acceptance).
