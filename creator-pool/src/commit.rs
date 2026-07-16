@@ -284,16 +284,30 @@ fn execute_commit_logic(
             // The bluechip 1% fee is SPLIT: the portion still needed to reach
             // the gamm creation-fee reserve target STAYS in the pool (added to
             // BLUECHIP_FEE_RESERVED, never bank-sent), and only the remainder
-            // is bank-sent to the live bluechip wallet. Applied here in the
-            // dispatcher so it holds UNIFORMLY across every commit path — the
-            // reserved OSMO must be retained regardless of phase (pre-,
-            // post-, and both crossing handlers all consume `messages` built
-            // below). `amount_after_fees` is unchanged: the full 1%+5% is
-            // still deducted from the commit, the reserve only redirects where
-            // the bluechip fee lands (pool vs wallet). Once the target is met
-            // `to_reserve == 0` and the full 1% flows to the wallet as before.
-            let bluechip_fee_to_wallet =
-                reserve_bluechip_fee(deps.storage, commit_fee_bluechip_amt)?;
+            // is bank-sent to the live bluechip wallet. `amount_after_fees` is
+            // unchanged: the full 1%+5% is still deducted from the commit, the
+            // reserve only redirects where the bluechip fee lands (pool vs
+            // wallet).
+            //
+            // H-2 — the reserve is ONLY topped up while the pool is still
+            // pre-threshold. The gamm creation fee is charged (and any reserve
+            // surplus remitted) exactly once, inside the threshold-crossing
+            // handler; after that the reserve is spent and must never grow
+            // again. Retaining post-threshold would siphon the protocol's 1%
+            // fee into the pool's bank balance whenever the live gamm fee is
+            // below the configured reserve target (`room > 0`), where it would
+            // sit unspent and stranded until an emergency drain. Gating the
+            // reservation on `!threshold_already_hit` guarantees every
+            // post-threshold commit forwards its FULL 1% bluechip fee to the
+            // live wallet. The crossing commit itself is still pre-threshold at
+            // this point (IS_THRESHOLD_HIT flips inside the crossing handler,
+            // after this line), so it correctly makes its final top-up before
+            // the crossing consumes the reserve.
+            let bluechip_fee_to_wallet = if threshold_already_hit {
+                commit_fee_bluechip_amt
+            } else {
+                reserve_bluechip_fee(deps.storage, commit_fee_bluechip_amt)?
+            };
 
             let messages = build_fee_messages(
                 &fee_info,

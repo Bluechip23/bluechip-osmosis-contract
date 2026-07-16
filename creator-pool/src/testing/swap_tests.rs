@@ -327,7 +327,9 @@ fn test_commit_post_threshold_swap() {
             amount: commit_amount,
         },
         transaction_deadline: None,
-        belief_price: None,
+        // H-3 — post-threshold commits require an explicit belief_price (the
+        // only manipulation-resistant slippage bound on the swap leg).
+        belief_price: Some(Decimal::one()),
         max_spread: None,
     };
 
@@ -1675,6 +1677,13 @@ fn test_simple_swap_estimate_floor_sets_nonzero_token_out_min() {
 /// commit's post-fee swap leg of a $100 commit (1% + 5% fees) is
 /// 94_000_000 bluechip; at a 1:1 estimate and default 0.5% spread the
 /// floor is 94_000_000 * 0.995 = 93_530_000.
+///
+/// H-3 — post-threshold commits now REQUIRE a belief_price. Here it is set
+/// deliberately loose (2.0, i.e. belief_floor = 94_000_000/2 * 0.995 =
+/// 46_765_000) so the on-chain ESTIMATE floor (93_530_000) is the binding
+/// `max(estimate_floor, belief_floor)` term, preserving this test's intent
+/// (the estimate floor is load-bearing) while satisfying the new
+/// belief_price requirement.
 #[test]
 fn test_post_threshold_commit_estimate_floor_nonzero_token_out_min() {
     use crate::mock_querier::mock_deps_estimate;
@@ -1704,7 +1713,9 @@ fn test_post_threshold_commit_estimate_floor_nonzero_token_out_min() {
             amount: commit_amount,
         },
         transaction_deadline: None,
-        belief_price: None,
+        // Loose belief_price (2.0) → belief_floor below the estimate floor,
+        // so the estimate floor remains the binding term.
+        belief_price: Some(Decimal::percent(200)),
         max_spread: None,
     };
 
@@ -1713,6 +1724,50 @@ fn test_post_threshold_commit_estimate_floor_nonzero_token_out_min() {
     // 94_000_000 * 0.995 = 93_530_000.
     assert_eq!(token_out_min_attr(&res), "93530000");
     assert!(res.messages.iter().any(|m| m.id == REPLY_ID_SWAP_FORWARD));
+}
+
+/// H-3 — a post-threshold commit with no belief_price is rejected. The
+/// on-chain estimate floor is not sandwich-resistant, so the commit swap
+/// leg must carry an explicit off-chain-derived belief_price.
+#[test]
+fn test_post_threshold_commit_requires_belief_price() {
+    use crate::mock_querier::mock_deps_estimate;
+
+    let mut deps = mock_deps_estimate(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_post_threshold(&mut deps);
+    deps.querier
+        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+
+    let env = mock_env();
+    let commit_amount = Uint128::new(100_000_000);
+    let info = message_info(
+        &Addr::unchecked("commiter"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: commit_amount,
+        }],
+    );
+    let msg = ExecuteMsg::Commit {
+        asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: commit_amount,
+        },
+        transaction_deadline: None,
+        belief_price: None,
+        max_spread: None,
+    };
+
+    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+    assert!(
+        matches!(err, ContractError::BeliefPriceRequired {}),
+        "post-threshold commit without belief_price must reject; got {:?}",
+        err
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2139,18 +2194,50 @@ fn test_fix_g_breaker_pauses_below_floor() {
         to: None,
         transaction_deadline: None,
     };
-    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
-    match err {
-        ContractError::PoolPausedLowLiquidity {} => {}
-        other => panic!("expected breaker low-liquidity pause, got {:?}", other),
-    }
+    // H-1 — a tripped breaker returns `Ok` (so the latched pause persists;
+    // an `Err` would have rolled the pause writes back on-chain) and refunds
+    // the attached offer coin. No swap SubMsg is dispatched.
+    let res = execute(deps.as_mut(), env.clone(), info.clone(), msg.clone()).unwrap();
+    assert_eq!(action_attr(&res), "swap_auto_paused_low_liquidity");
+    assert!(
+        !res.messages.iter().any(|m| m.id == REPLY_ID_SWAP_FORWARD),
+        "no swap is dispatched when the breaker trips"
+    );
+    // The attached offer coin is refunded to the trader.
+    let refunded = res.messages.iter().any(|m| matches!(
+        &m.msg,
+        cosmwasm_std::CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount })
+            if to_address == "trader"
+                && amount.len() == 1
+                && amount[0].denom == "ubluechip"
+                && amount[0].amount == swap_amount
+    ));
+    assert!(refunded, "breaker refunds the attached offer coin on trip");
     assert!(
         crate::state::POOL_PAUSED.load(&deps.storage).unwrap(),
-        "breaker sets POOL_PAUSED"
+        "breaker latches POOL_PAUSED (persists because the caller returns Ok)"
     );
     assert!(
         crate::state::POOL_PAUSED_AUTO.load(&deps.storage).unwrap(),
-        "breaker sets POOL_PAUSED_AUTO"
+        "breaker latches POOL_PAUSED_AUTO"
+    );
+
+    // The latch holds: a subsequent swap is now rejected at the POOL_PAUSED
+    // gate, proving the pause actually stuck. Use a FRESH sender so the
+    // per-address swap/commit rate limit (stamped by the first, tripped
+    // call for `trader`) doesn't mask the pause rejection.
+    let info2 = message_info(
+        &Addr::unchecked("trader2"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let err = execute(deps.as_mut(), env, info2, msg).unwrap_err();
+    assert!(
+        matches!(err, ContractError::PoolPausedLowLiquidity {}),
+        "latched pause rejects the next swap; got {:?}",
+        err
     );
 }
 
