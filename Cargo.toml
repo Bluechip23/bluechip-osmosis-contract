@@ -9,6 +9,12 @@ exclude = [
     # cargo-fuzz crate uses libFuzzer + nightly; excluded from the
     # default workspace so stable `cargo build` doesn't try to compile it.
     "fuzz",
+    # osmosis-test-tube integration harness: links the Osmosis chain binary
+    # (a heavy Go shared library) and needs pre-built optimized wasm
+    # artifacts, so it is excluded from the default workspace. Run it
+    # explicitly from `integration-tests/` in an environment that has the
+    # test binary + `artifacts/*.wasm` (see integration-tests/README.md).
+    "integration-tests",
 ]
 
 resolver = "2"

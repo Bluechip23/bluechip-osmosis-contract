@@ -50,6 +50,31 @@ const Commit = ({ client, address }: CommitProps) => {
                 ? ((Date.now() + (parseFloat(deadline) * 60 * 1000)) * 1000000).toString()
                 : null;
 
+            // Post-threshold the commit swaps its net bluechip through the
+            // native pool, and the pool now REQUIRES an explicit belief_price
+            // there (no minimum_receive backstop as on the router). Derive it
+            // from a live simulation at submit time so the user's downside is
+            // fixed to the quoted price and a front-run reverts the swap.
+            // Pre-threshold commits do not swap and leave belief_price null.
+            let beliefPrice: string | null = null;
+            if (isThresholdCrossed) {
+                const sim = await client.queryContractSmart(targetContractAddress, {
+                    simulation: {
+                        offer_asset: {
+                            info: { bluechip: { denom: bluechipDenom } },
+                            amount: amountInMicroUnits
+                        }
+                    }
+                });
+                const expectedOut = Number(sim?.return_amount ?? 0);
+                if (!Number.isFinite(expectedOut) || expectedOut <= 0) {
+                    setStatus('Error: could not quote this commit (insufficient pool liquidity?)');
+                    return;
+                }
+                // belief_price = offer / expected_out (offer-per-ask).
+                beliefPrice = (Number(amountInMicroUnits) / expectedOut).toFixed(18);
+            }
+
             const commitMsg = {
                 asset: {
                     info: {
@@ -58,7 +83,7 @@ const Commit = ({ client, address }: CommitProps) => {
                     amount: amountInMicroUnits
                 },
                 transaction_deadline: deadlineInNs,
-                belief_price: null as string | null,
+                belief_price: beliefPrice,
                 max_spread: (isThresholdCrossed && maxSpread && parseFloat(maxSpread) > 0)
                     ? maxSpread : null as string | null
             };

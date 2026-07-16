@@ -70,11 +70,21 @@ fn denom_of(t: &crate::asset::TokenType) -> String {
 ///    convention the retired internal `assert_max_spread` used), only when
 ///    the caller supplies a `belief_price`.
 ///
-/// The result is `max(estimate_floor, belief_floor)`. This closes the
-/// prior "no belief price ⇒ floor of zero (no sandwich/slippage
-/// protection)" hole: even a caller that passes no `belief_price` now
-/// gets the estimate-derived floor, so `MsgSwapExactAmountIn` never
-/// dispatches with `token_out_min_amount = 0` against a functioning pool.
+/// The result is `max(estimate_floor, belief_floor)`.
+///
+/// IMPORTANT — the estimate floor is NOT sandwich/front-running
+/// protection. `estimated_out` is queried at CURRENT pool state, i.e.
+/// AFTER any front-run in an earlier tx of the same block has already
+/// moved the price, so `estimate_floor = estimated_out * (1 - spread)`
+/// merely bounds the swap's own price impact relative to that
+/// (already-manipulated) state. It guarantees the swap never dispatches
+/// with `token_out_min_amount = 0` against a functioning pool, but a
+/// caller who wants real protection against a prior-tx sandwich MUST
+/// supply a `belief_price` derived from an off-chain quote (the
+/// belief_floor), or route through the multi-hop router, which enforces
+/// an end-to-end `minimum_receive`. The post-threshold commit path
+/// (`commit::post_threshold`) requires `belief_price` for exactly this
+/// reason (H-3).
 ///
 /// The function stays PURE and testable: the on-chain estimate is passed
 /// in as `estimated_out` (the query is done by the caller, which holds the
@@ -209,6 +219,30 @@ pub fn compute_token_out_min<C: CustomQuery>(
     Ok(token_out_min)
 }
 
+/// Outcome of the FIX-G relative liquidity circuit breaker.
+///
+/// H-1: the breaker must be able to LATCH the pool paused
+/// (`POOL_PAUSED` + `POOL_PAUSED_AUTO`) and have that write survive. A
+/// handler that returns `Err` has ALL of its storage writes rolled back by
+/// the CosmWasm VM, so the old "save the pause flags, then `return Err`"
+/// shape never actually paused the pool on-chain — the save was reverted by
+/// the very error it returned (it only appeared to work under the
+/// non-reverting unit-test mock storage). The breaker therefore reports its
+/// outcome as a value and lets the caller decide the response: on `Tripped`
+/// the caller returns `Ok` (refunding any attached funds) so the latched
+/// pause persists; on `Proceed` it continues with the swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakerOutcome {
+    /// Live liquidity is healthy (or no snapshot / query unavailable);
+    /// continue dispatching the swap.
+    Proceed,
+    /// A side fell below the floor. The breaker has already persisted the
+    /// latched pause; the caller MUST return `Ok` (refunding attached
+    /// offer funds) so the pause is not rolled back, and MUST NOT dispatch
+    /// the swap.
+    Tripped,
+}
+
 /// FIX G — native relative circuit breaker.
 ///
 /// Queries the LIVE per-side liquidity of the native GAMM pool (`pool_id`)
@@ -216,15 +250,21 @@ pub fn compute_token_out_min<C: CustomQuery>(
 /// against the amount seeded at threshold-crossing ([`SEED_LIQUIDITY`]). If
 /// EITHER side has fallen below [`BREAKER_FLOOR_PERCENT`]% of its seeded
 /// amount, the pool is auto-paused (`POOL_PAUSED` + `POOL_PAUSED_AUTO` set
-/// to `true`) and the current call is rejected with
-/// [`ContractError::PoolPausedLowLiquidity`]. Manual admin `Unpause` clears
-/// both flags. Replaces the retired absolute `MINIMUM_LIQUIDITY` guard,
-/// which is meaningless on a native pool.
+/// to `true`) and [`BreakerOutcome::Tripped`] is returned. Manual admin
+/// `Unpause` clears both flags. Replaces the retired absolute
+/// `MINIMUM_LIQUIDITY` guard, which is meaningless on a native pool.
 ///
 /// Called at the START of swap routing on BOTH swap sites (SimpleSwap here,
 /// and the post-threshold commit path), before dispatching the swap.
 ///
-/// Two fail-soft short-circuits (return `Ok`, breaker not applied):
+/// H-1: on a trip the pause writes are persisted here and the caller
+/// returns `Ok` so the latch survives (an `Err` from the caller would roll
+/// the pause back). The caller is responsible for refunding any attached
+/// offer funds in that `Ok` response, since no revert-based auto-refund
+/// occurs.
+///
+/// Two fail-soft short-circuits (return [`BreakerOutcome::Proceed`], breaker
+/// not applied):
 /// - `SEED_LIQUIDITY` unset — a pre-breaker or pre-threshold pool has no
 ///   snapshot to compare against.
 /// - the `total_pool_liquidity` query errors — a transient/unavailable query
@@ -240,15 +280,15 @@ pub fn enforce_liquidity_breaker<C: CustomQuery>(
     pool_id: u64,
     bluechip_denom: &str,
     creator_denom: &str,
-) -> Result<(), ContractError> {
+) -> Result<BreakerOutcome, ContractError> {
     let (seed_osmo, seed_creator) = match SEED_LIQUIDITY.may_load(storage)? {
         Some(seed) => seed,
-        None => return Ok(()),
+        None => return Ok(BreakerOutcome::Proceed),
     };
 
     let liquidity = match PoolmanagerQuerier::new(querier).total_pool_liquidity(pool_id) {
         Ok(resp) => resp.liquidity,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(BreakerOutcome::Proceed),
     };
 
     // Resolve each side's current amount by denom; a side absent from the
@@ -274,11 +314,42 @@ pub fn enforce_liquidity_breaker<C: CustomQuery>(
     };
 
     if below_floor(current_osmo, seed_osmo) || below_floor(current_creator, seed_creator) {
+        // Latch the pause. The caller returns `Ok` so this write survives.
         POOL_PAUSED.save(storage, &true)?;
         POOL_PAUSED_AUTO.save(storage, &true)?;
-        return Err(ContractError::PoolPausedLowLiquidity {});
+        return Ok(BreakerOutcome::Tripped);
     }
-    Ok(())
+    Ok(BreakerOutcome::Proceed)
+}
+
+/// Build the `Ok` response a swap site returns when the breaker latches the
+/// pool paused (H-1): refund the attached offer coin to the sender (there is
+/// no revert-based auto-refund on an `Ok` path) and emit the auto-pause
+/// attributes. Kept here so both swap sites produce an identical response.
+pub fn breaker_tripped_refund_response(
+    refund_to: &Addr,
+    refund_denom: &str,
+    refund_amount: Uint128,
+    pool_id: u64,
+    action: &str,
+) -> Response {
+    let mut resp = Response::new()
+        .add_attribute("action", action.to_string())
+        .add_attribute("pool_id", pool_id.to_string())
+        .add_attribute("auto_paused", "true")
+        .add_attribute("refund_to", refund_to.to_string())
+        .add_attribute("refund_denom", refund_denom.to_string())
+        .add_attribute("refund_amount", refund_amount.to_string());
+    if !refund_amount.is_zero() {
+        resp = resp.add_message(BankMsg::Send {
+            to_address: refund_to.to_string(),
+            amount: vec![Coin {
+                denom: refund_denom.to_string(),
+                amount: refund_amount,
+            }],
+        });
+    }
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -382,13 +453,28 @@ fn execute_simple_swap_with_ctx(
     // [1] = creator) so it matches `SEED_LIQUIDITY = (seed_osmo, seed_creator)`
     // regardless of the swap DIRECTION (`offer_denom`/`ask_denom` flip on a
     // sell).
-    enforce_liquidity_breaker(
+    //
+    // H-1: on a trip the breaker has already latched the pause; we return
+    // `Ok` (refunding the attached offer coin) so the pause persists — an
+    // `Err` here would roll the pause write back.
+    match enforce_liquidity_breaker(
         deps.storage,
         &deps.querier,
         pool_id,
         &denom_of(&pool_info.pool_info.asset_infos[0]),
         &denom_of(&pool_info.pool_info.asset_infos[1]),
-    )?;
+    )? {
+        BreakerOutcome::Proceed => {}
+        BreakerOutcome::Tripped => {
+            return Ok(breaker_tripped_refund_response(
+                &sender,
+                &offer_denom,
+                offer_asset.amount,
+                pool_id,
+                "swap_auto_paused_low_liquidity",
+            ));
+        }
+    }
 
     let token_in = Coin {
         denom: offer_denom.clone(),

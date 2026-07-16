@@ -18,7 +18,10 @@ use crate::generic_helpers::update_commit_info;
 use crate::state::{
     PoolAnalytics, PoolInfo, PoolSpecs, POOL_ID, POOL_PAUSED, REPLY_ID_SWAP_FORWARD,
 };
-use crate::swap_helper::{compute_token_out_min, enforce_liquidity_breaker};
+use crate::swap_helper::{
+    breaker_tripped_refund_response, compute_token_out_min, enforce_liquidity_breaker,
+    BreakerOutcome,
+};
 use pool_core::osmosis_msgs::swap_exact_amount_in_msg;
 use pool_core::state::SwapForwardPayload;
 
@@ -52,6 +55,25 @@ pub(super) fn process_post_threshold_commit(
         .may_load(deps.storage)?
         .ok_or(ContractError::ShortOfThreshold {})?;
 
+    // H-3 — a post-threshold commit is a market BUY of the creator token
+    // (the net bluechip is swapped through the native pool). The
+    // `token_out_min_amount` floor derived below from the on-chain estimate
+    // is computed at CURRENT pool state, so it does NOT defend against a
+    // front-run that moved the pool earlier in the same block — it only
+    // bounds the swap's own price impact. An explicit `belief_price` (a
+    // max acceptable price, sourced from an off-chain quote) is the only
+    // manipulation-resistant downside bound on this path, and — unlike the
+    // multi-hop router, which enforces an end-to-end `minimum_receive` —
+    // the commit path has no other backstop. Require it so a committer can
+    // never be sandwiched for an unbounded amount by omitting slippage
+    // protection. Checked AFTER the POOL_ID gate so a pool that has crossed
+    // the threshold but whose native pool is not yet seeded still surfaces
+    // the clearer `ShortOfThreshold`. (Pre-threshold commits do not swap and
+    // never reach here.)
+    if belief_price.is_none() {
+        return Err(ContractError::BeliefPriceRequired {});
+    }
+
     let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
     let creator_denom = pool_info.token_denom.clone();
 
@@ -60,13 +82,28 @@ pub(super) fn process_post_threshold_commit(
     // If either side of the live pool has fallen below BREAKER_FLOOR_PERCENT%
     // of its seeded liquidity, this auto-pauses the pool and rejects the
     // commit. Pre-threshold commits never reach here (no pool yet).
-    enforce_liquidity_breaker(
+    //
+    // H-1: on a trip the breaker has latched the pause; return `Ok`
+    // (refunding the committer's GROSS attached bluechip — no fees taken,
+    // no swap) so the pause persists. Returning `Err` would roll it back.
+    match enforce_liquidity_breaker(
         deps.storage,
         &deps.querier,
         pool_id,
         &bluechip_denom,
         &creator_denom,
-    )?;
+    )? {
+        BreakerOutcome::Proceed => {}
+        BreakerOutcome::Tripped => {
+            return Ok(breaker_tripped_refund_response(
+                &sender,
+                &bluechip_denom,
+                asset.amount,
+                pool_id,
+                "commit_auto_paused_low_liquidity",
+            ));
+        }
+    }
 
     let token_in = Coin {
         denom: bluechip_denom.clone(),
