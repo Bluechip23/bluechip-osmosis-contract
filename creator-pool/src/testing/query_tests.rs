@@ -17,6 +17,31 @@ use crate::state::{
 use crate::testing::fixtures::{setup_pool_post_threshold, setup_pool_storage};
 
 #[test]
+fn test_query_native_pool_id_pre_and_post_threshold() {
+    use crate::msg::NativePoolIdResponse;
+
+    // Pre-threshold: no native pool yet -> both fields None.
+    let mut deps = mock_dependencies();
+    setup_pool_storage(&mut deps);
+    let resp: NativePoolIdResponse = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::NativePoolId {}).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resp.pool_id, None);
+    assert_eq!(resp.lp_share_denom, None);
+
+    // Post-threshold: fixture stores POOL_ID = 1 -> id + gamm/pool/1.
+    let mut deps = mock_dependencies();
+    setup_pool_post_threshold(&mut deps);
+    let resp: NativePoolIdResponse = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::NativePoolId {}).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resp.pool_id, Some(1));
+    assert_eq!(resp.lp_share_denom.as_deref(), Some("gamm/pool/1"));
+}
+
+#[test]
 fn test_query_simulation_wrong_asset() {
     // The pair-membership check fires before any native-pool estimate
     // query, so an unknown asset is rejected cleanly even under the mock.

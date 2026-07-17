@@ -1,438 +1,232 @@
-// ⚠️ NON-FUNCTIONAL POST-OSMOSIS-MIGRATION — DO NOT SHIP AS-IS.
-// This component targets the removed internal LP system: `increase_allowance`
-// (there is no CW20), `deposit_liquidity` / `remove_*_liquidity` / `position`
-// (the pool has no such handlers), and it reads the creator token as a CW20
-// address. Post-migration, liquidity lives on the NATIVE Osmosis GAMM pool —
-// users add/remove liquidity directly on Osmosis, not through this contract.
-// This needs a rewrite (or removal) before the UI goes live; every call here
-// will revert against the current contracts.
+// In-site liquidity for the pool's NATIVE Osmosis GAMM pool — users add /
+// remove liquidity here without leaving for app.osmosis.zone.
+//
+// ⚠️ FUND-MOVING CODE, NOT YET COMPILE/TESTNET-VERIFIED. `npm run build` this,
+// then dry-run add + remove on osmo-test-5 with tiny amounts before shipping.
+// Slippage bounds (token_in_maxs / token_out_mins) cap the downside to "tx
+// reverts" or "spent up to your max", not a drain — but verify end-to-end.
+//
+// How it works: the crossing seeded a normal public GAMM pool; adding
+// liquidity is a native MsgJoinPool and removing is MsgExitPool, signed by the
+// user's own wallet (see src/lib/osmosisGamm.ts). The contract is NOT in the
+// loop — it only tells us the pool id (`native_pool_id` query) and current
+// reserves (`pool_state`). A user's LP position is their bank balance of the
+// `gamm/pool/{id}` share denom.
 import React, { useState } from 'react';
-import { Card, CardContent, Typography, TextField, Button, Box, Alert, Tabs, Tab } from '@mui/material';
+import {
+    Card, CardContent, Typography, TextField, Button, Box, Alert, Tabs, Tab, Divider,
+} from '@mui/material';
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
-import { DEFAULT_CHAIN_CONFIG } from '../types/FrontendTypes';
+import { DEFAULT_CHAIN_CONFIG, getBluechipDenom, getCreatorTokenDenom } from '../types/FrontendTypes';
+import {
+    getGammSigningClient, quoteJoinByOsmo, quoteExit, buildJoinMsg, buildExitMsg,
+} from '../lib/osmosisGamm';
+
+// RPC/REST for the native signing + supply query. Prefer env overrides; fall
+// back to the (placeholder) default config — set these for your deployment.
+const RPC = import.meta.env.VITE_RPC_ENDPOINT || DEFAULT_CHAIN_CONFIG.rpc;
+const REST = import.meta.env.VITE_REST_ENDPOINT || DEFAULT_CHAIN_CONFIG.rest;
 
 interface LiquidityProps {
     client: SigningCosmWasmClient | null;
     address: string;
 }
 
-const Liquidity: React.FC<LiquidityProps> = ({ client, address }) => {
+interface PoolData {
+    poolId: string;
+    lpDenom: string;
+    osmoDenom: string;
+    creatorDenom: string;
+    resOsmo: bigint;      // reserve0 (bluechip / OSMO side)
+    resCreator: bigint;   // reserve1 (creator side)
+    totalShares: bigint;  // bank total supply of lpDenom
+    userLp: bigint;       // caller's LP-share balance
+    userOsmo: bigint;
+    userCreator: bigint;
+}
+
+const toMicro = (v: string): bigint => {
+    const n = parseFloat(v);
+    if (!isFinite(n) || n <= 0) throw new Error('enter a positive amount');
+    return BigInt(Math.floor(n * 1_000_000));
+};
+const fromMicro = (v: bigint): string => (Number(v) / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 6 });
+
+const Liquidity = ({ client, address }: LiquidityProps) => {
     const [tab, setTab] = useState(0);
-    const [amount0, setAmount0] = useState('');
-    const [amount1, setAmount1] = useState('');
-    const [positionId, setPositionId] = useState('');
-    const [removeAmount, setRemoveAmount] = useState('');
-    const [slippage, setSlippage] = useState('1'); // Default 1%
-    const [deadline, setDeadline] = useState('20'); // Default 20 minutes
-    const [removeMode, setRemoveMode] = useState('amount'); // 'amount', 'percent', or 'all'
-    const [removePercent, setRemovePercent] = useState('');
-    const [targetContractAddress, setTargetContractAddress] = useState('');
+    const [poolAddr, setPoolAddr] = useState('');
+    const [osmoAmount, setOsmoAmount] = useState('');
+    const [removePercent, setRemovePercent] = useState('100');
+    const [slippagePct, setSlippagePct] = useState('1');
     const [status, setStatus] = useState('');
-    const [poolReserves, setPoolReserves] = useState({ reserve0: '0', reserve1: '0' });
+    const [txHash, setTxHash] = useState('');
+    const [pool, setPool] = useState<PoolData | null>(null);
+    const [loading, setLoading] = useState(false);
 
-    // Fetch pool reserves when contract address changes
-    React.useEffect(() => {
-        if (!client || !targetContractAddress) return;
-        const fetchReserves = async () => {
-            try {
-                const state = await client.queryContractSmart(targetContractAddress, { pool_state: {} });
-                setPoolReserves({ reserve0: state.reserve0, reserve1: state.reserve1 });
-            } catch (e) {
-                console.error("Failed to fetch reserves", e);
-            }
-        };
-        fetchReserves();
-    }, [client, targetContractAddress]);
-
-    // Auto-calculate Amount 1 when Amount 0 changes
-    const handleAmount0Change = (val: string) => {
-        setAmount0(val);
-        if (poolReserves.reserve0 !== '0' && poolReserves.reserve1 !== '0' && val) {
-            const amount0Val = parseFloat(val);
-            if (!isNaN(amount0Val)) {
-                const ratio = parseFloat(poolReserves.reserve1) / parseFloat(poolReserves.reserve0);
-                const estimatedAmount1 = (amount0Val * ratio).toFixed(6);
-                setAmount1(estimatedAmount1);
-            }
-        }
+    const slippageBps = (): bigint => {
+        const p = parseFloat(slippagePct);
+        return BigInt(Math.max(0, Math.min(5000, Math.floor((isFinite(p) ? p : 1) * 100))));
     };
 
-    // Auto-calculate Amount 0 when Amount 1 changes
-    const handleAmount1Change = (val: string) => {
-        setAmount1(val);
-        if (poolReserves.reserve0 !== '0' && poolReserves.reserve1 !== '0' && val) {
-            const amount1Val = parseFloat(val);
-            if (!isNaN(amount1Val)) {
-                const ratio = parseFloat(poolReserves.reserve0) / parseFloat(poolReserves.reserve1);
-                const estimatedAmount0 = (amount1Val * ratio).toFixed(6);
-                setAmount0(estimatedAmount0);
-            }
-        }
-    };
-
-    const handleDeposit = async () => {
-        if (!client || !address || !targetContractAddress) {
-            setStatus('Please connect wallet and set contract address');
-            return;
-        }
+    // ---- Load pool state (reads only) --------------------------------------
+    const loadPool = async () => {
+        if (!client || !poolAddr) { setStatus('Enter a pool contract address'); return; }
         try {
-            setStatus('Depositing...');
+            setLoading(true);
+            setStatus('Loading pool…');
+            setPool(null);
 
-            // Convert amounts to micro-units
-            const amount0Val = parseFloat(amount0);
-            const amount1Val = parseFloat(amount1);
-            if (isNaN(amount0Val) || amount0Val <= 0 || isNaN(amount1Val) || amount1Val <= 0) {
-                setStatus('Error: Please enter valid positive amounts');
-                return;
+            const pair = await client.queryContractSmart(poolAddr, { pair: {} });
+            const osmoDenom = getBluechipDenom(pair.asset_infos) ?? DEFAULT_CHAIN_CONFIG.nativeDenom;
+            const creatorDenom = getCreatorTokenDenom(pair.asset_infos);
+            if (!creatorDenom) throw new Error('could not resolve the creator denom from pair {}');
+
+            const npid = await client.queryContractSmart(poolAddr, { native_pool_id: {} });
+            if (!npid?.pool_id || !npid?.lp_share_denom) {
+                throw new Error('pool has not crossed its threshold yet — no native pool to LP against');
             }
-            const amount0Micro = Math.ceil(amount0Val * 1_000_000).toString();
-            const amount1Micro = Math.ceil(amount1Val * 1_000_000).toString();
+            const poolId: string = String(npid.pool_id);
+            const lpDenom: string = npid.lp_share_denom;
 
-            // 1. Get Token Address and Bluechip denom from Pool
-            setStatus('Fetching pool info...');
-            const pairInfo = await client.queryContractSmart(targetContractAddress, { pair: {} });
-            let tokenAddress = null;
-            let bluechipDenom = DEFAULT_CHAIN_CONFIG.nativeDenom;
-            for (const asset of pairInfo.asset_infos) {
-                if (asset.creator_token) {
-                    tokenAddress = asset.creator_token.contract_addr;
-                }
-                if (asset.bluechip) {
-                    bluechipDenom = asset.bluechip.denom;
-                }
-            }
+            // reserve0 = OSMO side, reserve1 = creator side (fixed pair order).
+            const st = await client.queryContractSmart(poolAddr, { pool_state: {} });
+            const resOsmo = BigInt(st.reserve0 ?? '0');
+            const resCreator = BigInt(st.reserve1 ?? '0');
 
-            if (!tokenAddress) {
-                setStatus('Error: Could not find Creator Token address in pool');
-                return;
-            }
-
-            // 2. Check Allowance
-            setStatus('Checking allowance...');
-            const allowanceInfo = await client.queryContractSmart(tokenAddress, {
-                allowance: { owner: address, spender: targetContractAddress }
-            });
-            const currentAllowance = parseInt(allowanceInfo.allowance);
-
-            if (currentAllowance < parseInt(amount1Micro)) {
-                setStatus('Approving tokens...');
-                const approveMsg = {
-                    increase_allowance: {
-                        spender: targetContractAddress,
-                        amount: amount1Micro
-                    }
-                };
-                await client.execute(
-                    address,
-                    tokenAddress,
-                    approveMsg,
-                    { amount: [], gas: "200000" },
-                    "Approve Pool",
-                    []
-                );
-                setStatus('Approval successful! Proceeding to deposit...');
-            }
-
-            // Calculate min amounts based on slippage (optional)
-            const slipFactor = slippage && parseFloat(slippage) > 0
-                ? 1 - (parseFloat(slippage) / 100)
-                : 0.99; // Default 1% slippage
-            const minAmount0 = Math.floor(parseFloat(amount0Micro) * slipFactor).toString();
-            const minAmount1 = Math.floor(parseFloat(amount1Micro) * slipFactor).toString();
-
-            // Calculate deadline in nanoseconds (optional)
-            const deadlineInNs = deadline && parseFloat(deadline) > 0
-                ? (Date.now() + (parseFloat(deadline) * 60 * 1000)) * 1000000
-                : null;
-
-            const msg = {
-                deposit_liquidity: {
-                    amount0: amount0Micro,
-                    amount1: amount1Micro,
-                    min_amount0: minAmount0 || null,
-                    min_amount1: minAmount1 || null,
-                    transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
-                }
-            };
-
-            const result = await client.execute(
-                address,
-                targetContractAddress,
-                msg,
-                {
-                    amount: [],
-                    gas: "500000"
-                },
-                "Deposit Liquidity",
-                [{ denom: bluechipDenom, amount: amount0Micro }]
+            // Total LP shares = bank total supply of the gamm/pool/{id} denom.
+            const supplyRes = await fetch(
+                `${REST}/cosmos/bank/v1beta1/supply/by_denom?denom=${encodeURIComponent(lpDenom)}`,
             );
-            console.log("Transaction Hash:", result.transactionHash);
-            setStatus(`Success! Tx Hash: ${result.transactionHash}`);
+            const supplyJson = await supplyRes.json();
+            const totalShares = BigInt(supplyJson?.amount?.amount ?? '0');
+
+            const [lpBal, osmoBal, creatorBal] = await Promise.all([
+                client.getBalance(address, lpDenom),
+                client.getBalance(address, osmoDenom),
+                client.getBalance(address, creatorDenom),
+            ]);
+
+            setPool({
+                poolId, lpDenom, osmoDenom, creatorDenom,
+                resOsmo, resCreator, totalShares,
+                userLp: BigInt(lpBal.amount), userOsmo: BigInt(osmoBal.amount), userCreator: BigInt(creatorBal.amount),
+            });
+            setStatus('');
         } catch (err) {
-            console.error(err);
             setStatus('Error: ' + (err as Error).message);
+        } finally {
+            setLoading(false);
         }
     };
 
+    // ---- Native signer (same wallet, GAMM-aware registry) ------------------
+    const signAndSend = async (msg: { typeUrl: string; value: unknown }) => {
+        if (!client) throw new Error('connect a wallet');
+        const keplr = (window as unknown as { keplr?: any }).keplr;
+        if (!keplr) throw new Error('Keplr not found');
+        const chainId = await client.getChainId();
+        await keplr.enable(chainId);
+        const signer = keplr.getOfflineSigner(chainId);
+        const signingClient = await getGammSigningClient(RPC, signer);
+        // fee "auto" simulates the tx (the registry can encode our GAMM msgs).
+        const res = await signingClient.signAndBroadcast(address, [msg as any], 'auto');
+        return res.transactionHash;
+    };
+
+    // ---- Add liquidity (MsgJoinPool) ---------------------------------------
+    const handleAdd = async () => {
+        if (!pool) { setStatus('Load the pool first'); return; }
+        try {
+            setLoading(true); setStatus('Adding liquidity…'); setTxHash('');
+            const osmoIn = toMicro(osmoAmount);
+            const quote = quoteJoinByOsmo(osmoIn, pool.totalShares, pool.resOsmo, pool.resCreator, slippageBps());
+            if (quote.required.creator > pool.userCreator) {
+                throw new Error(
+                    `need ${fromMicro(quote.required.creator)} creator token, you hold ${fromMicro(pool.userCreator)}`,
+                );
+            }
+            if (quote.tokenInMaxs.osmo > pool.userOsmo) {
+                throw new Error(`need up to ${fromMicro(quote.tokenInMaxs.osmo)} OSMO (incl. slippage), balance too low`);
+            }
+            const msg = buildJoinMsg(address, pool.poolId, quote, pool.osmoDenom, pool.creatorDenom);
+            const hash = await signAndSend(msg);
+            setTxHash(hash);
+            setStatus(`Success — added ~${fromMicro(quote.required.osmo)} OSMO + ~${fromMicro(quote.required.creator)} creator, minted ${quote.shareOut.toString()} shares.`);
+            await loadPool();
+        } catch (err) {
+            setStatus('Error: ' + (err as Error).message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // ---- Remove liquidity (MsgExitPool) ------------------------------------
     const handleRemove = async () => {
-        if (!client || !address || !targetContractAddress) {
-            setStatus('Please connect wallet and set contract address');
-            return;
-        }
+        if (!pool) { setStatus('Load the pool first'); return; }
         try {
-            setStatus('Removing...');
-            // Convert slippage % to BPS (basis points). 1% = 100 bps (optional)
-            const deviationBps = slippage && parseFloat(slippage) > 0
-                ? Math.floor(parseFloat(slippage) * 100)
-                : null;
-
-            setStatus('Verifying ownership...');
-            const positionInfo = await client.queryContractSmart(targetContractAddress, {
-                position: { position_id: positionId }
-            });
-
-            if (positionInfo.owner !== address) {
-                setStatus('Error: You do not own this position');
-                return;
-            }
-
-            setStatus('Removing...');
-
-            // Calculate deadline in nanoseconds (optional)
-            const deadlineInNs = deadline && parseFloat(deadline) > 0
-                ? (Date.now() + (parseFloat(deadline) * 60 * 1000)) * 1000000
-                : null;
-
-            let msg;
-            if (removeMode === 'all') {
-                msg = {
-                    remove_all_liquidity: {
-                        position_id: positionId,
-                        min_amount0: null,
-                        min_amount1: null,
-                        max_ratio_deviation_bps: deviationBps,
-                        transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
-                    }
-                };
-            } else if (removeMode === 'amount') {
-                // Convert remove amount to micro-units
-                const removeVal = parseFloat(removeAmount);
-                if (isNaN(removeVal) || removeVal <= 0) {
-                    setStatus('Error: Please enter a valid positive amount to remove');
-                    return;
-                }
-                // Liquidity units are whole numbers, not micro-denominated
-                const removeMicro = Math.floor(removeVal).toString();
-
-                msg = {
-                    remove_partial_liquidity: {
-                        position_id: positionId,
-                        liquidity_to_remove: removeMicro,
-                        min_amount0: null,
-                        min_amount1: null,
-                        max_ratio_deviation_bps: deviationBps,
-                        transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
-                    }
-                };
-            } else {
-                msg = {
-                    remove_partial_liquidity_by_percent: {
-                        position_id: positionId,
-                        percentage: parseInt(removePercent),
-                        min_amount0: null,
-                        min_amount1: null,
-                        max_ratio_deviation_bps: deviationBps,
-                        transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
-                    }
-                };
-            }
-
-            const result = await client.execute(
-                address,
-                targetContractAddress,
-                msg,
-                {
-                    amount: [],
-                    gas: "500000" // Explicit gas limit
-                },
-                "Remove Liquidity"
-            );
-            console.log("Transaction Hash:", result.transactionHash);
-            setStatus(`Success! Tx Hash: ${result.transactionHash}`);
+            setLoading(true); setStatus('Removing liquidity…'); setTxHash('');
+            const pct = Math.max(0, Math.min(100, parseFloat(removePercent) || 0));
+            if (pct <= 0) throw new Error('enter a percent between 0 and 100');
+            const shareIn = (pool.userLp * BigInt(Math.floor(pct * 100))) / 10_000n;
+            if (shareIn <= 0n) throw new Error('you hold no LP shares in this pool');
+            const quote = quoteExit(shareIn, pool.totalShares, pool.resOsmo, pool.resCreator, slippageBps());
+            const msg = buildExitMsg(address, pool.poolId, shareIn, quote, pool.osmoDenom, pool.creatorDenom);
+            const hash = await signAndSend(msg);
+            setTxHash(hash);
+            setStatus(`Success — withdrew ~${fromMicro(quote.expected.osmo)} OSMO + ~${fromMicro(quote.expected.creator)} creator.`);
+            await loadPool();
         } catch (err) {
-            console.error(err);
             setStatus('Error: ' + (err as Error).message);
-        }
-    };
-
-    const handleAddToPosition = async () => {
-        if (!client || !address || !targetContractAddress) {
-            setStatus('Please connect wallet and set contract address');
-            return;
-        }
-        try {
-            setStatus('Verifying ownership...');
-            const positionInfo = await client.queryContractSmart(targetContractAddress, {
-                position: { position_id: positionId }
-            });
-
-            if (positionInfo.owner !== address) {
-                setStatus('Error: You do not own this position');
-                return;
-            }
-
-            setStatus('Adding to position...');
-
-            // Convert amounts to micro-units
-            const amount0Val = parseFloat(amount0);
-            const amount1Val = parseFloat(amount1);
-            if (isNaN(amount0Val) || amount0Val <= 0 || isNaN(amount1Val) || amount1Val <= 0) {
-                setStatus('Error: Please enter valid positive amounts');
-                return;
-            }
-            const amount0Micro = Math.floor(amount0Val * 1_000_000).toString();
-            const amount1Micro = Math.floor(amount1Val * 1_000_000).toString();
-
-            // 1. Get Token Address and Bluechip denom from Pool
-            setStatus('Fetching pool info...');
-            const pairInfo = await client.queryContractSmart(targetContractAddress, { pair: {} });
-            let tokenAddress = null;
-            let bluechipDenom = DEFAULT_CHAIN_CONFIG.nativeDenom;
-            for (const asset of pairInfo.asset_infos) {
-                if (asset.creator_token) {
-                    tokenAddress = asset.creator_token.contract_addr;
-                }
-                if (asset.bluechip) {
-                    bluechipDenom = asset.bluechip.denom;
-                }
-            }
-
-            if (!tokenAddress) {
-                setStatus('Error: Could not find Creator Token address in pool');
-                return;
-            }
-
-            // 2. Check Allowance
-            setStatus('Checking allowance...');
-            const allowanceInfo = await client.queryContractSmart(tokenAddress, {
-                allowance: { owner: address, spender: targetContractAddress }
-            });
-            const currentAllowance = parseInt(allowanceInfo.allowance);
-
-            if (currentAllowance < parseInt(amount1Micro)) {
-                setStatus('Approving tokens...');
-                const approveMsg = {
-                    increase_allowance: {
-                        spender: targetContractAddress,
-                        amount: amount1Micro
-                    }
-                };
-                await client.execute(
-                    address,
-                    tokenAddress,
-                    approveMsg,
-                    { amount: [], gas: "200000" },
-                    "Approve Pool",
-                    []
-                );
-                setStatus('Approval successful! Proceeding to add to position...');
-            }
-
-            // Calculate min amounts based on slippage (optional)
-            const slipFactor = slippage && parseFloat(slippage) > 0
-                ? 1 - (parseFloat(slippage) / 100)
-                : 0.99; // Default 1% slippage
-            const minAmount0 = Math.floor(parseFloat(amount0Micro) * slipFactor).toString();
-            const minAmount1 = Math.floor(parseFloat(amount1Micro) * slipFactor).toString();
-
-            // Calculate deadline in nanoseconds (optional)
-            const deadlineInNs = deadline && parseFloat(deadline) > 0
-                ? (Date.now() + (parseFloat(deadline) * 60 * 1000)) * 1000000
-                : null;
-
-            const msg = {
-                add_to_position: {
-                    position_id: positionId,
-                    amount0: amount0Micro,
-                    amount1: amount1Micro,
-                    min_amount0: minAmount0 || null,
-                    min_amount1: minAmount1 || null,
-                    transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
-                }
-            };
-
-            const result = await client.execute(
-                address,
-                targetContractAddress,
-                msg,
-                {
-                    amount: [],
-                    gas: "500000"
-                },
-                "Add to Position",
-                [{ denom: bluechipDenom, amount: amount0Micro }]
-            );
-            console.log("Transaction Hash:", result.transactionHash);
-            setStatus(`Success! Tx Hash: ${result.transactionHash}`);
-        } catch (err) {
-            console.error(err);
-            setStatus('Error: ' + (err as Error).message);
+        } finally {
+            setLoading(false);
         }
     };
 
     return (
         <Card sx={{ mb: 2 }}>
             <CardContent>
-                <Typography variant="h6" gutterBottom>Liquidity Management</Typography>
+                <Typography variant="h6" gutterBottom>Liquidity (native Osmosis pool)</Typography>
+
+                <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+                    <TextField
+                        fullWidth size="small" label="Pool contract address" value={poolAddr}
+                        onChange={(e) => setPoolAddr(e.target.value)} placeholder="osmo1…"
+                    />
+                    <Button variant="outlined" onClick={loadPool} disabled={loading}>Load</Button>
+                </Box>
+
+                {pool && (
+                    <Box sx={{ mb: 2, fontSize: '0.85rem', color: 'text.secondary' }}>
+                        <div>GAMM pool #{pool.poolId} · reserves {fromMicro(pool.resOsmo)} OSMO / {fromMicro(pool.resCreator)} creator</div>
+                        <div>Your LP shares: {pool.userLp.toString()} ({pool.totalShares > 0n ? (Number(pool.userLp * 10000n / pool.totalShares) / 100).toFixed(2) : '0'}% of pool)</div>
+                        <div>Your balances: {fromMicro(pool.userOsmo)} OSMO · {fromMicro(pool.userCreator)} creator</div>
+                    </Box>
+                )}
+
+                <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
+                    <Tab label="Add" /><Tab label="Remove" />
+                </Tabs>
 
                 <TextField
-                    fullWidth
-                    label="Contract Address"
-                    value={targetContractAddress}
-                    onChange={(e) => setTargetContractAddress(e.target.value)}
-                    placeholder="wasm1..."
-                    helperText="Address of the pool contract"
-                    sx={{ mb: 2 }}
+                    fullWidth size="small" label="Max slippage %" value={slippagePct}
+                    onChange={(e) => setSlippagePct(e.target.value)} sx={{ mb: 2 }} helperText="e.g. 1 for 1%"
                 />
-
-                <Tabs value={tab} onChange={(e, v) => setTab(v)} sx={{ mb: 2 }}>
-                    <Tab label="Provide Liquidity" />
-                    <Tab label="Add to Position" />
-                    <Tab label="Remove Liquidity" />
-                </Tabs>
 
                 {tab === 0 && (
                     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                         <TextField
-                            label="Amount 0 (bluechip)"
-                            value={amount0}
-                            onChange={(e) => handleAmount0Change(e.target.value)}
-                            type="number"
-                            helperText="Auto-calculated based on pool ratio"
+                            label="OSMO to add" value={osmoAmount} type="number"
+                            onChange={(e) => setOsmoAmount(e.target.value)}
+                            helperText="The matching creator-token amount is computed at the pool's current ratio."
                         />
-                        <TextField
-                            label="Amount 1 (CW20)"
-                            value={amount1}
-                            onChange={(e) => handleAmount1Change(e.target.value)}
-                            type="number"
-                            helperText="Auto-calculated based on pool ratio"
-                        />
-                        <TextField
-                            label="Slippage Tolerance (%)"
-                            value={slippage}
-                            onChange={(e) => setSlippage(e.target.value)}
-                            type="number"
-                            helperText="e.g. 1 for 1%"
-                        />
-                        <TextField
-                            label="Deadline (minutes)"
-                            value={deadline}
-                            onChange={(e) => setDeadline(e.target.value)}
-                            type="number"
-                            helperText="Transaction deadline in minutes"
-                        />
-                        <Button variant="contained" onClick={handleDeposit}>
-                            Provide Liquidity
+                        {pool && osmoAmount && (() => {
+                            try {
+                                const q = quoteJoinByOsmo(toMicro(osmoAmount), pool.totalShares, pool.resOsmo, pool.resCreator, slippageBps());
+                                return <Alert severity="info">Pairs with ~{fromMicro(q.required.creator)} creator token · mints {q.shareOut.toString()} LP shares</Alert>;
+                            } catch { return null; }
+                        })()}
+                        <Button variant="contained" onClick={handleAdd} disabled={loading || !pool}>
+                            {loading ? 'Processing…' : 'Add liquidity'}
                         </Button>
                     </Box>
                 )}
@@ -440,111 +234,26 @@ const Liquidity: React.FC<LiquidityProps> = ({ client, address }) => {
                 {tab === 1 && (
                     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                         <TextField
-                            label="Position ID"
-                            value={positionId}
-                            onChange={(e) => setPositionId(e.target.value)}
+                            label="Percent of your position to remove" value={removePercent} type="number"
+                            onChange={(e) => setRemovePercent(e.target.value)} helperText="0–100"
                         />
-                        <TextField
-                            label="Amount 0"
-                            value={amount0}
-                            onChange={(e) => handleAmount0Change(e.target.value)}
-                            type="number"
-                            helperText="Auto-calculated based on pool ratio"
-                        />
-                        <TextField
-                            label="Amount 1"
-                            value={amount1}
-                            onChange={(e) => handleAmount1Change(e.target.value)}
-                            type="number"
-                            helperText="Auto-calculated based on pool ratio"
-                        />
-                        <TextField
-                            label="Slippage Tolerance (%)"
-                            value={slippage}
-                            onChange={(e) => setSlippage(e.target.value)}
-                            type="number"
-                            helperText="e.g. 1 for 1%"
-                        />
-                        <TextField
-                            label="Deadline (minutes)"
-                            value={deadline}
-                            onChange={(e) => setDeadline(e.target.value)}
-                            type="number"
-                            helperText="Transaction deadline in minutes"
-                        />
-                        <Button variant="contained" color="primary" onClick={handleAddToPosition}>
-                            Add to Position
+                        <Button variant="contained" color="secondary" onClick={handleRemove} disabled={loading || !pool}>
+                            {loading ? 'Processing…' : 'Remove liquidity'}
                         </Button>
                     </Box>
                 )}
 
-                {tab === 2 && (
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        <TextField
-                            label="Position ID"
-                            value={positionId}
-                            onChange={(e) => setPositionId(e.target.value)}
-                        />
-
-                        <Box sx={{ display: 'flex', gap: 2, mb: 1 }}>
-                            <Button
-                                variant={removeMode === 'amount' ? 'contained' : 'outlined'}
-                                onClick={() => setRemoveMode('amount')}
-                            >
-                                Amount
-                            </Button>
-                            <Button
-                                variant={removeMode === 'percent' ? 'contained' : 'outlined'}
-                                onClick={() => setRemoveMode('percent')}
-                            >
-                                Percentage
-                            </Button>
-                            <Button
-                                variant={removeMode === 'all' ? 'contained' : 'outlined'}
-                                onClick={() => setRemoveMode('all')}
-                            >
-                                Remove All
-                            </Button>
-                        </Box>
-
-                        {removeMode === 'amount' ? (
-                            <TextField
-                                label="Liquidity to Remove"
-                                value={removeAmount}
-                                onChange={(e) => setRemoveAmount(e.target.value)}
-                                type="number"
-                            />
-                        ) : removeMode === 'percent' ? (
-                            <TextField
-                                label="Percentage to Remove (0-100)"
-                                value={removePercent}
-                                onChange={(e) => setRemovePercent(e.target.value)}
-                                type="number"
-                                inputProps={{ min: 0, max: 100 }}
-                            />
-                        ) : null}
-
-                        <TextField
-                            label="Max Ratio Deviation (%)"
-                            value={slippage}
-                            onChange={(e) => setSlippage(e.target.value)}
-                            type="number"
-                            helperText="e.g. 1 for 1%"
-                        />
-                        <TextField
-                            label="Deadline (minutes)"
-                            value={deadline}
-                            onChange={(e) => setDeadline(e.target.value)}
-                            type="number"
-                            helperText="Transaction deadline in minutes"
-                        />
-                        <Button variant="contained" color="error" onClick={handleRemove}>
-                            Remove Liquidity
-                        </Button>
-                    </Box>
+                <Divider sx={{ my: 2 }} />
+                {status && (
+                    <Alert severity={status.startsWith('Success') ? 'success' : status.startsWith('Error') ? 'error' : 'info'}>
+                        {status}
+                    </Alert>
                 )}
-
-                {status && <Alert severity={status.includes('Success') ? 'success' : 'info'} sx={{ mt: 2 }}>{status}</Alert>}
+                {txHash && (
+                    <Typography variant="body2" sx={{ mt: 1, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                        tx: {txHash}
+                    </Typography>
+                )}
             </CardContent>
         </Card>
     );

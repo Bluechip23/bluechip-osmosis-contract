@@ -86,7 +86,20 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
 
         // Hybrid — wrapper computes creator-only pieces, pool-core assembles
         QueryMsg::Analytics {} => to_json_binary(&query_analytics(deps)?),
+
+        QueryMsg::NativePoolId {} => to_json_binary(&query_native_pool_id(deps)?),
     }
+}
+
+/// The native GAMM pool id (and its `gamm/pool/{id}` LP-share denom) seeded
+/// at threshold crossing, or `None` pre-threshold. Read-only; lets frontends
+/// route users' own MsgJoinPool / MsgExitPool at the native pool.
+pub fn query_native_pool_id(deps: Deps) -> StdResult<crate::msg::NativePoolIdResponse> {
+    let pool_id = crate::state::POOL_ID.may_load(deps.storage)?;
+    Ok(crate::msg::NativePoolIdResponse {
+        pool_id,
+        lp_share_denom: pool_id.map(|id| format!("gamm/pool/{}", id)),
+    })
 }
 
 /// Creator-earnings rollup: claimable fee pot, locked excess-liquidity
