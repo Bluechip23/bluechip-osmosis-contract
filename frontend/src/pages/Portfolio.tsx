@@ -1,18 +1,14 @@
 // pages/PortfolioPage.tsx
-// ⚠️ Creator-token holdings logic here reads the token as a CW20 contract
-// (`queryContractSmart(tokenAddr, { balance })`) — post-migration the creator
-// token is a native TokenFactory denom, so balances must come from the bank
-// module (`client.getBalance(address, denom)`), and the identifier is a
-// `denom`, not a `contract_addr`. This section needs a rewrite before ship;
-// position/LP portfolio views no longer apply (liquidity is on native GAMM).
+// Creator-token holdings are read the Osmosis-native way: pools come from
+// the factory's `pools` registry query and balances from the bank module
+// (`client.getBalance(address, denom)`) — the creator token is a
+// TokenFactory denom, not a CW20 contract.
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     Container,
     Typography,
     Box,
     Paper,
-    Tabs,
-    Tab,
     Table,
     TableBody,
     TableCell,
@@ -36,35 +32,21 @@ import BuyModal from '../components/modals/BuyModal';
 import CommitModal from '../components/modals/CommitModal';
 import TokenInfoModal from '../components/modals/TokenInfoModal';
 import SellModal from '../components/modals/SellModal';
+import {
+    DEFAULT_CHAIN_CONFIG,
+    PortfolioToken,
+    TokenType,
+    symbolFromDenom,
+} from '../types/FrontendTypes';
 
-const FACTORY_ADDRESS = import.meta.env.VITE_FACTORY_ADDRESS || 'cosmos1factory...';
-// Comma-separated list of known pool contract addresses for discovery.
-// The factory contract does not expose a query to enumerate all pools,
-// so pool addresses must be provided via this env var.
-const POOL_ADDRESSES: string[] = (import.meta.env.VITE_POOL_ADDRESSES || '')
-    .split(',')
-    .map((a: string) => a.trim())
-    .filter((a: string) => a.length > 0);
+const FACTORY_ADDRESS = DEFAULT_CHAIN_CONFIG.factoryAddress;
 
-interface TokenType {
-    creator_token?: { contract_addr: string };
-    bluechip?: { denom: string };
-}
-
-interface PoolDetails {
-    asset_infos: [TokenType, TokenType];
-    contract_addr: string;
-    pool_type: { xyk: Record<string, never> } | { stable: Record<string, never> };
-}
-
-interface PortfolioToken {
-    tokenAddress: string;
-    poolAddress: string;
-    name: string;
-    symbol: string;
-    decimals: number;
-    balance: string;
-    thresholdReached: boolean;
+// One page of the factory's pool registry. A page shorter than `limit`
+// signals end-of-data.
+interface PoolListEntry {
+    pool_id: number;
+    pool_addr: string;
+    pool_token_info: [TokenType, TokenType];
 }
 
 interface TabPanelProps {
@@ -186,25 +168,11 @@ const PortfolioPage: React.FC = () => {
     const [client, setClient] = useState<SigningCosmWasmClient | null>(null);
     const [address, setAddress] = useState<string>('');
     const [balance, setBalance] = useState<Coin | null>(null);
-    const [tabValue, setTabValue] = useState(0);
 
     // Token data
     const [tokens, setTokens] = useState<PortfolioToken[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string>('');
-
-    // Liquidity positions data
-    interface PositionData {
-        positionId: string;
-        poolAddress: string;
-        liquidity: string;
-        unclaimedFees0: string;
-        unclaimedFees1: string;
-        createdAt: number;
-    }
-    const [positions, setPositions] = useState<PositionData[]>([]);
-    const [positionsLoading, setPositionsLoading] = useState(false);
-    const [positionsError, setPositionsError] = useState<string>('');
 
     // Modal states
     const [buyModalOpen, setBuyModalOpen] = useState(false);
@@ -220,60 +188,58 @@ const PortfolioPage: React.FC = () => {
         setError('');
 
         try {
-            if (POOL_ADDRESSES.length === 0) {
-                setError('No pool addresses configured. Set VITE_POOL_ADDRESSES env var with comma-separated pool contract addresses.');
-                setLoading(false);
-                return;
+            // Enumerate every registered pool from the factory registry
+            // (paginated; a short page signals end-of-data).
+            const pools: PoolListEntry[] = [];
+            let startAfter: number | null = null;
+            const PAGE_LIMIT = 100;
+            for (;;) {
+                const page = await client.queryContractSmart(FACTORY_ADDRESS, {
+                    pools: { start_after: startAfter, limit: PAGE_LIMIT }
+                });
+                const entries: PoolListEntry[] = page?.pools ?? [];
+                pools.push(...entries);
+                if (entries.length < PAGE_LIMIT) break;
+                startAfter = entries[entries.length - 1].pool_id;
             }
 
-            // Query each known pool contract directly using the pool's pair query
-            const tokenPromises = POOL_ADDRESSES.map(async (poolAddress) => {
+            const tokenPromises = pools.map(async (pool) => {
                 try {
-                    // Get pool details to find creator token address (pool query: pair {})
-                    const poolDetails: PoolDetails = await client.queryContractSmart(poolAddress, {
-                        pair: {}
-                    });
-
-                    // Find the creator token in asset_infos
-                    const creatorTokenInfo = poolDetails.asset_infos.find(
-                        (asset): asset is { creator_token: { contract_addr: string } } =>
+                    // The creator token is a native TokenFactory denom carried
+                    // in the registry entry — its balance is a plain bank query.
+                    const creatorTokenInfo = pool.pool_token_info.find(
+                        (asset): asset is { creator_token: { denom: string } } =>
                             'creator_token' in asset
                     );
-
                     if (!creatorTokenInfo) return null;
 
-                    const tokenAddress = creatorTokenInfo.creator_token.contract_addr;
+                    const tokenDenom = creatorTokenInfo.creator_token.denom;
 
-                    // Query token balance, token info, and threshold status in parallel
-                    const [balanceResponse, tokenInfo, thresholdStatus] = await Promise.all([
-                        client.queryContractSmart(tokenAddress, {
-                            balance: { address }
-                        }),
-                        client.queryContractSmart(tokenAddress, {
-                            token_info: {}
-                        }),
-                        client.queryContractSmart(poolAddress, {
+                    const [bankBalance, thresholdStatus] = await Promise.all([
+                        client.getBalance(address, tokenDenom),
+                        client.queryContractSmart(pool.pool_addr, {
                             is_fully_commited: {}
                         })
                     ]);
 
                     // Only include if user has balance
-                    if (balanceResponse.balance === '0') return null;
+                    if (!bankBalance || bankBalance.amount === '0') return null;
 
                     const thresholdReached = thresholdStatus === 'fully_committed';
+                    const symbol = symbolFromDenom(tokenDenom);
 
                     return {
-                        tokenAddress,
-                        poolAddress,
-                        name: tokenInfo.name,
-                        symbol: tokenInfo.symbol,
-                        decimals: tokenInfo.decimals,
-                        balance: balanceResponse.balance,
+                        tokenDenom,
+                        poolAddress: pool.pool_addr,
+                        name: symbol,
+                        symbol,
+                        decimals: 6,
+                        balance: bankBalance.amount,
                         thresholdReached
                     } as PortfolioToken;
 
                 } catch (err) {
-                    console.error(`Error fetching pool data for ${poolAddress}:`, err);
+                    console.error(`Error fetching pool data for ${pool.pool_addr}:`, err);
                     return null;
                 }
             });
@@ -290,66 +256,12 @@ const PortfolioPage: React.FC = () => {
         }
     }, [client, address]);
 
-    // Fetch liquidity positions across all known pools using positions_by_owner query
-    const fetchPositions = useCallback(async () => {
-        if (!client || !address) return;
-
-        setPositionsLoading(true);
-        setPositionsError('');
-
-        try {
-            // Get pools from tokens we already know about
-            const poolAddresses = tokens.map(t => t.poolAddress);
-            const allPositions: PositionData[] = [];
-
-            for (const poolAddress of poolAddresses) {
-                try {
-                    const response = await client.queryContractSmart(poolAddress, {
-                        positions_by_owner: {
-                            owner: address,
-                            limit: 30
-                        }
-                    });
-
-                    if (response.positions) {
-                        for (const pos of response.positions) {
-                            allPositions.push({
-                                positionId: pos.position_id,
-                                poolAddress,
-                                liquidity: pos.liquidity,
-                                unclaimedFees0: pos.unclaimed_fees_0,
-                                unclaimedFees1: pos.unclaimed_fees_1,
-                                createdAt: pos.created_at,
-                            });
-                        }
-                    }
-                } catch (err) {
-                    console.error(`Error fetching positions for pool ${poolAddress}:`, err);
-                }
-            }
-
-            setPositions(allPositions);
-        } catch (err) {
-            console.error('Error fetching positions:', err);
-            setPositionsError('Failed to load positions: ' + (err as Error).message);
-        } finally {
-            setPositionsLoading(false);
-        }
-    }, [client, address, tokens]);
-
     // Fetch tokens when wallet connects
     useEffect(() => {
         if (client && address) {
             fetchPortfolioTokens();
         }
     }, [client, address, fetchPortfolioTokens]);
-
-    // Fetch positions after tokens are loaded
-    useEffect(() => {
-        if (client && address && tokens.length > 0) {
-            fetchPositions();
-        }
-    }, [client, address, tokens, fetchPositions]);
 
     const handleBuyClick = (token: PortfolioToken) => {
         setSelectedToken(token);
@@ -385,21 +297,16 @@ const PortfolioPage: React.FC = () => {
                 />
                 {balance && (
                     <Typography variant="body1" sx={{ mt: 2 }}>
-                        Balance: {(parseInt(balance.amount) / 1_000_000).toFixed(2)} {balance.denom}
+                        Balance: {(parseInt(balance.amount) / 1_000_000).toFixed(2)} OSMO
                     </Typography>
                 )}
             </Box>
 
             <Paper sx={{ width: '100%' }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', px: 2, pt: 1 }}>
-                    <Tabs
-                        value={tabValue}
-                        onChange={(_, newValue) => setTabValue(newValue)}
-                        sx={{ borderBottom: 1, borderColor: 'divider' }}
-                    >
-                        <Tab label="Tokens" />
-                        <Tab label="Liquidity Positions" />
-                    </Tabs>
+                    <Typography variant="h6" sx={{ px: 1, py: 1 }}>
+                        Creator Tokens
+                    </Typography>
                     {client && address && (
                         <IconButton onClick={fetchPortfolioTokens} disabled={loading} title="Refresh">
                             <RefreshIcon />
@@ -407,7 +314,7 @@ const PortfolioPage: React.FC = () => {
                     )}
                 </Box>
 
-                <TabPanel value={tabValue} index={0}>
+                <TabPanel value={0} index={0}>
                     <Box sx={{ px: 2, pb: 2 }}>
                         {!client || !address ? (
                             <Alert severity="info">Connect your wallet to view your portfolio</Alert>
@@ -418,7 +325,7 @@ const PortfolioPage: React.FC = () => {
                         ) : error ? (
                             <Alert severity="error">{error}</Alert>
                         ) : tokens.length === 0 ? (
-                            <Alert severity="info">No tokens found in your portfolio</Alert>
+                            <Alert severity="info">No creator tokens found in your wallet</Alert>
                         ) : (
                             <TableContainer>
                                 <Table>
@@ -433,7 +340,7 @@ const PortfolioPage: React.FC = () => {
                                     <TableBody>
                                         {tokens.map((token) => (
                                             <TokenRow
-                                                key={token.tokenAddress}
+                                                key={token.tokenDenom}
                                                 token={token}
                                                 onBuyClick={handleBuyClick}
                                                 onSellClick={handleSellClick}
@@ -448,54 +355,15 @@ const PortfolioPage: React.FC = () => {
                     </Box>
                 </TabPanel>
 
-                <TabPanel value={tabValue} index={1}>
-                    <Box sx={{ px: 2, pb: 2 }}>
-                        {!client || !address ? (
-                            <Alert severity="info">Connect your wallet to view your liquidity positions</Alert>
-                        ) : positionsLoading ? (
-                            <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-                                <CircularProgress />
-                            </Box>
-                        ) : positionsError ? (
-                            <Alert severity="error">{positionsError}</Alert>
-                        ) : positions.length === 0 ? (
-                            <Alert severity="info">No liquidity positions found</Alert>
-                        ) : (
-                            <TableContainer>
-                                <Table>
-                                    <TableHead>
-                                        <TableRow>
-                                            <TableCell>Position ID</TableCell>
-                                            <TableCell>Pool</TableCell>
-                                            <TableCell>Liquidity</TableCell>
-                                            <TableCell>Unclaimed Fees (Asset 0)</TableCell>
-                                            <TableCell>Unclaimed Fees (Asset 1)</TableCell>
-                                        </TableRow>
-                                    </TableHead>
-                                    <TableBody>
-                                        {positions.map((pos) => (
-                                            <TableRow key={`${pos.poolAddress}-${pos.positionId}`}>
-                                                <TableCell>
-                                                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                                                        {pos.positionId}
-                                                    </Typography>
-                                                </TableCell>
-                                                <TableCell>
-                                                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                                                        {pos.poolAddress.slice(0, 12)}...{pos.poolAddress.slice(-6)}
-                                                    </Typography>
-                                                </TableCell>
-                                                <TableCell>{(parseInt(pos.liquidity) / 1_000_000).toLocaleString()}</TableCell>
-                                                <TableCell>{(parseInt(pos.unclaimedFees0) / 1_000_000).toLocaleString()}</TableCell>
-                                                <TableCell>{(parseInt(pos.unclaimedFees1) / 1_000_000).toLocaleString()}</TableCell>
-                                            </TableRow>
-                                        ))}
-                                    </TableBody>
-                                </Table>
-                            </TableContainer>
-                        )}
-                    </Box>
-                </TabPanel>
+                <Box sx={{ px: 3, pb: 2 }}>
+                    <Alert severity="info" variant="outlined">
+                        Looking for liquidity positions? Creator pools no longer track
+                        LP positions — the seed liquidity lives in a native Osmosis
+                        GAMM pool owned by the pool contract. Any liquidity you add
+                        directly on Osmosis shows up in your Osmosis LP portfolio,
+                        not here.
+                    </Alert>
+                </Box>
             </Paper>
 
             {selectedToken && (

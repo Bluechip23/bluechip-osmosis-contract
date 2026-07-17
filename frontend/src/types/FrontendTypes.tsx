@@ -2,10 +2,12 @@
 
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
 
-
-// Post-Osmosis-migration the creator token is a native TokenFactory bank
-// denom (`factory/{pool}/{sub}`), NOT a CW20 contract — so the creator side
-// is keyed by `denom`, matching the contract's `TokenType::CreatorToken`.
+// Wire format of the contracts' TokenType enum. The `bluechip` key is the
+// native side (OSMO on Osmosis — the serde rename is load-bearing on-chain),
+// and `creator_token` is the pool's TokenFactory denom
+// (`factory/{pool_addr}/{subdenom}`). Both sides are bank denoms — the
+// creator side is keyed by `denom`, NOT `contract_addr` (the CW20 model
+// was removed in the Osmosis migration).
 export type TokenType =
     | { creator_token: { denom: string } }
     | { bluechip: { denom: string } };
@@ -18,7 +20,8 @@ export interface TokenInfo {
 }
 
 export interface DiscoverToken {
-    tokenAddress: string;
+    // TokenFactory denom of the creator token (factory/{pool}/{sub}).
+    tokenDenom: string;
     poolAddress: string;
     name: string;
     symbol: string;
@@ -32,7 +35,7 @@ export interface DiscoverToken {
 
 // Token as displayed in Portfolio page (has balance)
 export interface PortfolioToken {
-    tokenAddress: string;
+    tokenDenom: string;
     poolAddress: string;
     name: string;
     symbol: string;
@@ -55,7 +58,10 @@ export interface PoolDetails {
     pool_type: { xyk: Record<string, never> } | { stable: Record<string, never> };
 }
 
-// Response from pool contract's `pool_state` query
+// Response from pool contract's `pool_state` query. Post-migration the
+// reserves are read live from the native Osmosis GAMM pool (zero until the
+// threshold crossing seeds it). `nft_ownership_accepted` and
+// `total_liquidity` are retained for wire compatibility only.
 export interface PoolStateResponse {
     nft_ownership_accepted: boolean;
     reserve0: string;
@@ -63,24 +69,6 @@ export interface PoolStateResponse {
     total_liquidity: string;
     block_time_last: number;
 }
-
-// Response from factory/pool communication (includes additional fields)
-export interface PoolStateResponseForFactory {
-    pool_contract_address: string;
-    nft_ownership_accepted: boolean;
-    reserve0: string;
-    reserve1: string;
-    total_liquidity: string;
-    block_time_last: number;
-    price0_cumulative_last: string;
-    price1_cumulative_last: string;
-    assets: string[];
-}
-
-export interface AllPoolsResponse {
-    pools: [string, PoolStateResponseForFactory][];
-}
-
 
 // On-chain CommitStatus enum: unit variant serializes as string "fully_committed",
 // struct variant serializes as { in_progress: { raised, target } }
@@ -92,23 +80,33 @@ export const isThresholdReached = (status: CommitStatus): boolean => {
     return status === 'fully_committed';
 };
 
+// Response from the pool's `creator_earnings` query.
+export interface CreatorEarningsResponse {
+    creator_wallet_address: string;
+    excess: {
+        bluechip_amount: string;
+        token_amount: string;
+        unlock_time: string;
+        claimable_now: boolean;
+    } | null;
+    is_threshold_hit: boolean;
+    threshold_crossed_at: string | null;
+}
 
-export interface LiquidityPosition {
-    positionId: string;
-    poolAddress: string;
-    tokenA: {
-        address: string;
-        symbol: string;
-        amount: string;
-    };
-    tokenB: {
-        address: string;
-        symbol: string;
-        amount: string;
-    };
-    shareOfPool: string;
-    unclaimedFees: string;
-    nftTokenId?: string;
+// Response from the pool's `distribution_state` query (null when no
+// distribution is active).
+export interface DistributionStateResponse {
+    is_distributing: boolean;
+    distributions_remaining: number;
+    last_processed_key: string | null;
+    started_at: string;
+    last_updated: string;
+    seconds_since_update: number;
+    is_stalled: boolean;
+    consecutive_failures: number;
+    total_to_distribute: string;
+    total_committed_usd: string;
+    distributed_so_far: string;
 }
 
 // ============================================
@@ -170,53 +168,21 @@ export interface ChainConfig {
     coinDecimals: number;
 }
 
-// Default config - update with your values
+// Default config — the osmo-test-5 testnet, where the contracts are
+// currently deployed (osmo_testnet_v2). Override the factory address and
+// endpoints via VITE_* env vars (e.g. for the future mainnet deployment).
+// `nativeDenom` is only a fallback — the live denom is read from the
+// factory config / pool `pair {}` query wherever a real pool is involved.
 export const DEFAULT_CHAIN_CONFIG: ChainConfig = {
-    chainId: 'bluechipChain',
-    chainName: 'Bluechip Local',
-    rpc: 'http://localhost:26657',
-    rest: 'http://localhost:1317',
-    factoryAddress: 'osmo1factory...', // Replace with actual
-    // Osmosis native asset. Only a fallback — the live denom is read from the
-    // factory config / pool `pair {}` query wherever a real pool is involved.
+    chainId: 'osmo-test-5',
+    chainName: 'Osmosis Testnet',
+    rpc: 'https://rpc.osmotest5.osmosis.zone',
+    rest: 'https://lcd.osmotest5.osmosis.zone',
+    factoryAddress: import.meta.env.VITE_FACTORY_ADDRESS
+        || 'osmo1p93hcfzjnjfv0vtfxmunpqc25tq3p2vzh76hq3wxfz2zyayw4hzq4ac3vt',
     nativeDenom: 'uosmo',
     coinDecimals: 6,
 };
-
-// ============================================
-// On-chain Position Types (pool contract)
-// ============================================
-
-export interface PositionResponse {
-    position_id: string;
-    liquidity: string;
-    owner: string;
-    fee_growth_inside_0_last: string;
-    fee_growth_inside_1_last: string;
-    created_at: number;
-    last_fee_collection: number;
-    unclaimed_fees_0: string;
-    unclaimed_fees_1: string;
-}
-
-export interface PositionsResponse {
-    positions: PositionResponse[];
-}
-
-// Pool fee state from `fee_state` query
-export interface PoolFeeStateResponse {
-    fee_growth_global_0: string;
-    fee_growth_global_1: string;
-    total_fees_collected_0: string;
-    total_fees_collected_1: string;
-}
-
-// Combined pool info from `pool_info` query
-export interface PoolInfoResponse {
-    pool_state: PoolStateResponse;
-    fee_state: PoolFeeStateResponse;
-    total_positions: number;
-}
 
 // ============================================
 // Utility Functions
@@ -237,7 +203,7 @@ export const fromMicroUnits = (amount: string, decimals: number): number => {
     return parseInt(amount) / Math.pow(10, decimals);
 };
 
-// Extract the creator token's native denom from pool asset_infos.
+// Extract the creator token's TokenFactory denom from pool asset_infos.
 // (Renamed from getCreatorTokenAddress — the creator token is a TokenFactory
 // denom now, not a CW20 address.)
 export const getCreatorTokenDenom = (assetInfos: [TokenType, TokenType]): string | null => {
@@ -248,11 +214,18 @@ export const getCreatorTokenDenom = (assetInfos: [TokenType, TokenType]): string
     return creatorToken?.creator_token.denom ?? null;
 };
 
-// Extract bluechip denom from pool asset_infos
+// Extract the native (OSMO) denom from pool asset_infos
 export const getBluechipDenom = (assetInfos: [TokenType, TokenType]): string | null => {
     const bluechip = assetInfos.find(
         (asset): asset is { bluechip: { denom: string } } =>
             'bluechip' in asset
     );
     return bluechip?.bluechip.denom ?? null;
+};
+
+// Derive a display symbol from a TokenFactory denom
+// (factory/{pool_addr}/{subdenom} -> SUBDENOM).
+export const symbolFromDenom = (denom: string): string => {
+    const parts = denom.split('/');
+    return (parts.length === 3 ? parts[2] : denom).toUpperCase();
 };

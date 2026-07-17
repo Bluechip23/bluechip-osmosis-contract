@@ -113,13 +113,13 @@ const TokenInfoModal: React.FC<InfoModalProps> = ({
 
                     <Box>
                         <Typography variant="body2" color="text.secondary" gutterBottom>
-                            Token Address
+                            Token Denom
                         </Typography>
                         <Typography
                             variant="body2"
                             sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}
                         >
-                            {token.tokenAddress}
+                            {token.tokenDenom}
                         </Typography>
                     </Box>
 

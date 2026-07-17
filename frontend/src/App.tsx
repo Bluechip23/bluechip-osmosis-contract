@@ -7,7 +7,6 @@ import Navigation from './components/Navigation';
 import WalletConnect from './components/WalletConnect';
 import Swap from './components/Swap';
 import Liquidity from './components/Liquidity';
-import Fees from './components/Fees';
 import Commit from './components/Commit';
 import CreatePoolPage from './pages/CreatePool';
 import DiscoverPage from './pages/Discover';
@@ -48,19 +47,17 @@ function App() {
           />
         </Grid>
         <Grid size={{ xs: 6 }}>
-          <Liquidity
-            client={client}
-            address={address}
-          />
-        </Grid>
-        <Grid size={{ xs: 6 }}>
-          <Fees
-            client={client}
-            address={address}
-          />
-        </Grid>
-        <Grid size={{ xs: 6 }}>
           <Commit
+            client={client}
+            address={address}
+          />
+        </Grid>
+        <Grid size={{ xs: 12 }}>
+          {/* In-site liquidity for the NATIVE Osmosis GAMM pool: add is a
+              MsgJoinPool and remove is a MsgExitPool signed by the user's
+              own wallet — the creator-pool contract has no liquidity entry
+              points (LP fee collection happens on Osmosis per GAMM rules). */}
+          <Liquidity
             client={client}
             address={address}
           />

@@ -9,8 +9,12 @@ interface SwapProps {
     contractAddress: string;
 }
 
+// Both sides of every pool are native bank denoms now — OSMO (uosmo) and
+// the creator token's TokenFactory denom (factory/{pool_addr}/{subdenom}).
+// A swap in either direction is the same simple_swap message with the
+// offered denom attached as funds; the old CW20 send-hook path is gone.
 const Swap = ({ client, address, contractAddress }: SwapProps) => {
-    const [offerAsset, setOfferAsset] = useState('');
+    const [offerDenom, setOfferDenom] = useState('');
     const [amount, setAmount] = useState('');
     const [maxSpread, setMaxSpread] = useState('0.005'); // Default 0.5%
     const [deadline, setDeadline] = useState('20'); // Default 20 minutes
@@ -46,79 +50,54 @@ const Swap = ({ client, address, contractAddress }: SwapProps) => {
                 ? (Date.now() + (parseFloat(deadline) * 60 * 1000)) * 1000000
                 : null;
 
-            // Fix: Check if it looks like a contract address (starts with cosmos and is long)
-            // Native tokens are usually short (stake, uatom) or start with ibc/
-            const isContract = offerAsset.length > 20 && offerAsset.startsWith('cosmos');
-            const isNative = !isContract;
+            // TokenFactory creator denoms look like factory/{pool}/{sub};
+            // anything else (uosmo, ibc/...) is the pool's native side.
+            const isCreatorToken = offerDenom.startsWith('factory/');
+            const offerAsset = {
+                info: isCreatorToken
+                    ? { creator_token: { denom: offerDenom } }
+                    : { bluechip: { denom: offerDenom } },
+                amount: amountInMicroUnits
+            };
 
-            if (isNative) {
-                const msg = {
-                    simple_swap: {
-                        offer_asset: {
-                            info: { bluechip: { denom: offerAsset } },
-                            amount: amountInMicroUnits
-                        },
-                        belief_price: null,
-                        max_spread: maxSpread || null,
-                        to: null,
-                        transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
-                    }
-                };
-
-                const funds = coins(amountInMicroUnits, offerAsset);
-
-                const result = await client.execute(
-                    address,
-                    targetContractAddress,
-                    msg,
-                    {
-                        amount: [],
-                        gas: "500000"
-                    },
-                    "Swap Native",
-                    funds
-                );
-                console.log("Transaction Hash:", result.transactionHash);
-                setStatus(`Success! Tx Hash: ${result.transactionHash}`);
-            } else {
-                // CW20 Swap logic
-                // 1. Construct the hook message (the inner message for the pool)
-                const hookMsg = {
-                    swap: {
-                        belief_price: null,
-                        max_spread: maxSpread || null,
-                        to: null,
-                        transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
-                    }
-                };
-
-                // 2. Base64 encode the hook message
-                const encodedMsg = btoa(JSON.stringify(hookMsg));
-
-                // 3. Construct the send message to the CW20 contract
-                const msg = {
-                    send: {
-                        contract: targetContractAddress, // The pool address
-                        amount: amountInMicroUnits,
-                        msg: encodedMsg
-                    }
-                };
-
-                // 4. Execute on the CW20 contract (offerAsset is the token contract address)
-                const result = await client.execute(
-                    address,
-                    offerAsset, // Execute on the token contract
-                    msg,
-                    {
-                        amount: [],
-                        gas: "500000"
-                    },
-                    "Swap CW20",
-                    [] // No native funds sent with CW20 calls
-                );
-                console.log("Transaction Hash:", result.transactionHash);
-                setStatus(`Success! Tx Hash: ${result.transactionHash}`);
+            // Fix belief_price from a live quote so a front-run that moves
+            // the pool reverts the swap instead of filling at a worse price.
+            let beliefPrice: string | null = null;
+            const sim = await client.queryContractSmart(targetContractAddress, {
+                simulation: { offer_asset: offerAsset }
+            });
+            const expectedOut = Number(sim?.return_amount ?? 0);
+            if (Number.isFinite(expectedOut) && expectedOut > 0) {
+                // belief_price = offer / expected_out (offer-per-ask).
+                beliefPrice = (Number(amountInMicroUnits) / expectedOut).toFixed(18);
             }
+
+            const msg = {
+                simple_swap: {
+                    offer_asset: offerAsset,
+                    belief_price: beliefPrice,
+                    max_spread: maxSpread || null,
+                    allow_high_max_spread: null,
+                    to: null,
+                    transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
+                }
+            };
+
+            const funds = coins(amountInMicroUnits, offerDenom);
+
+            const result = await client.execute(
+                address,
+                targetContractAddress,
+                msg,
+                {
+                    amount: [],
+                    gas: "500000"
+                },
+                "Swap",
+                funds
+            );
+            console.log("Transaction Hash:", result.transactionHash);
+            setStatus(`Success! Tx Hash: ${result.transactionHash}`);
         } catch (err) {
             console.error(err);
             setStatus('Error: ' + (err as Error).message);
@@ -128,20 +107,20 @@ const Swap = ({ client, address, contractAddress }: SwapProps) => {
     return (
         <Card sx={{ mb: 2 }}>
             <CardContent>
-                <Typography variant="h6" gutterBottom>Standard Swap</Typography>
+                <Typography variant="h6" gutterBottom>Swap</Typography>
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                     <TextField
-                        label="Swap Contract Address"
+                        label="Pool Contract Address"
                         value={targetContractAddress}
                         onChange={(e) => setTargetContractAddress(e.target.value)}
-                        placeholder="wasm1..."
-                        helperText="Address of the pool contract to swap with"
+                        placeholder="osmo1..."
+                        helperText="Address of the creator pool contract to swap with"
                     />
                     <TextField
-                        label="Offer Asset (Denom)"
-                        value={offerAsset}
-                        onChange={(e) => setOfferAsset(e.target.value)}
-                        helperText="e.g. ucosm"
+                        label="Offer Denom"
+                        value={offerDenom}
+                        onChange={(e) => setOfferDenom(e.target.value)}
+                        helperText="uosmo to buy, or the creator token's factory/... denom to sell"
                     />
                     <TextField
                         label="Amount"
