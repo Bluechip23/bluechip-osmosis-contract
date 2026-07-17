@@ -1,3 +1,11 @@
+// ⚠️ NON-FUNCTIONAL POST-OSMOSIS-MIGRATION — DO NOT SHIP AS-IS.
+// This component targets the removed internal LP system: `increase_allowance`
+// (there is no CW20), `deposit_liquidity` / `remove_*_liquidity` / `position`
+// (the pool has no such handlers), and it reads the creator token as a CW20
+// address. Post-migration, liquidity lives on the NATIVE Osmosis GAMM pool —
+// users add/remove liquidity directly on Osmosis, not through this contract.
+// This needs a rewrite (or removal) before the UI goes live; every call here
+// will revert against the current contracts.
 import React, { useState } from 'react';
 import { Card, CardContent, Typography, TextField, Button, Box, Alert, Tabs, Tab } from '@mui/material';
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';

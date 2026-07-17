@@ -32,28 +32,45 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
             setTxHash('');
             setCopySuccess(false);
 
-            const gas = '2000000';
+            // The crossing is funded from commits, but CREATE still mints the
+            // TokenFactory denom (MsgCreateDenom consumes ~1M gas on Osmosis,
+            // DenomCreationGasConsume) + registers metadata + runs the reply
+            // chain, so budget generously above a plain execute.
+            const gas = '3000000';
 
             if (!tokenName || !tokenSymbol) {
                 setStatus('Error: Creator pools require a token name and symbol');
                 return;
             }
+
+            // The bluechip side MUST equal the factory's canonical
+            // `bluechip_denom` (uosmo on Osmosis) or `validate_pool_token_info`
+            // rejects the create. Read it live from factory config instead of
+            // trusting a hard-coded default so this works on any deployment.
+            const factoryCfg = await client.queryContractSmart(FACTORY_ADDRESS, { factory: {} });
+            const bluechipDenom: string =
+                factoryCfg?.factory?.bluechip_denom ?? DEFAULT_CHAIN_CONFIG.nativeDenom;
+
             // Create { pool_msg, token_info }. Only `pool_token_info` and the
-            // CW20 metadata are caller-supplied; commit threshold, fee splits,
-            // threshold-payout amounts, lock caps, and oracle config are read
-            // from factory config.
+            // token metadata are caller-supplied; commit threshold, fee splits,
+            // threshold-payout amounts, lock caps, and oracle config come from
+            // factory config. The creator-token slot is a PLACEHOLDER — the
+            // pool creates its own `factory/{pool}/{sub}` TokenFactory denom at
+            // instantiate — but it must still be a syntactically valid
+            // CreatorToken, i.e. keyed by `denom` (NOT `contract_addr`; the
+            // CW20 model was removed in the Osmosis migration).
             const createMsg: Record<string, unknown> = {
                 create: {
                     pool_msg: {
                         pool_token_info: [
-                            { bluechip: { denom: DEFAULT_CHAIN_CONFIG.nativeDenom } },
-                            { creator_token: { contract_addr: 'WILL_BE_CREATED_BY_FACTORY' } },
+                            { bluechip: { denom: bluechipDenom } },
+                            { creator_token: { denom: 'WILL_BE_CREATED_BY_FACTORY' } },
                         ],
                     },
                     token_info: {
                         name: tokenName,
                         symbol: tokenSymbol,
-                        // Pool enforces 6 decimals to match hardcoded payout amounts.
+                        // Pool enforces 6 decimals to match the fixed payout amounts.
                         decimal: 6,
                     },
                 },

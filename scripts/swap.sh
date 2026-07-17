@@ -38,7 +38,7 @@ fi
 # Resolve the creator-token CW20 from the pool's pair info.
 PAIR="$(query_smart "$POOL_ADDR" '{"pair":{}}')"
 TOKEN_ADDR="$(echo "$PAIR" | jq -r '
-    [ .. | objects | .creator_token? | select(. != null) | .contract_addr ]
+    [ .. | objects | .creator_token? | select(. != null) | .denom ]
     | first // empty')"
 if [ -z "$TOKEN_ADDR" ]; then
     echo "error: could not resolve creator token from pair query: $PAIR" >&2
@@ -48,7 +48,7 @@ fi
 if [ "$SIDE" = "native" ]; then
     OFFER_INFO="$(jq -nc --arg d "$NATIVE_DENOM" '{bluechip:{denom:$d}}')"
 else
-    OFFER_INFO="$(jq -nc --arg a "$TOKEN_ADDR" '{creator_token:{contract_addr:$a}}')"
+    OFFER_INFO="$(jq -nc --arg a "$TOKEN_ADDR" '{creator_token:{denom:$a}}')"
 fi
 
 # ---- Simulate --------------------------------------------------------

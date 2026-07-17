@@ -1,4 +1,10 @@
 // pages/PortfolioPage.tsx
+// ⚠️ Creator-token holdings logic here reads the token as a CW20 contract
+// (`queryContractSmart(tokenAddr, { balance })`) — post-migration the creator
+// token is a native TokenFactory denom, so balances must come from the bank
+// module (`client.getBalance(address, denom)`), and the identifier is a
+// `denom`, not a `contract_addr`. This section needs a rewrite before ship;
+// position/LP portfolio views no longer apply (liquidity is on native GAMM).
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     Container,

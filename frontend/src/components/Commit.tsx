@@ -97,13 +97,19 @@ const Commit = ({ client, address }: CommitProps) => {
             console.log('Sending commit message:', JSON.stringify(msg, null, 2));
             console.log('With funds:', funds);
 
+            // A pre-threshold commit might be the one that crosses (mint 4
+            // splits + create the native GAMM pool + set up distribution +
+            // notify factory), so budget generously; a post-threshold commit
+            // is just a swap leg.
+            const gas = isThresholdCrossed ? "800000" : "3000000";
+
             const result = await client.execute(
                 address,
                 targetContractAddress,
                 msg,
                 {
                     amount: [],
-                    gas: "600000" // Explicit gas limit
+                    gas // Explicit gas limit
                 },
                 "Commit",
                 funds

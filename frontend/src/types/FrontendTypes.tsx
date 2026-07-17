@@ -3,8 +3,11 @@
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
 
 
+// Post-Osmosis-migration the creator token is a native TokenFactory bank
+// denom (`factory/{pool}/{sub}`), NOT a CW20 contract — so the creator side
+// is keyed by `denom`, matching the contract's `TokenType::CreatorToken`.
 export type TokenType =
-    | { creator_token: { contract_addr: string } }
+    | { creator_token: { denom: string } }
     | { bluechip: { denom: string } };
 
 export interface TokenInfo {
@@ -173,8 +176,10 @@ export const DEFAULT_CHAIN_CONFIG: ChainConfig = {
     chainName: 'Bluechip Local',
     rpc: 'http://localhost:26657',
     rest: 'http://localhost:1317',
-    factoryAddress: 'cosmos1factory...', // Replace with actual
-    nativeDenom: 'ubluechip',
+    factoryAddress: 'osmo1factory...', // Replace with actual
+    // Osmosis native asset. Only a fallback — the live denom is read from the
+    // factory config / pool `pair {}` query wherever a real pool is involved.
+    nativeDenom: 'uosmo',
     coinDecimals: 6,
 };
 
@@ -232,13 +237,15 @@ export const fromMicroUnits = (amount: string, decimals: number): number => {
     return parseInt(amount) / Math.pow(10, decimals);
 };
 
-// Extract creator token address from pool asset_infos
-export const getCreatorTokenAddress = (assetInfos: [TokenType, TokenType]): string | null => {
+// Extract the creator token's native denom from pool asset_infos.
+// (Renamed from getCreatorTokenAddress — the creator token is a TokenFactory
+// denom now, not a CW20 address.)
+export const getCreatorTokenDenom = (assetInfos: [TokenType, TokenType]): string | null => {
     const creatorToken = assetInfos.find(
-        (asset): asset is { creator_token: { contract_addr: string } } =>
+        (asset): asset is { creator_token: { denom: string } } =>
             'creator_token' in asset
     );
-    return creatorToken?.creator_token.contract_addr ?? null;
+    return creatorToken?.creator_token.denom ?? null;
 };
 
 // Extract bluechip denom from pool asset_infos
