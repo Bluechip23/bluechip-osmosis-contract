@@ -61,14 +61,29 @@ const BuyModal: React.FC<TokenModalProps> = ({
                 ? (Date.now() + parseFloat(deadline) * 60 * 1000) * 1_000_000
                 : null;
 
+            const offerAsset = {
+                info: { bluechip: { denom: bluechipDenom } },
+                amount: amountInMicroUnits
+            };
+
+            // Fix belief_price from a live quote so a front-run that moves the
+            // pool reverts the swap instead of filling at the worse price.
+            let beliefPrice: string | null = null;
+            const sim = await client.queryContractSmart(token.poolAddress, {
+                simulation: { offer_asset: offerAsset }
+            });
+            const expectedOut = Number(sim?.return_amount ?? 0);
+            if (Number.isFinite(expectedOut) && expectedOut > 0) {
+                // belief_price = offer / expected_out (offer-per-ask).
+                beliefPrice = (Number(amountInMicroUnits) / expectedOut).toFixed(18);
+            }
+
             const msg = {
                 simple_swap: {
-                    offer_asset: {
-                        info: { bluechip: { denom: bluechipDenom } },
-                        amount: amountInMicroUnits
-                    },
-                    belief_price: null,
+                    offer_asset: offerAsset,
+                    belief_price: beliefPrice,
                     max_spread: maxSpread || null,
+                    allow_high_max_spread: null,
                     to: null,
                     transaction_deadline: deadlineInNs ? deadlineInNs.toString() : null
                 }

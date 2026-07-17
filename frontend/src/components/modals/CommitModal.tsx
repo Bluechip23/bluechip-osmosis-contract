@@ -162,12 +162,12 @@ const CommitModal: React.FC<TokenModalProps> = ({
                     </Typography>
 
                     <TextField
-                        label="Amount (Bluechips)"
+                        label="Amount (OSMO)"
                         value={amount}
                         onChange={(e) => setAmount(e.target.value)}
                         type="number"
                         fullWidth
-                        helperText="Amount of bluechips to commit"
+                        helperText="Amount of OSMO to commit"
                     />
 
                     <TextField
