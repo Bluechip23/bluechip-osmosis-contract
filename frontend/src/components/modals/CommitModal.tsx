@@ -109,11 +109,19 @@ const CommitModal: React.FC<TokenModalProps> = ({
             const msg = { commit: commitMsg };
             const funds = [{ denom: bluechipDenom, amount: amountInMicroUnits }];
 
+            // Gas: a pre-threshold commit MIGHT be the one that crosses the
+            // threshold, which in a single tx mints the 4 splits, creates the
+            // native GAMM pool (~1M gas alone), sets up distribution, and
+            // notifies the factory — far heavier than a plain commit. Budget
+            // generously while pre-threshold; a post-threshold commit is just
+            // a swap leg and needs much less.
+            const gas = isThresholdCrossed ? '800000' : '3000000';
+
             const result = await client.execute(
                 address,
                 token.poolAddress,
                 msg,
-                { amount: [], gas: '600000' },
+                { amount: [], gas },
                 'Commit',
                 funds
             );

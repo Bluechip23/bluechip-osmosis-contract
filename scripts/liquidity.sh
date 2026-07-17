@@ -38,7 +38,7 @@ fi
 
 resolve_token() {
     query_smart "$POOL_ADDR" '{"pair":{}}' | jq -r '
-        [ .. | objects | .creator_token? | select(. != null) | .contract_addr ]
+        [ .. | objects | .creator_token? | select(. != null) | .denom ]
         | first // empty'
 }
 

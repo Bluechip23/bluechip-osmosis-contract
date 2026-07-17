@@ -30,30 +30,46 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
             setTxHash('');
             setCopySuccess(false);
 
-            const gas = '2000000';
+            // The crossing is funded from commits, but CREATE still mints the
+            // TokenFactory denom (MsgCreateDenom consumes ~1M gas on Osmosis,
+            // DenomCreationGasConsume) + registers metadata + runs the reply
+            // chain, so budget generously above a plain execute.
+            const gas = '3000000';
 
             if (!tokenName || !tokenSymbol) {
                 setStatus('Error: Creator pools require a token name and symbol');
                 return;
             }
+
+            // The bluechip side MUST equal the factory's canonical
+            // `bluechip_denom` (uosmo on Osmosis) or `validate_pool_token_info`
+            // rejects the create. Read it live from factory config instead of
+            // trusting a hard-coded default so this works on any deployment.
+            const factoryCfg = await client.queryContractSmart(FACTORY_ADDRESS, { factory: {} });
+            const bluechipDenom: string =
+                factoryCfg?.factory?.bluechip_denom ?? DEFAULT_CHAIN_CONFIG.nativeDenom;
+
             // Create { pool_msg, token_info }. Only `pool_token_info` and the
             // token's display metadata are caller-supplied; commit threshold,
             // fee splits, threshold-payout amounts, lock caps, and pricing
-            // config are read from factory config. The creator_token entry is
-            // a placeholder — the pool mints its own TokenFactory denom
-            // (factory/{pool_addr}/{subdenom}) at instantiate.
+            // config are read from factory config. The creator-token slot is a
+            // PLACEHOLDER — the pool mints its own TokenFactory denom
+            // (factory/{pool_addr}/{subdenom}) at instantiate — but it must
+            // still be a syntactically valid CreatorToken, i.e. keyed by
+            // `denom` (NOT `contract_addr`; the CW20 model was removed in the
+            // Osmosis migration).
             const createMsg: Record<string, unknown> = {
                 create: {
                     pool_msg: {
                         pool_token_info: [
-                            { bluechip: { denom: DEFAULT_CHAIN_CONFIG.nativeDenom } },
+                            { bluechip: { denom: bluechipDenom } },
                             { creator_token: { denom: 'WILL_BE_CREATED_BY_FACTORY' } },
                         ],
                     },
                     token_info: {
                         name: tokenName,
                         symbol: tokenSymbol,
-                        // Pool enforces 6 decimals to match hardcoded payout amounts.
+                        // Pool enforces 6 decimals to match the fixed payout amounts.
                         decimal: 6,
                     },
                 },
@@ -63,13 +79,10 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
 
             // The factory charges a flat OSMO creation fee (surplus is
             // refunded on-chain; zero means the fee is disabled and no funds
-            // may be attached). Read the live value from factory config.
-            const factoryConfig = await client.queryContractSmart(FACTORY_ADDRESS, { factory: {} });
-            const creationFee: string = factoryConfig?.factory?.pool_creation_fee ?? '0';
-            const feeDenom: string =
-                factoryConfig?.factory?.bluechip_denom ?? DEFAULT_CHAIN_CONFIG.nativeDenom;
+            // may be attached). Reuse the factory config fetched above.
+            const creationFee: string = factoryCfg?.factory?.pool_creation_fee ?? '0';
             const funds = creationFee !== '0'
-                ? [{ denom: feeDenom, amount: creationFee }]
+                ? [{ denom: bluechipDenom, amount: creationFee }]
                 : [];
 
             const result = await client.execute(

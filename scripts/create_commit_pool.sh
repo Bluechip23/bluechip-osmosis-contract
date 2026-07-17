@@ -82,7 +82,7 @@ CREATE_MSG="$(jq -nc \
         pool_msg:{
             pool_token_info:[
                 {bluechip:{denom:$denom}},
-                {creator_token:{contract_addr:"WILL_BE_CREATED_BY_FACTORY"}}
+                {creator_token:{denom:"WILL_BE_CREATED_BY_FACTORY"}}
             ]
         },
         token_info:{

@@ -5,7 +5,9 @@ import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
 // Wire format of the contracts' TokenType enum. The `bluechip` key is the
 // native side (OSMO on Osmosis — the serde rename is load-bearing on-chain),
 // and `creator_token` is the pool's TokenFactory denom
-// (`factory/{pool_addr}/{subdenom}`). Both sides are bank denoms.
+// (`factory/{pool_addr}/{subdenom}`). Both sides are bank denoms — the
+// creator side is keyed by `denom`, NOT `contract_addr` (the CW20 model
+// was removed in the Osmosis migration).
 export type TokenType =
     | { creator_token: { denom: string } }
     | { bluechip: { denom: string } };
@@ -166,14 +168,18 @@ export interface ChainConfig {
     coinDecimals: number;
 }
 
-// Default config — Osmosis mainnet. Override the factory address (and
-// endpoints, if you self-host a node) via VITE_* env vars.
+// Default config — the osmo-test-5 testnet, where the contracts are
+// currently deployed (osmo_testnet_v2). Override the factory address and
+// endpoints via VITE_* env vars (e.g. for the future mainnet deployment).
+// `nativeDenom` is only a fallback — the live denom is read from the
+// factory config / pool `pair {}` query wherever a real pool is involved.
 export const DEFAULT_CHAIN_CONFIG: ChainConfig = {
-    chainId: 'osmosis-1',
-    chainName: 'Osmosis',
-    rpc: 'https://rpc.osmosis.zone',
-    rest: 'https://lcd.osmosis.zone',
-    factoryAddress: import.meta.env.VITE_FACTORY_ADDRESS || 'osmo1factory...', // Replace with actual
+    chainId: 'osmo-test-5',
+    chainName: 'Osmosis Testnet',
+    rpc: 'https://rpc.osmotest5.osmosis.zone',
+    rest: 'https://lcd.osmotest5.osmosis.zone',
+    factoryAddress: import.meta.env.VITE_FACTORY_ADDRESS
+        || 'osmo1p93hcfzjnjfv0vtfxmunpqc25tq3p2vzh76hq3wxfz2zyayw4hzq4ac3vt',
     nativeDenom: 'uosmo',
     coinDecimals: 6,
 };
@@ -197,7 +203,9 @@ export const fromMicroUnits = (amount: string, decimals: number): number => {
     return parseInt(amount) / Math.pow(10, decimals);
 };
 
-// Extract the creator token's TokenFactory denom from pool asset_infos
+// Extract the creator token's TokenFactory denom from pool asset_infos.
+// (Renamed from getCreatorTokenAddress — the creator token is a TokenFactory
+// denom now, not a CW20 address.)
 export const getCreatorTokenDenom = (assetInfos: [TokenType, TokenType]): string | null => {
     const creatorToken = assetInfos.find(
         (asset): asset is { creator_token: { denom: string } } =>

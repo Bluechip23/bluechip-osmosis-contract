@@ -36,7 +36,7 @@ CMD="${1:-}"
 
 pool_token() {
     query_smart "$1" '{"pair":{}}' | jq -r '
-        [ .. | objects | .creator_token? | select(. != null) | .contract_addr ]
+        [ .. | objects | .creator_token? | select(. != null) | .denom ]
         | first // empty'
 }
 
@@ -69,7 +69,7 @@ buy)
         '[{
             pool_addr:$pool,
             offer_asset_info:{bluechip:{denom:$d}},
-            ask_asset_info:{creator_token:{contract_addr:$t}}
+            ask_asset_info:{creator_token:{denom:$t}}
         }]')"
     FINAL="$(simulate "$OPS" "$AMOUNT")"
     [ -z "$FINAL" ] && { echo "error: simulation returned no final_amount" >&2; exit 1; }
@@ -105,13 +105,13 @@ hop)
         '[
             {
                 pool_addr:$pa,
-                offer_asset_info:{creator_token:{contract_addr:$ta}},
+                offer_asset_info:{creator_token:{denom:$ta}},
                 ask_asset_info:{bluechip:{denom:$d}}
             },
             {
                 pool_addr:$pb,
                 offer_asset_info:{bluechip:{denom:$d}},
-                ask_asset_info:{creator_token:{contract_addr:$tb}}
+                ask_asset_info:{creator_token:{denom:$tb}}
             }
         ]')"
     FINAL="$(simulate "$OPS" "$AMOUNT")"

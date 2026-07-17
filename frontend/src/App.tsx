@@ -6,6 +6,7 @@ import { Coin } from '@cosmjs/stargate';
 import Navigation from './components/Navigation';
 import WalletConnect from './components/WalletConnect';
 import Swap from './components/Swap';
+import Liquidity from './components/Liquidity';
 import Commit from './components/Commit';
 import CreatePoolPage from './pages/CreatePool';
 import DiscoverPage from './pages/Discover';
@@ -51,10 +52,17 @@ function App() {
             address={address}
           />
         </Grid>
+        <Grid size={{ xs: 12 }}>
+          {/* In-site liquidity for the NATIVE Osmosis GAMM pool: add is a
+              MsgJoinPool and remove is a MsgExitPool signed by the user's
+              own wallet — the creator-pool contract has no liquidity entry
+              points (LP fee collection happens on Osmosis per GAMM rules). */}
+          <Liquidity
+            client={client}
+            address={address}
+          />
+        </Grid>
       </Grid>
-      {/* Liquidity management and LP fee collection moved to Osmosis itself:
-          the seed liquidity is a native GAMM pool owned by the pool contract,
-          and any extra liquidity is added/removed via the Osmosis app. */}
     </>
   );
 

@@ -1,4 +1,8 @@
 // pages/PortfolioPage.tsx
+// Creator-token holdings are read the Osmosis-native way: pools come from
+// the factory's `pools` registry query and balances from the bank module
+// (`client.getBalance(address, denom)`) — the creator token is a
+// TokenFactory denom, not a CW20 contract.
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     Container,
