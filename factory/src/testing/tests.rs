@@ -1486,6 +1486,7 @@ fn deploy_script_instantiate_json_deserializes() {
         "max_bluechip_lock_per_pool": "25000000000",
         "creator_excess_liquidity_lock_days": 7,
         "pool_creation_fee": "1000000",
+        "gamm_pool_creation_fee": {"denom": "uosmo", "amount": "1000000"},
         "emergency_withdraw_delay_seconds": 86400,
         "cw20_token_contract_id": 1,
         "cw721_nft_contract_id": 2,
@@ -1496,6 +1497,7 @@ fn deploy_script_instantiate_json_deserializes() {
     assert_eq!(msg.bluechip_denom, "uosmo");
     assert_eq!(msg.pricing_pool_id, 1);
     assert_eq!(msg.commit_threshold_limit_usd, Uint128::new(25_000_000_000));
+    assert_eq!(msg.gamm_pool_creation_fee.amount, Uint128::new(1_000_000));
     // Omitted-with-default field must land on the canonical payout split.
     msg.threshold_payout_amounts
         .validate()

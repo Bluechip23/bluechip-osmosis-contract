@@ -244,6 +244,17 @@ pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) ->
                 rate_used: rate,
                 timestamp: _env.block.time.seconds(),
                 bluechip_wallet: cfg.bluechip_wallet_address,
+                // Live GAMM creation-fee context (see the response-struct
+                // docs): the fee coin the crossing must cover plus the
+                // pricing route pools use to swap into a non-native fee
+                // denom. A zero-amount fee reads as disabled.
+                gamm_pool_creation_fee: if cfg.gamm_pool_creation_fee.amount.is_zero() {
+                    None
+                } else {
+                    Some(cfg.gamm_pool_creation_fee.clone())
+                },
+                pricing_pool_id: cfg.pricing_pool_id,
+                usd_quote_denom: cfg.usd_quote_denom,
             })
         }
     }

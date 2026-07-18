@@ -94,6 +94,12 @@ fn run_crossing(
         &fee_info,
         &fee_info.bluechip_wallet_address,
         Decimal::permille(3),
+        // Legacy fee context: $1/native rate, no live fee coin — exercises
+        // the CREATION_FEE_RESERVE_TARGET fallback these invariants pin.
+        Uint128::new(1_000_000),
+        None,
+        0,
+        "",
         &env,
     )?;
 

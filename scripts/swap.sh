@@ -6,10 +6,12 @@
 #        scripts/swap.sh <pool_addr> token  <amount-micro>   # creator token -> OSMO
 #
 # Simulates first (pool.Simulation) and prints the expected return,
-# then executes:
-#   native side -> pool.SimpleSwap with the OSMO attached as funds
-#   token  side -> cw20.Send to the pool with the Swap hook (the pool
-#                  only accepts creator-token offers via Receive)
+# then executes pool.SimpleSwap with the offer coin attached as funds.
+# Both directions are plain native transfers now: the creator token is
+# a TokenFactory bank denom (factory/{pool}/{sub}), so selling it is
+# the same SimpleSwap shape with that denom attached — the old CW20
+# Send/Receive hook is gone with the migration. The contract routes
+# the swap through the native GAMM pool via MsgSwapExactAmountIn.
 #
 # max_spread is pinned to the pools' 5% hard cap so thin testnet pools
 # don't trip the 0.5% default. Swaps are rate-limited to one per wallet
@@ -35,20 +37,22 @@ if [ -z "$POOL_ADDR" ] || [ -z "$AMOUNT" ] \
     exit 1
 fi
 
-# Resolve the creator-token CW20 from the pool's pair info.
+# Resolve the creator-token TokenFactory denom from the pool's pair info.
 PAIR="$(query_smart "$POOL_ADDR" '{"pair":{}}')"
-TOKEN_ADDR="$(echo "$PAIR" | jq -r '
+TOKEN_DENOM="$(echo "$PAIR" | jq -r '
     [ .. | objects | .creator_token? | select(. != null) | .denom ]
     | first // empty')"
-if [ -z "$TOKEN_ADDR" ]; then
+if [ -z "$TOKEN_DENOM" ]; then
     echo "error: could not resolve creator token from pair query: $PAIR" >&2
     exit 1
 fi
 
 if [ "$SIDE" = "native" ]; then
     OFFER_INFO="$(jq -nc --arg d "$NATIVE_DENOM" '{bluechip:{denom:$d}}')"
+    OFFER_DENOM="$NATIVE_DENOM"
 else
-    OFFER_INFO="$(jq -nc --arg a "$TOKEN_ADDR" '{creator_token:{denom:$a}}')"
+    OFFER_INFO="$(jq -nc --arg d "$TOKEN_DENOM" '{creator_token:{denom:$d}}')"
+    OFFER_DENOM="$TOKEN_DENOM"
 fi
 
 # ---- Simulate --------------------------------------------------------
@@ -57,32 +61,23 @@ SIM_MSG="$(jq -nc --argjson info "$OFFER_INFO" --arg amt "$AMOUNT" \
 SIM="$(query_smart "$POOL_ADDR" "$SIM_MSG")"
 EXPECTED="$(echo "$SIM" | jq -r '.return_amount // empty' 2>/dev/null || true)"
 echo "pool:          $POOL_ADDR"
-echo "creator token: $TOKEN_ADDR"
+echo "creator token: $TOKEN_DENOM"
 echo "offering:      $AMOUNT ($SIDE side)"
 echo "simulation:    $SIM"
 echo ""
 
 # ---- Execute ----------------------------------------------------------
-if [ "$SIDE" = "native" ]; then
-    SWAP_MSG="$(jq -nc --argjson info "$OFFER_INFO" --arg amt "$AMOUNT" \
-        '{simple_swap:{
-            offer_asset:{info:$info, amount:$amt},
-            belief_price:null,
-            max_spread:"0.05",
-            to:null,
-            transaction_deadline:null
-        }}')"
-    RESULT="$(submit_tx wasm execute "$POOL_ADDR" "$SWAP_MSG" \
-        --amount "${AMOUNT}${NATIVE_DENOM}")"
-else
-    # Creator-token offers go through cw20::Send with the Swap hook.
-    HOOK_B64="$(jq -nc \
-        '{swap:{belief_price:null, max_spread:"0.05", to:null, transaction_deadline:null}}' \
-        | base64 | tr -d '\n')"
-    SEND_MSG="$(jq -nc --arg pool "$POOL_ADDR" --arg amt "$AMOUNT" --arg hook "$HOOK_B64" \
-        '{send:{contract:$pool, amount:$amt, msg:$hook}}')"
-    RESULT="$(submit_tx wasm execute "$TOKEN_ADDR" "$SEND_MSG")"
-fi
+# Same SimpleSwap shape both directions; only the attached coin differs.
+SWAP_MSG="$(jq -nc --argjson info "$OFFER_INFO" --arg amt "$AMOUNT" \
+    '{simple_swap:{
+        offer_asset:{info:$info, amount:$amt},
+        belief_price:null,
+        max_spread:"0.05",
+        to:null,
+        transaction_deadline:null
+    }}')"
+RESULT="$(submit_tx wasm execute "$POOL_ADDR" "$SWAP_MSG" \
+    --amount "${AMOUNT}${OFFER_DENOM}")"
 
 echo "OK — tx $(echo "$RESULT" | jq -r '.txhash')"
 RETURNED="$(extract_attr "$RESULT" wasm return_amount)"

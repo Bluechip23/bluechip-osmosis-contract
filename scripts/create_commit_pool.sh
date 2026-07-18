@@ -11,11 +11,14 @@
 # Sends factory.Create with only pool_token_info + token_info —
 # everything else (commit threshold, fees, payout amounts, lock caps)
 # is read from the factory's stored config. The CreatorToken slot must
-# carry the factory's sentinel string; the factory mints the CW20
-# itself and rewrites the field.
+# carry the factory's sentinel string; the pool registers its own
+# TokenFactory denom (`factory/{pool_addr}/{symbol_lowercase}`) at
+# instantiate and the factory rewrites the field.
 #
 # Pays the flat pool-creation fee (factory config `pool_creation_fee`,
-# read live) in NATIVE_DENOM; surplus is refunded, zero disables.
+# read live) in NATIVE_DENOM; surplus is refunded, zero disables. The
+# x/gamm pool-creation fee is NOT collected here — the pool retains 1%
+# commit fees toward it and settles against the live fee at crossing.
 #
 # Per-address rate limit (COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS): one
 # commit pool per address per hour on the prod factory build (30s on
@@ -24,8 +27,10 @@
 #
 # Side effects:
 #   - Appends one line per created pool to commit_pools.txt:
-#       <pool_id>\t<pool_addr>\t<creator_token_addr>\t<nft_addr>\t<symbol>
-#     Downstream scripts (cross_threshold.sh, swap.sh, route_swap.sh,
+#       <pool_id>\t<pool_addr>\t<creator_token_denom>\t-\t<symbol>
+#     (col 4 held the position-NFT addr pre-migration; kept as "-" so
+#     downstream column indices stay stable.) Downstream scripts
+#     (cross_threshold.sh, swap.sh, route_swap.sh,
 #     run_lifecycle_test.sh) iterate over this file.
 # =====================================================================
 set -euo pipefail
@@ -52,11 +57,12 @@ if [ "$NAME_LEN" -lt 3 ] || [ "$NAME_LEN" -gt 50 ]; then
     echo "error: name must be 3-50 printable ASCII chars (got $NAME_LEN)" >&2
     exit 1
 fi
-# cw20-base rejects digits at token instantiation ([a-zA-Z-]{3,12}),
-# so a digit here would pass the factory's pre-check and revert only
-# deep in the reply chain. Validate against the strictest link.
-if ! [[ "$SYMBOL" =~ ^[A-Z]{3,12}$ ]]; then
-    echo "error: symbol must be 3-12 chars matching ^[A-Z]+$ — cw20-base rejects digits (got '$SYMBOL')" >&2
+# Mirrors factory validate_creator_token_info: uppercase A-Z + digits,
+# at least one letter (pure-digit tickers are rejected on-chain). The
+# old cw20-base no-digits restriction is gone with the TokenFactory
+# migration — the subdenom is just the lowercased symbol.
+if ! [[ "$SYMBOL" =~ ^[A-Z0-9]{3,12}$ ]] || ! [[ "$SYMBOL" =~ [A-Z] ]]; then
+    echo "error: symbol must be 3-12 chars of A-Z/0-9 with at least one letter (got '$SYMBOL')" >&2
     exit 1
 fi
 
@@ -106,11 +112,12 @@ if [ -z "$POOL_ID" ] || [ "$POOL_ID" = "null" ]; then
     exit 1
 fi
 
-# The create reply-chain emits pool_address / token_address / nft_address
-# wasm attributes; fall back to instantiate events filtered by code_id.
+# The factory's create reply emits pool_address; the pool's own
+# instantiate emits token_denom (the TokenFactory denom it registered).
+# Fall back to the instantiate event filtered by code_id / the
+# deterministic factory/{pool}/{symbol} shape.
 POOL_ADDR="$(extract_attr "$CREATE_RESULT" wasm pool_address)"
-CREATOR_TOKEN_ADDR="$(extract_attr "$CREATE_RESULT" wasm token_address)"
-NFT_ADDR="$(extract_attr "$CREATE_RESULT" wasm nft_address)"
+CREATOR_TOKEN_DENOM="$(extract_attr "$CREATE_RESULT" wasm token_denom)"
 
 instantiated_by_code_id() {
     echo "$CREATE_RESULT" | jq -r --arg cid "$1" '
@@ -118,14 +125,14 @@ instantiated_by_code_id() {
           (.attributes | from_entries) |
           select(.code_id == $cid) | ._contract_address ] | first // empty'
 }
-[ -z "$POOL_ADDR" ]          && POOL_ADDR="$(instantiated_by_code_id "$CREATOR_POOL_CODE_ID")"
-[ -z "$CREATOR_TOKEN_ADDR" ] && CREATOR_TOKEN_ADDR="$(instantiated_by_code_id "$CW20_CODE_ID")"
-[ -z "$NFT_ADDR" ]           && NFT_ADDR="$(instantiated_by_code_id "$CW721_CODE_ID")"
+[ -z "$POOL_ADDR" ] && POOL_ADDR="$(instantiated_by_code_id "$CREATOR_POOL_CODE_ID")"
+if [ -z "$CREATOR_TOKEN_DENOM" ] && [ -n "$POOL_ADDR" ]; then
+    CREATOR_TOKEN_DENOM="factory/${POOL_ADDR}/$(echo "$SYMBOL" | tr 'A-Z' 'a-z')"
+fi
 
 echo "pool_id:        $POOL_ID"
 echo "pool address:   ${POOL_ADDR:-?}"
-echo "creator token:  ${CREATOR_TOKEN_ADDR:-?}"
-echo "position NFT:   ${NFT_ADDR:-?}"
+echo "creator denom:  ${CREATOR_TOKEN_DENOM:-?}"
 
 if [ -z "$POOL_ADDR" ]; then
     echo "error: pool address missing from tx events — creation may still be" >&2
@@ -135,7 +142,7 @@ fi
 
 LOG_FILE="$REPO_ROOT/commit_pools.txt"
 printf '%s\t%s\t%s\t%s\t%s\n' \
-    "$POOL_ID" "$POOL_ADDR" "$CREATOR_TOKEN_ADDR" "$NFT_ADDR" "$SYMBOL" >> "$LOG_FILE"
+    "$POOL_ID" "$POOL_ADDR" "$CREATOR_TOKEN_DENOM" "-" "$SYMBOL" >> "$LOG_FILE"
 echo ""
 echo "appended entry to $LOG_FILE"
 

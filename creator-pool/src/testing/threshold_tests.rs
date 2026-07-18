@@ -92,6 +92,10 @@ fn test_threshold_with_excess_creates_position() {
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
                     bluechip_wallet: Addr::unchecked("ubluechip"),
+                    // Legacy factory shape — no live fee context.
+                    gamm_pool_creation_fee: None,
+                    pricing_pool_id: 0,
+                    usd_quote_denom: String::new(),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -325,6 +329,10 @@ fn test_no_excess_when_under_cap() {
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
                     bluechip_wallet: Addr::unchecked("ubluechip"),
+                    // Legacy factory shape — no live fee context.
+                    gamm_pool_creation_fee: None,
+                    pricing_pool_id: 0,
+                    usd_quote_denom: String::new(),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -903,6 +911,10 @@ fn test_accumulated_bluechips_respected() {
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
                     bluechip_wallet: Addr::unchecked("ubluechip"),
+                    // Legacy factory shape — no live fee context.
+                    gamm_pool_creation_fee: None,
+                    pricing_pool_id: 0,
+                    usd_quote_denom: String::new(),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -1205,6 +1217,10 @@ fn test_unpaused_pool_accepts_commit_after_previously_paused() {
                     rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
                     bluechip_wallet: Addr::unchecked("ubluechip"),
+                    // Legacy factory shape — no live fee context.
+                    gamm_pool_creation_fee: None,
+                    pricing_pool_id: 0,
+                    usd_quote_denom: String::new(),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -1782,6 +1798,11 @@ mod native_raised_net_semantics_tests {
             // Live wallet not under test here; mirror the snapshot.
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
+            // Legacy fee context ($1/native rate, no live fee coin).
+            Uint128::new(1_000_000),
+            None,
+            0,
+            "",
             &mock_env(),
         )
         .expect("trigger_threshold_payout must succeed");
@@ -1864,6 +1885,11 @@ mod native_raised_net_semantics_tests {
             // the snapshot directly; the handler short-circuits on the
             // IS_THRESHOLD_HIT gate before this value is consumed.
             &fee_info.bluechip_wallet_address,
+            // Legacy fee context ($1/native rate, no live fee coin).
+            Uint128::new(1_000_000),
+            None,
+            0,
+            "",
             vec![],
             &PoolAnalytics::default(),
         )
@@ -1914,6 +1940,11 @@ mod native_raised_net_semantics_tests {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
+            // Legacy fee context ($1/native rate, no live fee coin).
+            Uint128::new(1_000_000),
+            None,
+            0,
+            "",
             &mock_env(),
         )
         .unwrap_err();
@@ -1970,6 +2001,11 @@ mod native_raised_net_semantics_tests {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
+            // Legacy fee context ($1/native rate, no live fee coin).
+            Uint128::new(1_000_000),
+            None,
+            0,
+            "",
             &mock_env(),
         )
         .expect("trigger_threshold_payout must succeed on a clean pool");
@@ -2037,6 +2073,11 @@ mod crossed_at_snapshot_tests {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
+            // Legacy fee context ($1/native rate, no live fee coin).
+            Uint128::new(1_000_000),
+            None,
+            0,
+            "",
             &env,
         )
         .expect("trigger_threshold_payout must succeed");
@@ -2081,6 +2122,265 @@ mod crossed_at_snapshot_tests {
             !err.to_string().is_empty(),
             "expected non-empty error, got: {}",
             err
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-denom GAMM creation fee (osmosis-1 charges 20 USDC, not OSMO)
+// ---------------------------------------------------------------------------
+//
+// The x/poolmanager pool-creation fee on osmosis-1 is denominated in Noble
+// USDC, not uosmo. The pool still funds it from PROTOCOL revenue — the 1%
+// commit-fee retention in the native denom — and, at crossing, converts the
+// retained native into exactly the fee coin with a MsgSwapExactAmountOut
+// through the factory's pricing pool (which trades native/usd_quote by
+// definition). These tests pin:
+//   * the exact-out swap message (route, budget = TWAP value + margin),
+//   * the FIX-E seed/shortfall/leftover math under the native budget,
+//   * rejection of an unroutable fee denom,
+//   * that a native-denominated fee still takes the legacy no-swap path,
+//   * the dynamic native retention target in reserve_bluechip_fee.
+#[cfg(test)]
+mod cross_denom_fee_tests {
+    use super::*;
+    use crate::commit::threshold_payout::{trigger_threshold_payout, FEE_SWAP_MARGIN_BPS};
+    use crate::state::{
+        CommitLimitInfo, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_INFO, SEED_LIQUIDITY,
+        THRESHOLD_PAYOUT_AMOUNTS,
+    };
+    use pool_core::osmosis_msgs::swap_exact_amount_out_msg;
+
+    const USDC: &str = "uusdc";
+    /// $1.00 per native token — keeps the USD↔native math 1:1.
+    const RATE_1_USD: Uint128 = Uint128::new(1_000_000);
+    /// 20 USDC, 6 decimals — the live osmosis-1 fee as of 2026-07.
+    const FEE_USDC: Uint128 = Uint128::new(20_000_000);
+    const PRICING_POOL: u64 = 314;
+
+    /// The native budget the crossing allots for the exact-out swap:
+    /// fee value at the TWAP rate, inflated by the margin, plus one.
+    fn expected_budget() -> Uint128 {
+        FEE_USDC // at $1/native, USD micro == native micro
+            .multiply_ratio(10_000u128 + FEE_SWAP_MARGIN_BPS, 10_000u128)
+            + Uint128::one()
+    }
+
+    fn run_trigger(
+        deps: &mut cosmwasm_std::OwnedDeps<
+            cosmwasm_std::testing::MockStorage,
+            cosmwasm_std::testing::MockApi,
+            MockQuerier,
+        >,
+        fee: Option<Coin>,
+        quote_denom: &str,
+    ) -> Result<crate::commit::threshold_payout::ThresholdPayoutMsgs, ContractError> {
+        let pool_info = POOL_INFO.load(&deps.storage).unwrap();
+        let commit_config: CommitLimitInfo = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
+        let payout = THRESHOLD_PAYOUT_AMOUNTS.load(&deps.storage).unwrap();
+        let fee_info: CommitFeeInfo = COMMITFEEINFO.load(&deps.storage).unwrap();
+        trigger_threshold_payout(
+            &mut deps.storage,
+            &cosmwasm_std::QuerierWrapper::new(&deps.querier),
+            &pool_info,
+            &commit_config,
+            &payout,
+            &fee_info,
+            &fee_info.bluechip_wallet_address,
+            Decimal::permille(3),
+            RATE_1_USD,
+            fee.as_ref(),
+            PRICING_POOL,
+            quote_denom,
+            &mock_env(),
+        )
+    }
+
+    /// Reserve fully covers the swap budget: the exact-out swap is emitted
+    /// with the pinned route/budget, the seed is untouched, and the strict
+    /// surplus goes back to the bluechip wallet.
+    #[test]
+    fn cross_denom_fee_emits_exact_out_swap_and_leftover_remit() {
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        let raised = Uint128::new(100_000_000);
+        NATIVE_RAISED_FROM_COMMIT
+            .save(&mut deps.storage, &raised)
+            .unwrap();
+        let reserved = Uint128::new(30_000_000);
+        crate::state::BLUECHIP_FEE_RESERVED
+            .save(&mut deps.storage, &reserved)
+            .unwrap();
+
+        let fee = Coin {
+            denom: USDC.to_string(),
+            amount: FEE_USDC,
+        };
+        let msgs = run_trigger(&mut deps, Some(fee.clone()), USDC).unwrap();
+
+        let pool_info = POOL_INFO.load(&deps.storage).unwrap();
+        let expected_swap = swap_exact_amount_out_msg(
+            &pool_info.pool_info.contract_addr,
+            PRICING_POOL,
+            "ubluechip",
+            expected_budget(),
+            &fee,
+        );
+        assert_eq!(
+            msgs.fee_swap.as_ref(),
+            Some(&expected_swap),
+            "cross-denom fee must emit the exact-out swap through the pricing pool"
+        );
+
+        // Budget < reserved ⇒ zero shortfall ⇒ full raise seeds the pool.
+        let (seed_osmo, _) = SEED_LIQUIDITY.load(&deps.storage).unwrap();
+        assert_eq!(seed_osmo, raised, "no shortfall may touch the seed");
+
+        // Strict surplus (reserved − budget) is remitted to the wallet.
+        let leftover = reserved - expected_budget();
+        match msgs.reserve_remit {
+            Some(CosmosMsg::Bank(BankMsg::Send { amount, .. })) => {
+                assert_eq!(amount, vec![coin(leftover.u128(), "ubluechip")]);
+            }
+            other => panic!("expected leftover remit of {}, got {:?}", leftover, other),
+        }
+        assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
+    }
+
+    /// Reserve does NOT cover the budget: the uncovered part comes out of
+    /// the seed (protocol pays via a smaller seed contribution — never the
+    /// creator), and nothing is remitted.
+    #[test]
+    fn cross_denom_fee_shortfall_reduces_seed() {
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        let raised = Uint128::new(100_000_000);
+        NATIVE_RAISED_FROM_COMMIT
+            .save(&mut deps.storage, &raised)
+            .unwrap();
+        let reserved = Uint128::new(10_000_000);
+        crate::state::BLUECHIP_FEE_RESERVED
+            .save(&mut deps.storage, &reserved)
+            .unwrap();
+
+        let fee = Coin {
+            denom: USDC.to_string(),
+            amount: FEE_USDC,
+        };
+        let msgs = run_trigger(&mut deps, Some(fee), USDC).unwrap();
+
+        let shortfall = expected_budget() - reserved;
+        let (seed_osmo, _) = SEED_LIQUIDITY.load(&deps.storage).unwrap();
+        assert_eq!(
+            seed_osmo,
+            raised - shortfall,
+            "uncovered swap budget must shrink the seed"
+        );
+        assert!(msgs.reserve_remit.is_none(), "no surplus to remit");
+        assert!(msgs.fee_swap.is_some());
+    }
+
+    /// A fee denom that is neither the native denom nor the pricing quote
+    /// cannot be acquired at crossing — reject with an actionable error
+    /// instead of letting the gamm module revert opaquely.
+    #[test]
+    fn cross_denom_fee_unroutable_denom_errors() {
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        NATIVE_RAISED_FROM_COMMIT
+            .save(&mut deps.storage, &Uint128::new(100_000_000))
+            .unwrap();
+
+        let fee = Coin {
+            denom: "uatom".to_string(),
+            amount: FEE_USDC,
+        };
+        let err = run_trigger(&mut deps, Some(fee), USDC).unwrap_err();
+        assert!(
+            err.to_string().contains("neither the native denom"),
+            "expected the unroutable-denom error, got: {}",
+            err
+        );
+    }
+
+    /// A native-denominated fee (osmo-test-5: 1 OSMO) takes the legacy
+    /// path byte-for-byte: no swap, fee charged straight from balance.
+    #[test]
+    fn native_denom_fee_takes_legacy_no_swap_path() {
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        let raised = Uint128::new(100_000_000);
+        NATIVE_RAISED_FROM_COMMIT
+            .save(&mut deps.storage, &raised)
+            .unwrap();
+
+        let fee = Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(5_000_000),
+        };
+        let msgs = run_trigger(&mut deps, Some(fee.clone()), USDC).unwrap();
+        assert!(msgs.fee_swap.is_none(), "native fee needs no swap");
+        // Zero reserve retained ⇒ the whole native fee is a shortfall
+        // charged against the seed (existing FIX-E semantics).
+        let (seed_osmo, _) = SEED_LIQUIDITY.load(&deps.storage).unwrap();
+        assert_eq!(seed_osmo, raised - fee.amount);
+    }
+
+    /// The 1%-fee retention target adapts to the fee denom: native fee →
+    /// the amount itself; USD-quote fee → its native value at the TWAP
+    /// rate plus the swap margin (kept in lockstep with the crossing's
+    /// budget via the shared constant).
+    #[test]
+    fn reserve_target_is_dynamic_for_cross_denom_fee() {
+        use crate::commit::reserve_bluechip_fee;
+        use crate::state::BLUECHIP_FEE_RESERVED;
+
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+
+        // Cross-denom: target = fee native value + margin. A 25-native
+        // commit fee overfills it: the excess flows to the wallet.
+        let fee = Coin {
+            denom: USDC.to_string(),
+            amount: FEE_USDC,
+        };
+        let commit_fee = Uint128::new(25_000_000);
+        let to_wallet = reserve_bluechip_fee(
+            &mut deps.storage,
+            commit_fee,
+            Some(&fee),
+            "ubluechip",
+            RATE_1_USD,
+        )
+        .unwrap();
+        assert_eq!(
+            BLUECHIP_FEE_RESERVED.load(&deps.storage).unwrap(),
+            expected_budget(),
+            "retained native must equal the crossing's swap budget"
+        );
+        assert_eq!(to_wallet, commit_fee - expected_budget());
+
+        // Native-denom fee: target is simply the amount.
+        let mut deps2 = mock_dependencies();
+        setup_pool_storage(&mut deps2);
+        let native_fee = Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(1_000_000),
+        };
+        let to_wallet2 = reserve_bluechip_fee(
+            &mut deps2.storage,
+            Uint128::new(400_000),
+            Some(&native_fee),
+            "ubluechip",
+            RATE_1_USD,
+        )
+        .unwrap();
+        assert_eq!(to_wallet2, Uint128::zero(), "all retained while below target");
+        assert_eq!(
+            crate::state::BLUECHIP_FEE_RESERVED
+                .load(&deps2.storage)
+                .unwrap(),
+            Uint128::new(400_000)
         );
     }
 }

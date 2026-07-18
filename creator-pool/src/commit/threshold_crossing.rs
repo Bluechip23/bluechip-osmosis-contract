@@ -14,7 +14,7 @@
 //!    native pool once seeded).
 //! 4. Update commit analytics and clear `THRESHOLD_PROCESSING`.
 
-use cosmwasm_std::{Addr, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128};
+use cosmwasm_std::{Addr, Coin, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128};
 
 use crate::asset::{get_native_denom, TokenInfo};
 use crate::error::ContractError;
@@ -47,6 +47,11 @@ pub(crate) fn process_threshold_crossing_with_excess(
     threshold_payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
     bluechip_wallet: &Addr,
+    // Live GAMM-fee context from the dispatcher's CommitContext query —
+    // threaded into `trigger_threshold_payout` (see its docs).
+    fee_cfg: Option<&Coin>,
+    pricing_pool_id: u64,
+    usd_quote_denom: &str,
     mut messages: Vec<CosmosMsg>,
     _belief_price: Option<Decimal>,
     _max_spread: Option<Decimal>,
@@ -96,6 +101,10 @@ pub(crate) fn process_threshold_crossing_with_excess(
         fee_info,
         bluechip_wallet,
         pool_specs.lp_fee,
+        usd_rate,
+        fee_cfg,
+        pricing_pool_id,
+        usd_quote_denom,
         &env,
     )?;
     messages.extend(payout_msgs.other_msgs);
@@ -133,12 +142,16 @@ pub(crate) fn process_threshold_crossing_with_excess(
         analytics.total_commit_count,
         &env,
     );
-    // Order matters: create the native pool FIRST (the gamm module charges
-    // the creation fee from the pool's OSMO balance), THEN remit any
-    // creation-fee reserve leftover to the bluechip wallet (FIX E).
-    let mut response = Response::new()
-        .add_messages(messages)
-        .add_submessage(payout_msgs.create_pool);
+    // Order matters: acquire a cross-denom creation fee FIRST (fee_swap,
+    // when the chain's fee is not native-denominated), create the native
+    // pool NEXT (the gamm module charges the fee from the pool's balance),
+    // THEN remit any creation-fee reserve leftover to the bluechip wallet
+    // (FIX E).
+    let mut response = Response::new().add_messages(messages);
+    if let Some(swap) = payout_msgs.fee_swap {
+        response = response.add_message(swap);
+    }
+    let mut response = response.add_submessage(payout_msgs.create_pool);
     if let Some(remit) = payout_msgs.reserve_remit {
         response = response.add_message(remit);
     }
@@ -171,6 +184,12 @@ pub(crate) fn process_threshold_hit_exact(
     threshold_payout: &ThresholdPayoutAmounts,
     fee_info: &CommitFeeInfo,
     bluechip_wallet: &Addr,
+    // Rate + live GAMM-fee context from the dispatcher's CommitContext
+    // query — threaded into `trigger_threshold_payout` (see its docs).
+    usd_rate: Uint128,
+    fee_cfg: Option<&Coin>,
+    pricing_pool_id: u64,
+    usd_quote_denom: &str,
     mut messages: Vec<CosmosMsg>,
     analytics: &PoolAnalytics,
 ) -> Result<Response, ContractError> {
@@ -195,6 +214,10 @@ pub(crate) fn process_threshold_hit_exact(
         fee_info,
         bluechip_wallet,
         pool_specs.lp_fee,
+        usd_rate,
+        fee_cfg,
+        pricing_pool_id,
+        usd_quote_denom,
         &env,
     )?;
     messages.extend(payout.other_msgs);
@@ -215,11 +238,14 @@ pub(crate) fn process_threshold_hit_exact(
         analytics.total_commit_count,
         &env,
     );
-    // Order matters: create the native pool FIRST (the gamm module charges
-    // the creation fee), THEN remit any creation-fee reserve leftover (FIX E).
-    let mut response = Response::new()
-        .add_messages(messages)
-        .add_submessage(payout.create_pool);
+    // Order matters: acquire a cross-denom creation fee FIRST (fee_swap),
+    // create the native pool NEXT (the gamm module charges the fee), THEN
+    // remit any creation-fee reserve leftover (FIX E).
+    let mut response = Response::new().add_messages(messages);
+    if let Some(swap) = payout.fee_swap {
+        response = response.add_message(swap);
+    }
+    let mut response = response.add_submessage(payout.create_pool);
     if let Some(remit) = payout.reserve_remit {
         response = response.add_message(remit);
     }

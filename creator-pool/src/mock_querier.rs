@@ -49,6 +49,14 @@ pub struct PoolMockQuerier {
     factory_rate: Option<Uint128>,
     /// Live bluechip wallet returned in the `CommitContext` response.
     bluechip_wallet: Addr,
+    /// Live GAMM creation-fee context returned in the `CommitContext`
+    /// response (cross-denom fee support). Defaults mimic a pre-upgrade
+    /// factory (`None` / 0 / empty) so existing tests exercise the
+    /// legacy fallback; cross-denom tests configure them via
+    /// [`set_gamm_fee_context`].
+    gamm_pool_creation_fee: Option<Coin>,
+    pricing_pool_id: u64,
+    usd_quote_denom: String,
     /// FIX G — per-side liquidity returned for the poolmanager
     /// `TotalPoolLiquidity` query. Defaults to a healthy (well-above-floor)
     /// pair on the standard fixture denoms so swaps aren't spuriously paused;
@@ -80,6 +88,9 @@ impl PoolMockQuerier {
             estimate_den: Uint128::one(),
             factory_rate: None,
             bluechip_wallet: Addr::unchecked("bluechip_treasury"),
+            gamm_pool_creation_fee: None,
+            pricing_pool_id: 0,
+            usd_quote_denom: String::new(),
             // Healthy default: far above any plausible 25%-of-seed floor for
             // the standard fixture denoms. Matches `fixtures::CREATOR_DENOM`
             // (kept as a literal so this test-querier has no cross-module dep).
@@ -116,6 +127,17 @@ impl PoolMockQuerier {
     pub fn set_factory_oracle(&mut self, rate: Uint128, bluechip_wallet: &str) {
         self.factory_rate = Some(rate);
         self.bluechip_wallet = Addr::unchecked(bluechip_wallet);
+    }
+
+    /// Configure the live GAMM creation-fee context the `CommitContext`
+    /// response carries (cross-denom fee support): the fee coin, the
+    /// pricing pool id, and the USD quote denom. Mimics an upgraded
+    /// factory whose chain charges `fee` at pool creation.
+    #[allow(dead_code)]
+    pub fn set_gamm_fee_context(&mut self, fee: Coin, pricing_pool_id: u64, usd_quote_denom: &str) {
+        self.gamm_pool_creation_fee = Some(fee);
+        self.pricing_pool_id = pricing_pool_id;
+        self.usd_quote_denom = usd_quote_denom.to_string();
     }
 
     /// Seed / overwrite a bank balance on the wrapped base querier.
@@ -195,6 +217,9 @@ impl PoolMockQuerier {
                                 rate_used: rate,
                                 timestamp: 0,
                                 bluechip_wallet: self.bluechip_wallet.clone(),
+                                gamm_pool_creation_fee: self.gamm_pool_creation_fee.clone(),
+                                pricing_pool_id: self.pricing_pool_id,
+                                usd_quote_denom: self.usd_quote_denom.clone(),
                             };
                             return SystemResult::Ok(ContractResult::Ok(
                                 to_json_binary(&resp).unwrap(),

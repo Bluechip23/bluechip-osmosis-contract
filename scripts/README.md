@@ -13,7 +13,10 @@ against it. Every script reads `osmo_testnet.env` (override with
   (faucet: <https://faucet.testnet.osmosis.zone/>)
 - wasms built into `artifacts/` — `make optimize-all` (reproducible)
   or `make build` (fast, testnet only). `cw20_base.wasm` /
-  `cw721_base.wasm` are picked up from the repo root automatically.
+  `cw721_base.wasm` at the repo root only satisfy legacy factory
+  config fields (unused at runtime post-TokenFactory migration);
+  prefer pinning already-stored code IDs via `CW20_CODE_ID` /
+  `CW721_CODE_ID` in the env.
 
 ## Quick start
 
@@ -33,7 +36,7 @@ scripts/run_lifecycle_test.sh                # full automated rehearsal
 | `cross_threshold.sh <pool> [amount]` | commit OSMO past the USD threshold (auto-sized at the live x/twap rate) |
 | `continue_distribution.sh <pool>` | flush the post-threshold committer payout batches |
 | `swap.sh <pool> native\|token <amt>` | AMM swap either direction (simulates first) |
-| `liquidity.sh deposit\|positions\|collect\|remove` | LP lifecycle incl. the CW20 allowance dance |
+| `liquidity.sh deposit\|shares\|remove` | LP on the NATIVE GAMM pool (MsgJoinPool/MsgExitPool; discovers the pool id via the contract's `native_pool_id` query) |
 | `route_swap.sh buy\|hop ...` | router swaps: single hop OSMO→token, or 2-hop tokenA→OSMO→tokenB |
 | `status.sh [pool]` | factory/router/pool health — the same signals the RUNBOOK alerts on |
 | `run_lifecycle_test.sh` | end-to-end: create → commit → cross → distribute → swap → LP → route, with a pass/fail summary |

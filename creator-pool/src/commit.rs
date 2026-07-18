@@ -215,6 +215,15 @@ fn execute_commit_logic(
     let commit_value = commit_ctx.amount;
     let usd_rate = commit_ctx.rate_used;
     let live_bluechip_wallet = commit_ctx.bluechip_wallet;
+    // Live GAMM creation-fee context riding the same response: the fee
+    // coin the crossing must cover (possibly non-native-denominated —
+    // osmosis-1 charges USDC) plus the pricing route used to swap into
+    // it. Threaded into the reserve sizing below and both crossing
+    // handlers. `None`/zero values fall back to the instantiate-time
+    // reserve semantics (pre-upgrade factory).
+    let gamm_fee_cfg = commit_ctx.gamm_pool_creation_fee;
+    let pricing_pool_id = commit_ctx.pricing_pool_id;
+    let usd_quote_denom = commit_ctx.usd_quote_denom;
     if usd_rate.is_zero() || commit_value.is_zero() {
         return Err(ContractError::InvalidOraclePrice {});
     }
@@ -306,7 +315,13 @@ fn execute_commit_logic(
             let bluechip_fee_to_wallet = if threshold_already_hit {
                 commit_fee_bluechip_amt
             } else {
-                reserve_bluechip_fee(deps.storage, commit_fee_bluechip_amt)?
+                reserve_bluechip_fee(
+                    deps.storage,
+                    commit_fee_bluechip_amt,
+                    gamm_fee_cfg.as_ref(),
+                    &bluechip_denom,
+                    usd_rate,
+                )?
             };
 
             let messages = build_fee_messages(
@@ -394,6 +409,9 @@ fn execute_commit_logic(
                             &threshold_payout,
                             &fee_info,
                             &live_bluechip_wallet,
+                            gamm_fee_cfg.as_ref(),
+                            pricing_pool_id,
+                            &usd_quote_denom,
                             messages,
                             belief_price,
                             max_spread,
@@ -419,6 +437,10 @@ fn execute_commit_logic(
                             &threshold_payout,
                             &fee_info,
                             &live_bluechip_wallet,
+                            usd_rate,
+                            gamm_fee_cfg.as_ref(),
+                            pricing_pool_id,
+                            &usd_quote_denom,
                             messages,
                             &analytics,
                         )?
@@ -483,26 +505,48 @@ fn execute_commit_logic(
 /// FIX E — split the 1% bluechip commit fee between the in-pool
 /// creation-fee reserve and the live bluechip wallet.
 ///
-/// Reads the `CREATION_FEE_RESERVE_TARGET` ceiling and the running
-/// `BLUECHIP_FEE_RESERVED`, then:
+/// Resolves the retention `target` (in the NATIVE denom) from the live
+/// factory fee config, then:
 /// - `room       = target.saturating_sub(reserved)`
 /// - `to_reserve = min(room, commit_fee_bluechip)` — added to
 ///   `BLUECHIP_FEE_RESERVED` and RETAINED in the pool (never bank-sent);
 /// - `to_wallet  = commit_fee_bluechip - to_reserve` — returned to the
 ///   caller to bank-send to the live bluechip wallet.
 ///
-/// Once `reserved == target` the room is zero, `to_reserve == 0`, and the
-/// full fee flows to the wallet exactly as before this fix. `to_reserve` is
-/// bounded by `room`, so `BLUECHIP_FEE_RESERVED` never exceeds the target —
-/// the retained OSMO is always `<= CREATION_FEE_RESERVE_TARGET`.
-fn reserve_bluechip_fee(
+/// Target resolution (cross-denom aware):
+/// - live fee coin in the NATIVE denom (osmo-test-5: 1 OSMO) — the coin's
+///   amount, exactly the pre-cross-denom behavior;
+/// - live fee coin in another denom (osmosis-1: 20 USDC) — the fee's
+///   native value at the commit's captured TWAP rate plus the same
+///   `FEE_SWAP_MARGIN_BPS` the crossing budgets for its exact-out fee
+///   swap, so the retained native always covers that swap's worst case.
+///   The target drifts with the rate across commits; `reserved` only
+///   ever grows toward it and the crossing self-corrects any residual
+///   mismatch (shortfall → smaller seed, surplus → remitted), so drift
+///   is bounded and harmless;
+/// - no live fee context (pre-upgrade factory) — the instantiate-time
+///   `CREATION_FEE_RESERVE_TARGET` (legacy semantics).
+///
+/// Once `reserved >= target` the room is zero, `to_reserve == 0`, and the
+/// full fee flows to the wallet exactly as before this fix.
+pub(crate) fn reserve_bluechip_fee(
     storage: &mut dyn cosmwasm_std::Storage,
     commit_fee_bluechip: Uint128,
+    fee_cfg: Option<&cosmwasm_std::Coin>,
+    bluechip_denom: &str,
+    usd_rate: Uint128,
 ) -> Result<Uint128, ContractError> {
+    use crate::commit::threshold_payout::FEE_SWAP_MARGIN_BPS;
     use crate::state::{BLUECHIP_FEE_RESERVED, CREATION_FEE_RESERVE_TARGET};
-    let target = CREATION_FEE_RESERVE_TARGET
-        .may_load(storage)?
-        .unwrap_or_default();
+    let target = match fee_cfg {
+        Some(fee) if fee.denom == bluechip_denom => fee.amount,
+        Some(fee) => crate::swap_helper::usd_to_native_at_rate(fee.amount, usd_rate)?
+            .multiply_ratio(10_000u128 + FEE_SWAP_MARGIN_BPS, 10_000u128)
+            .checked_add(Uint128::one())?,
+        None => CREATION_FEE_RESERVE_TARGET
+            .may_load(storage)?
+            .unwrap_or_default(),
+    };
     let reserved = BLUECHIP_FEE_RESERVED.may_load(storage)?.unwrap_or_default();
     let room = target.saturating_sub(reserved);
     let to_reserve = room.min(commit_fee_bluechip);

@@ -8,9 +8,11 @@
 #       ExecuteMultiHop (native-offered entry path).
 #
 #   scripts/route_swap.sh hop <pool_a> <pool_b> <tokenA-micro>
-#       Two hops tokenA -> OSMO -> tokenB. The first hop offers a CW20,
-#       so entry is cw20::Send to the router with the ExecuteMultiHop
-#       hook. Both pools must be threshold-crossed.
+#       Two hops tokenA -> OSMO -> tokenB. Creator tokens are native
+#       TokenFactory denoms post-migration, so this is the same
+#       ExecuteMultiHop entry with tokenA attached as funds (the old
+#       CW20 Receive path was removed from the router). Both pools
+#       must be threshold-crossed.
 #
 # Each route is simulated first (router.SimulateMultiHop); the swap's
 # minimum_receive is set to 99% of the simulated final amount. The
@@ -118,12 +120,10 @@ hop)
     [ -z "$FINAL" ] && { echo "error: simulation returned no final_amount" >&2; exit 1; }
     MIN="$(min_receive "$FINAL")"
 
-    HOOK_B64="$(jq -nc --argjson ops "$OPS" --arg min "$MIN" \
-        '{execute_multi_hop:{operations:$ops, minimum_receive:$min, deadline:null, recipient:null}}' \
-        | base64 | tr -d '\n')"
-    SEND="$(jq -nc --arg r "$ROUTER_ADDR" --arg amt "$AMOUNT" --arg hook "$HOOK_B64" \
-        '{send:{contract:$r, amount:$amt, msg:$hook}}')"
-    RESULT="$(submit_tx wasm execute "$TOKEN_A" "$SEND")"
+    EXEC="$(jq -nc --argjson ops "$OPS" --arg min "$MIN" \
+        '{execute_multi_hop:{operations:$ops, minimum_receive:$min, deadline:null, recipient:null}}')"
+    RESULT="$(submit_tx wasm execute "$ROUTER_ADDR" "$EXEC" \
+        --amount "${AMOUNT}${TOKEN_A}")"
     echo "OK — tx $(echo "$RESULT" | jq -r '.txhash')"
     echo "expected >= $MIN (simulated $FINAL) of $TOKEN_B"
     ;;

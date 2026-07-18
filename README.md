@@ -56,7 +56,10 @@ config and enforced on every pool (`validate_pool_token_info`). OSMO is:
 - the **only** asset a commit may attach (`must_pay` strict),
 - the **pairing side** of every creator pool (`asset_infos[0]` is always the
   `Native` OSMO side, `asset_infos[1]` the creator TokenFactory side),
-- the denom the **GAMM pool-creation fee** is charged in, and
+- the denom the **GAMM pool-creation-fee reserve** is retained in (the fee
+  itself is charged in whatever coin x/poolmanager params name — 20 Noble
+  USDC on osmosis-1 — and the pool swaps its OSMO retention into that coin
+  at crossing when they differ), and
 - the reserve the creator's over-cap excess is paid out in.
 
 The commit *threshold* is USD-denominated ($25k default) but paid in OSMO, so
@@ -281,19 +284,29 @@ let bluechip_fee_to_wallet = if threshold_already_hit {
 };
 ```
 
-At crossing the contract resolves the fee from the **live chain param** (not a
-stale config guess), so a governance change or a mis-set config can't brick
-the crossing:
+At crossing the contract resolves the fee **coin** from the **live chain
+param** (not a stale config guess), so a governance change or a mis-set
+config can't brick the crossing:
 
 ```rust
-// creator-pool/src/commit/threshold_payout.rs — H-01
-let creation_fee = match query_pool_creation_fee(querier, &bluechip_denom_for_fee) {
-    Some(live) => live,               // authoritative x/poolmanager param
-    None       => configured_fee,     // fallback (test chains / query unavailable)
-};
+// creator-pool/src/commit/threshold_payout.rs — H-01 + cross-denom
+let fee_coin = query_pool_creation_fee_coin(querier)   // authoritative x/poolmanager param
+    .or_else(|| fee_cfg.cloned())                      // live factory config (CommitContext)
+    .or_else(|| legacy_native_target());               // instantiate-time fallback
 ```
 
-The seed is then sized so `seed_osmo + creation_fee ≤ balance` always holds
+The fee's **denom** decides how it is paid. On chains that charge it in the
+native denom (osmo-test-5: 1 OSMO) the gamm module deducts it straight from
+the pool's OSMO balance. On **osmosis-1 the fee is 20 Noble USDC** — the pool
+holds no USDC, so the crossing first emits a `MsgSwapExactAmountOut` through
+the factory's pricing pool (which trades OSMO/USDC by definition), converting
+the retained OSMO reserve into *exactly* the fee coin; the budget is the
+fee's value at the commit-entry TWAP rate plus a 5% margin, and exact-out
+leaves zero USDC dust. Any other fee denom fails with an actionable config
+error instead of an opaque gamm revert. Either way the funding source is the
+same: **the 1% commit-fee retention — protocol revenue, never the creator.**
+
+The seed is then sized so `seed_osmo + fee_budget ≤ balance` always holds
 (the protocol absorbs any shortfall via a smaller seed, never the creator's
 escrow), and any reserve surplus is remitted back to the protocol wallet. If
 the fee ever met or exceeded the whole raise, the crossing fails with a clear,
@@ -567,7 +580,7 @@ the denom + on-chain total supply.
 | Creator excess lock | 7 days (config), then claim once | `CreatorExcessLiquidity.unlock_time` |
 | TWAP window | 600 s (bounds 300–3600 s) | factory config |
 | Rate sanity ceiling | $10,000 / OSMO | `RATE_MAX` |
-| GAMM creation fee | live x/poolmanager param (~1000 OSMO) | funded from the 1% reserve |
+| GAMM creation fee | live x/poolmanager param (osmosis-1: 20 Noble USDC; swapped from the OSMO reserve at crossing) | funded from the 1% reserve |
 | Admin timelock | 48 h (all propose→apply) | `ADMIN_TIMELOCK_SECONDS` |
 | Emergency-withdraw delay | 60 s – 7 d (24 h mainnet) | factory config |
 | Distribution batch | ≤40 / tx; admin recover 1h / public 7d | `MAX_DISTRIBUTIONS_PER_TX` |

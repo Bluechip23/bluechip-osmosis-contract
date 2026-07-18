@@ -11,11 +11,13 @@
 #   1. create a commit pool (factory.Create)
 #   2. make a small pre-threshold commit and verify USD accounting
 #   3. commit past the USD threshold (auto-sized at the x/twap rate)
-#   4. verify the crossing seeded the AMM (reserves > 0)
-#   5. drain the committer distribution and verify the CW20 payout landed
-#   6. swap native -> token and token -> native against the AMM
-#   7. deposit liquidity (native + CW20 allowance), list positions,
-#      remove all liquidity
+#   4. verify the crossing seeded the NATIVE GAMM pool (reserves > 0)
+#   5. drain the committer distribution and verify the TokenFactory
+#      payout landed (bank balance of the creator denom)
+#   6. swap native -> token and token -> native through the contract
+#      (routed via the native pool)
+#   7. join the native GAMM pool (MsgJoinPool via liquidity.sh),
+#      verify gamm shares, then exit (MsgExitPool)
 #   8. route a swap through the router (OSMO -> token)
 #
 # Notes:
@@ -67,16 +69,16 @@ rate_limit_pause() {
 }
 
 # Suffix from the block height keeps re-runs unique without $RANDOM
-# (which repeats across fast re-invocations). cw20-base validates
-# symbols against [a-zA-Z-]{3,12} — digits are rejected — so map each
-# height digit onto a letter (0-9 -> A-J).
+# (which repeats across fast re-invocations). Digits are valid in
+# symbols post-migration (TokenFactory subdenom), but keep the letter
+# mapping so re-runs stay visually distinct from pool ids.
 SUFFIX="$(query_json block 2>/dev/null | jq -r '.header.height // empty' 2>/dev/null | tail -c 5)"
 SUFFIX="${SUFFIX:-$$}"
 SYMBOL="LFC$(printf '%s' "$SUFFIX" | tr -cd '0-9' | tr '0-9' 'A-J')"
 NAME="Lifecycle Test $SYMBOL"
 
 POOL_ADDR=""
-TOKEN_ADDR=""
+TOKEN_DENOM=""
 
 # ---- 1. create pool --------------------------------------------------
 create_pool() {
@@ -85,8 +87,9 @@ create_pool() {
     line="$(awk -F '\t' -v s="$SYMBOL" '$5 == s {found=$0} END {print found}' \
         "$REPO_ROOT/commit_pools.txt")"
     POOL_ADDR="$(echo "$line" | cut -f2)"
-    TOKEN_ADDR="$(echo "$line" | cut -f3)"
-    [ -n "$POOL_ADDR" ] && [ -n "$TOKEN_ADDR" ]
+    # col3 is the TokenFactory denom (factory/{pool}/{sub}) post-migration.
+    TOKEN_DENOM="$(echo "$line" | cut -f3)"
+    [ -n "$POOL_ADDR" ] && [ -n "$TOKEN_DENOM" ]
 }
 step "create commit pool" create_pool
 if [ -z "$POOL_ADDR" ]; then
@@ -138,14 +141,17 @@ step "threshold crossing seeded the AMM" amm_seeded
 # ---- 5. distribution --------------------------------------------------
 distribution() {
     "$SCRIPTS/continue_distribution.sh" "$POOL_ADDR" || return 1
+    # Creator token is a native TokenFactory denom — the payout is a
+    # plain bank balance, no CW20 query.
     local bal
-    bal="$(query_smart "$TOKEN_ADDR" \
-        "$(jq -nc --arg a "$ADDR" '{balance:{address:$a}}')" \
-        | jq -r '.balance // "0"')"
-    echo "committer creator-token balance: $bal"
+    bal="$(query_json bank balances "$ADDR" \
+        | jq -r --arg d "$TOKEN_DENOM" \
+            '.balances[]? | select(.denom == $d) | .amount' | head -1)"
+    bal="${bal:-0}"
+    echo "committer creator-token balance: $bal $TOKEN_DENOM"
     [ "$bal" != "0" ]
 }
-step "drain distribution + CW20 payout landed" distribution
+step "drain distribution + TokenFactory payout landed" distribution
 rate_limit_pause
 
 # ---- 6. swaps ----------------------------------------------------------
@@ -154,43 +160,33 @@ rate_limit_pause
 step "swap token -> native" "$SCRIPTS/swap.sh" "$POOL_ADDR" token 1000000
 rate_limit_pause
 
-# ---- 7. liquidity -------------------------------------------------------
-POSITION_ID=""
+# ---- 7. liquidity (native GAMM join/exit) -------------------------------
+# Post-migration, third-party LP is MsgJoinPool/MsgExitPool on the native
+# pool the contract seeded — no contract call, no position NFT, no CW20
+# allowance. The committer holds creator tokens from the distribution, so
+# a two-sided ratio-matched join works directly. Native-module txs are
+# NOT gated by the contract's 13s rate limit.
 lp_deposit() {
-    # Match the pool's current ratio: amount1 = amount0 * reserve1/reserve0.
-    local state r0 r1 amount0 amount1 out
-    state="$(query_smart "$POOL_ADDR" '{"pool_state":{}}')"
-    r0="$(echo "$state" | jq -r '.reserve0 // "0"')"
-    r1="$(echo "$state" | jq -r '.reserve1 // "0"')"
-    [ "$r0" = "0" ] && return 1
-    amount0=1000000
-    amount1="$(awk -v a="$amount0" -v r0="$r0" -v r1="$r1" \
-        'BEGIN { printf "%.0f", a * r1 / r0 + 1 }')"
-    out="$("$SCRIPTS/liquidity.sh" deposit "$POOL_ADDR" "$amount0" "$amount1")" || return 1
-    echo "$out"
-    POSITION_ID="$(echo "$out" | awk -F': ' '/^position_id:/ {print $2}')"
-    if [ -z "$POSITION_ID" ]; then
-        POSITION_ID="$("$SCRIPTS/liquidity.sh" positions "$POOL_ADDR" \
-            | jq -r '.positions[-1].position_id // empty')"
-    fi
-    [ -n "$POSITION_ID" ]
+    "$SCRIPTS/liquidity.sh" deposit "$POOL_ADDR" 1000000
 }
-step "deposit liquidity (mints position NFT)" lp_deposit
+step "join native GAMM pool (MsgJoinPool)" lp_deposit
 
-lp_positions() {
-    "$SCRIPTS/liquidity.sh" positions "$POOL_ADDR" | jq -e '.positions | length > 0' >/dev/null
+lp_shares() {
+    local bal
+    bal="$("$SCRIPTS/liquidity.sh" shares "$POOL_ADDR")" || return 1
+    echo "gamm share balance: $bal"
+    [ -n "$bal" ] && [ "$bal" != "0" ]
 }
-step "positions listed for owner" lp_positions
+step "gamm shares held by LP" lp_shares
 
-if [ -n "$POSITION_ID" ]; then
-    # LP actions share the per-wallet 13s rate limit with commits and
-    # swaps; without a pause the remove lands within 13s of the deposit
-    # tx and reverts with "trying to commit too frequently".
-    rate_limit_pause
-    step "remove all liquidity" "$SCRIPTS/liquidity.sh" remove "$POOL_ADDR" "$POSITION_ID"
-else
-    echo "SKIP: remove liquidity (no position id captured)"
-fi
+lp_remove() {
+    "$SCRIPTS/liquidity.sh" remove "$POOL_ADDR" || return 1
+    local bal
+    bal="$("$SCRIPTS/liquidity.sh" shares "$POOL_ADDR")"
+    echo "gamm share balance after exit: $bal"
+    [ "$bal" = "0" ]
+}
+step "remove all liquidity (MsgExitPool)" lp_remove
 rate_limit_pause
 
 # ---- 8. router -----------------------------------------------------------

@@ -185,6 +185,12 @@ pub fn with_factory_oracle(
                         rate_used: native_to_usd_rate,
                         timestamp: 0,
                         bluechip_wallet: Addr::unchecked("bluechip_treasury"),
+                        // Legacy (pre-cross-denom) factory shape: no live fee
+                        // context — pools fall back to the instantiate-time
+                        // reserve target.
+                        gamm_pool_creation_fee: None,
+                        pricing_pool_id: 0,
+                        usd_quote_denom: String::new(),
                     };
                     return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
                 }

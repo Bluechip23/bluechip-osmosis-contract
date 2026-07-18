@@ -21,7 +21,8 @@ use osmosis_std::types::cosmos::base::v1beta1::Coin as OsmoCoin;
 use osmosis_std::types::osmosis::gamm::poolmodels::balancer::v1beta1::MsgCreateBalancerPool;
 use osmosis_std::types::osmosis::gamm::v1beta1::{PoolAsset, PoolParams};
 use osmosis_std::types::osmosis::poolmanager::v1beta1::{
-    MsgSwapExactAmountIn, PoolmanagerQuerier, SwapAmountInRoute,
+    MsgSwapExactAmountIn, MsgSwapExactAmountOut, PoolmanagerQuerier, SwapAmountInRoute,
+    SwapAmountOutRoute,
 };
 use osmosis_std::types::osmosis::tokenfactory::v1beta1::{
     MsgBurn, MsgCreateDenom, MsgMint, MsgSetDenomMetadata,
@@ -144,6 +145,26 @@ pub fn query_pool_creation_fee<C: CustomQuery>(
         .and_then(|c| Uint128::from_str(&c.amount).ok())
 }
 
+/// Query the chain's LIVE pool-creation fee as a full [`Coin`] — the
+/// FIRST coin of `x/poolmanager` params' `pool_creation_fee` list
+/// (Osmosis has always configured exactly one; on osmosis-1 it is
+/// denominated in Noble USDC, on osmo-test-5 in uosmo). Unlike
+/// [`query_pool_creation_fee`], the caller learns the DENOM too, so a
+/// crossing can detect a fee that is not payable straight from the
+/// pool's native balance and route a swap for it instead.
+///
+/// Returns `None` when the params query is unavailable or the fee list
+/// is empty — callers fall back to the factory-configured coin.
+pub fn query_pool_creation_fee_coin<C: CustomQuery>(querier: &QuerierWrapper<C>) -> Option<Coin> {
+    let resp = PoolmanagerQuerier::new(querier).params().ok()?;
+    let params = resp.params?;
+    let first = params.pool_creation_fee.first()?;
+    Some(Coin {
+        denom: first.denom.clone(),
+        amount: Uint128::from_str(&first.amount).ok()?,
+    })
+}
+
 /// `MsgMint` — mint `amount` of `denom` and credit `mint_to`. `sender`
 /// must be the denom admin (the pool contract).
 pub fn mint_msg(sender: &Addr, denom: &str, amount: Uint128, mint_to: &Addr) -> CosmosMsg {
@@ -207,6 +228,33 @@ pub fn create_balancer_pool_msg(
             },
         ],
         future_pool_governor: String::new(),
+    }
+    .into()
+}
+
+/// `MsgSwapExactAmountOut` — single-hop swap that OBTAINS exactly
+/// `token_out` through `pool_id`, spending at most `token_in_max_amount`
+/// of `token_in_denom` (reverts if more would be needed). Used at
+/// threshold-crossing on chains whose pool-creation fee is denominated
+/// in a non-native denom (osmosis-1: 20 USDC): the pool converts its
+/// retained native-denom fee reserve into the exact fee coin right
+/// before `MsgCreateBalancerPool`. Exact-out keeps the acquired amount
+/// precise — any unspent input simply stays in the pool's balance.
+pub fn swap_exact_amount_out_msg(
+    sender: &Addr,
+    pool_id: u64,
+    token_in_denom: &str,
+    token_in_max_amount: Uint128,
+    token_out: &Coin,
+) -> CosmosMsg {
+    MsgSwapExactAmountOut {
+        sender: sender.to_string(),
+        routes: vec![SwapAmountOutRoute {
+            pool_id,
+            token_in_denom: token_in_denom.to_string(),
+        }],
+        token_in_max_amount: token_in_max_amount.to_string(),
+        token_out: Some(to_osmo_coin(token_out)),
     }
     .into()
 }

@@ -1,5 +1,5 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::{Addr, Uint128};
+use cosmwasm_std::{Addr, Coin, Uint128};
 
 pub mod asset;
 pub mod cw721_msgs;
@@ -123,13 +123,39 @@ pub struct BluechipWalletResponse {
 
 /// Response to `CommitContext`: the `ConvertNativeToUsd` valuation
 /// fields (see [`ConversionResponse`] for their semantics) plus the
-/// factory's live `bluechip_wallet_address`.
+/// factory's live `bluechip_wallet_address`, plus the live GAMM
+/// creation-fee context the crossing needs.
+///
+/// The three fee/route fields follow the same live-query philosophy as
+/// `bluechip_wallet`: they ride the query every commit already makes,
+/// so pools always see the CURRENT factory config (admin-tunable via
+/// the 48h `ProposeConfigUpdate` flow) instead of an instantiate-time
+/// snapshot. They exist because on some chains (osmosis-1) the
+/// `x/poolmanager` pool-creation fee is denominated in a NON-native
+/// denom (20 USDC as of 2026-07): the pool retains its 1% commit fee
+/// in the native denom and must swap it into the fee denom at
+/// crossing, which requires knowing the fee coin and a route
+/// (`pricing_pool_id` trades native/`usd_quote_denom` by definition).
+/// All three are `#[serde(default)]` so a pre-upgrade factory's
+/// response still parses (pools then fall back to the instantiate-time
+/// reserve target and native-denom fee semantics).
 #[cw_serde]
 pub struct CommitContextResponse {
     pub amount: Uint128,
     pub rate_used: Uint128,
     pub timestamp: u64,
     pub bluechip_wallet: Addr,
+    /// Factory's configured `gamm_pool_creation_fee` (denom + amount).
+    /// `None` ⇒ factory predates the field or fee collection disabled.
+    #[serde(default)]
+    pub gamm_pool_creation_fee: Option<Coin>,
+    /// Factory's TWAP pricing pool (trades the native denom against
+    /// `usd_quote_denom`). `0` ⇒ unknown (pre-upgrade factory).
+    #[serde(default)]
+    pub pricing_pool_id: u64,
+    /// The USD-stable quote denom on the pricing pool. Empty ⇒ unknown.
+    #[serde(default)]
+    pub usd_quote_denom: String,
 }
 
 /// Result of a native→USD valuation. `rate_used` is the price in

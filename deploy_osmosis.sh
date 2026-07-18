@@ -202,6 +202,19 @@ else
     # `deploy_script_instantiate_json_deserializes` — change them together.
     # threshold_payout_amounts is deliberately omitted: the serde default
     # is the canonical launch split and the same test asserts it validates.
+    #
+    # gamm_pool_creation_fee is the fee x/gamm auto-charges at threshold
+    # crossing (MsgCreateBalancerPool). The pool funds it from the 1%
+    # commit-fee retention (protocol revenue, never the creator) and
+    # self-corrects against the LIVE poolmanager fee at crossing. Set it
+    # to the chain's real fee COIN — `osmosisd q poolmanager params`:
+    #   osmo-test-5: 1000000 uosmo (native-denominated, paid directly)
+    #   osmosis-1:   20000000 Noble-USDC ibc/… (the pool swaps its native
+    #                retention into the fee coin via the pricing pool)
+    # The denom must be NATIVE_DENOM or USD_QUOTE_DENOM (validated at
+    # instantiate; anything else is unroutable at crossing).
+    GAMM_POOL_CREATION_FEE="${GAMM_POOL_CREATION_FEE:-0}"
+    GAMM_POOL_CREATION_FEE_DENOM="${GAMM_POOL_CREATION_FEE_DENOM:-$NATIVE_DENOM}"
     FACTORY_INIT="$(jq -nc \
         --arg admin            "$ADDR" \
         --arg wallet           "$PROTOCOL_WALLET" \
@@ -215,6 +228,8 @@ else
         --arg max_lock         "$MAX_BLUECHIP_LOCK_PER_POOL" \
         --arg lock_days        "$CREATOR_EXCESS_LIQUIDITY_LOCK_DAYS" \
         --arg creation_fee     "$POOL_CREATION_FEE" \
+        --arg gamm_fee         "$GAMM_POOL_CREATION_FEE" \
+        --arg gamm_fee_denom   "$GAMM_POOL_CREATION_FEE_DENOM" \
         --arg emergency_delay  "$EMERGENCY_WITHDRAW_DELAY_SECONDS" \
         --arg cw20_id          "$CW20_CODE_ID" \
         --arg cw721_id         "$CW721_CODE_ID" \
@@ -232,6 +247,7 @@ else
             max_bluechip_lock_per_pool:         $max_lock,
             creator_excess_liquidity_lock_days: ($lock_days       | tonumber),
             pool_creation_fee:                  $creation_fee,
+            gamm_pool_creation_fee:             {denom: $gamm_fee_denom, amount: $gamm_fee},
             emergency_withdraw_delay_seconds:   ($emergency_delay | tonumber),
             cw20_token_contract_id:             ($cw20_id         | tonumber),
             cw721_nft_contract_id:              ($cw721_id        | tonumber),

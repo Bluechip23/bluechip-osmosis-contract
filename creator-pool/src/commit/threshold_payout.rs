@@ -43,7 +43,19 @@ use crate::state::{
     THRESHOLD_PAYOUT_CREATOR_BASE_UNITS, THRESHOLD_PAYOUT_POOL_BASE_UNITS,
     THRESHOLD_PAYOUT_TOTAL_BASE_UNITS,
 };
-use pool_core::osmosis_msgs::{create_balancer_pool_msg, query_pool_creation_fee};
+use pool_core::osmosis_msgs::{
+    create_balancer_pool_msg, query_pool_creation_fee_coin, swap_exact_amount_out_msg,
+};
+
+/// Safety margin (basis points) on the native amount budgeted for the
+/// cross-denom fee swap: the TWAP-rate-derived input is inflated by this
+/// much to absorb spot-vs-TWAP drift, the pricing pool's swap fee, and
+/// the chain taker fee between commit entry and execution. `MsgSwapExactAmountOut`
+/// spends only what the swap actually needs — the margin bounds the
+/// worst case, it is not a cost. If the pricing pool moves more than
+/// this within the tx, the swap (and the whole crossing) reverts and
+/// the crosser simply retries — funds are never at risk.
+pub(crate) const FEE_SWAP_MARGIN_BPS: u128 = 500;
 
 /// Validate that the four threshold-payout components match the canonical
 /// per-pool split (325B + 25B + 350B + 500B = 1.2T base units).
@@ -120,6 +132,15 @@ pub struct ThresholdPayoutMsgs {
     /// surplus is remitted) but sequencing it post-creation keeps the intent
     /// obvious and leaves the full reserve available during pool creation.
     pub reserve_remit: Option<CosmosMsg>,
+    /// Cross-denom fee acquisition — `Some` only when the chain's live
+    /// pool-creation fee is denominated in a NON-native denom (osmosis-1:
+    /// 20 USDC). A `MsgSwapExactAmountOut` that converts the pool's
+    /// retained native fee reserve into exactly the fee coin through the
+    /// factory's pricing pool. The caller MUST emit this BEFORE
+    /// `create_pool` (messages execute in order) so the pool holds the
+    /// fee coin when the gamm module charges it. Funded from protocol
+    /// revenue (the 1% commit-fee retention) — never from the creator.
+    pub fee_swap: Option<CosmosMsg>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -142,6 +163,17 @@ pub fn trigger_threshold_payout(
     bluechip_wallet: &Addr,
     // LP fee (`PoolSpecs.lp_fee`) reused as the native GAMM pool's swap_fee.
     lp_fee: Decimal,
+    // USD-per-native rate captured at commit entry (CommitContext) —
+    // sizes the native budget for a cross-denom fee swap at EXACTLY the
+    // rate the threshold valuation used.
+    usd_rate: Uint128,
+    // Live factory fee/route context, from the same CommitContext query:
+    // the configured gamm creation-fee coin (fallback when the chain
+    // params query is unavailable), and the pricing pool + USD quote
+    // denom that define the swap route for a non-native fee denom.
+    fee_cfg: Option<&Coin>,
+    pricing_pool_id: u64,
+    usd_quote_denom: &str,
     env: &Env,
 ) -> Result<ThresholdPayoutMsgs, ContractError> {
     // No-double-mint invariant — STRUCTURALLY enforced here. This is the
@@ -245,25 +277,84 @@ pub fn trigger_threshold_payout(
         .unwrap_or_default();
     // H-01 — resolve the creation fee to charge against from the CHAIN'S
     // LIVE `x/poolmanager` pool-creation fee, not the factory-configured
-    // guess. The `x/gamm` module deducts this exact amount when
+    // guess. The `x/gamm` module deducts this exact COIN when
     // `MsgCreateBalancerPool` runs, so pinning the seed reservation to the
     // live value makes the crossing self-correcting: a mis-set factory
     // config OR a post-deployment governance change to the fee can no
     // longer leave the pool unable to cover the create (which, as a
     // `reply_on_success` SubMsg, would otherwise revert the whole crossing
-    // and strand the pool below threshold). The configured
-    // `CREATION_FEE_RESERVE_TARGET` remains the RETENTION target (how much
-    // bluechip to pre-hold from the 1% fee); it is used as the charge
-    // amount ONLY as a fallback when the live params query is unavailable
-    // (e.g. a chain build without the query, or test mocks).
+    // and strand the pool below threshold). Fallback order when the live
+    // params query is unavailable (a chain build without the query, or
+    // test mocks): the factory's live `gamm_pool_creation_fee` config
+    // (rides the CommitContext query), then the instantiate-time
+    // `CREATION_FEE_RESERVE_TARGET` interpreted as a native-denom amount
+    // (legacy pre-cross-denom semantics).
     let bluechip_denom_for_fee = get_native_denom(&pool_info.pool_info.asset_infos)?;
-    let configured_fee = crate::state::CREATION_FEE_RESERVE_TARGET
+    let configured_target = crate::state::CREATION_FEE_RESERVE_TARGET
         .may_load(storage)?
         .unwrap_or_default();
-    let creation_fee = match query_pool_creation_fee(querier, &bluechip_denom_for_fee) {
-        Some(live) => live,
-        None => configured_fee,
+    let fee_coin: Option<Coin> = query_pool_creation_fee_coin(querier)
+        .or_else(|| fee_cfg.cloned())
+        .or_else(|| {
+            if configured_target.is_zero() {
+                None
+            } else {
+                Some(Coin {
+                    denom: bluechip_denom_for_fee.clone(),
+                    amount: configured_target,
+                })
+            }
+        })
+        .filter(|c| !c.amount.is_zero());
+
+    // Resolve how much NATIVE denom the fee consumes from the pool's
+    // balance, and whether a swap must acquire the fee coin first.
+    //
+    // - Fee denominated in the native denom (osmo-test-5: 1 OSMO): the
+    //   gamm module charges it straight from the pool's native balance —
+    //   `native_fee_charge` is the fee amount, no swap.
+    // - Fee denominated in the USD quote denom (osmosis-1: 20 USDC): the
+    //   pool holds no USDC, so a `MsgSwapExactAmountOut` through the
+    //   factory's pricing pool (which trades native/usd_quote by
+    //   definition) converts retained native into EXACTLY the fee coin
+    //   before the create executes. The native budget is the fee's value
+    //   at the commit-entry TWAP rate plus `FEE_SWAP_MARGIN_BPS`;
+    //   exact-out spends only what the swap needs, so the margin is a
+    //   bound, not a cost. Funding source is unchanged: the 1% commit-fee
+    //   retention (protocol revenue) — the creator never pays.
+    // - Any other fee denom is unroutable here: fail with an actionable
+    //   error naming the config knob rather than letting the gamm module
+    //   revert opaquely at charge time.
+    let (native_fee_charge, fee_swap): (Uint128, Option<CosmosMsg>) = match &fee_coin {
+        None => (Uint128::zero(), None),
+        Some(fee) if fee.denom == bluechip_denom_for_fee => (fee.amount, None),
+        Some(fee) if fee.denom == usd_quote_denom && pricing_pool_id != 0 => {
+            let base_in = crate::swap_helper::usd_to_native_at_rate(fee.amount, usd_rate)?;
+            let max_in = base_in
+                .multiply_ratio(10_000u128 + FEE_SWAP_MARGIN_BPS, 10_000u128)
+                .checked_add(Uint128::one())?;
+            let swap = swap_exact_amount_out_msg(
+                &pool_info.pool_info.contract_addr,
+                pricing_pool_id,
+                &bluechip_denom_for_fee,
+                max_in,
+                fee,
+            );
+            (max_in, Some(swap))
+        }
+        Some(fee) => {
+            return Err(ContractError::InvalidThresholdParams {
+                msg: format!(
+                    "pool-creation fee is denominated in '{}', which is neither the native \
+                     denom ('{}') nor the pricing quote denom ('{}', pricing pool {}); update \
+                     the factory's gamm_pool_creation_fee / pricing config so the crossing \
+                     can acquire the fee coin",
+                    fee.denom, bluechip_denom_for_fee, usd_quote_denom, pricing_pool_id
+                ),
+            });
+        }
     };
+    let creation_fee = native_fee_charge;
 
     // Compute the coins seeding the native pool. The bluechip side is
     // capped at `max_bluechip_lock_per_pool`; the creator side is reduced
@@ -422,6 +513,7 @@ pub fn trigger_threshold_payout(
         create_pool,
         other_msgs,
         reserve_remit,
+        fee_swap,
     })
 }
 

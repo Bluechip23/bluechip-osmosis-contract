@@ -381,6 +381,11 @@ fn test_threshold_payout_integrity_check() {
         &fee_info,
         &fee_info.bluechip_wallet_address,
         Decimal::permille(3),
+        // Legacy fee context ($1/native rate, no live fee coin).
+        Uint128::new(1_000_000),
+        None,
+        0,
+        "",
         &env,
     );
 
@@ -2139,6 +2144,12 @@ fn test_fix_e_crossing_seed_math_normal_and_shortfall() {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
+            // Legacy fee context: no live fee coin — exercises the
+            // CREATION_FEE_RESERVE_TARGET fallback these FIX-E cases pin.
+            Uint128::new(1_000_000),
+            None,
+            0,
+            "",
             &env,
         )
         .unwrap();
