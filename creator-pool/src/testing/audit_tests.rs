@@ -527,58 +527,74 @@ fn create_pool_reply_without_response_errors_rather_than_leaving_pool_id_unset()
 }
 
 // ===========================================================================
-// F-1: sandwich-protection asymmetry between SimpleSwap and the commit swap.
+// F-1 (fixed): direct SimpleSwap now REQUIRES belief_price; only the
+//              registered router (which enforces end-to-end minimum_receive)
+//              is exempt.
 // ===========================================================================
 //
-// The post-threshold commit swap REQUIRES an explicit belief_price (H-3),
-// because the on-chain estimate floor is queried at already-manipulated state
-// and is not sandwich-resistant. The public `SimpleSwap` entry point does NOT
-// require one — it dispatches with only the estimate floor when belief_price
-// is null. This test PINS that asymmetry so it is a deliberate, reviewed
-// decision rather than a silent gap: a direct SimpleSwap caller who omits
-// belief_price is protected only against the swap's own price impact, not
-// against a prior-tx sandwich. See findings report F-1.
+// Attack defended: a direct SimpleSwap caller who omits belief_price is
+// protected only by the on-chain estimate floor, which is computed at
+// already-front-run pool state and is NOT sandwich-resistant. The fix forces
+// a direct caller to supply a belief_price (matching the commit path, H-3),
+// while exempting the registered multi-hop router by address — the router
+// bounds the whole route with minimum_receive, so its per-hop null-belief
+// calls are safe.
 #[test]
-fn simple_swap_accepts_null_belief_price_while_commit_requires_it() {
+fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     use crate::mock_querier::mock_deps_estimate;
 
-    let mut deps = mock_deps_estimate(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(1_000_000_000),
-    }]);
+    let swap_amount = Uint128::new(100_000_000);
+    let offer = |amt: Uint128| ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: amt,
+        },
+        belief_price: None,
+        max_spread: None,
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let funds = |amt: Uint128| {
+        vec![Coin {
+            denom: "ubluechip".to_string(),
+            amount: amt,
+        }]
+    };
+
+    // (A) A DIRECT caller with belief_price = None is now REJECTED.
+    let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
     deps.querier
         .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&Addr::unchecked("direct_caller"), &funds(swap_amount)),
+        offer(swap_amount),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::BeliefPriceRequired {}),
+        "a direct SimpleSwap with no belief_price must be rejected (sandwich exposure); got {err:?}"
+    );
 
-    let swap_amount = Uint128::new(100_000_000);
-
-    // (A) SimpleSwap with belief_price = None SUCCEEDS — only the estimate
-    // floor binds, which is NOT sandwich protection.
+    // (B) The REGISTERED ROUTER (per the mock querier's RegisteredRouter
+    // response) is exempt — it swaps null-belief because it enforces an
+    // end-to-end minimum_receive across the route.
+    let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
+    setup_pool_post_threshold(&mut deps);
+    deps.querier
+        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
     let res = execute(
         deps.as_mut(),
         mock_env(),
-        message_info(
-            &Addr::unchecked("direct_caller"),
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: swap_amount,
-            }],
-        ),
-        ExecuteMsg::SimpleSwap {
-            offer_asset: TokenInfo {
-                info: TokenType::Native {
-                    denom: "ubluechip".to_string(),
-                },
-                amount: swap_amount,
-            },
-            belief_price: None,
-            max_spread: None,
-            allow_high_max_spread: None,
-            to: None,
-            transaction_deadline: None,
-        },
+        message_info(&Addr::unchecked("registered_router"), &funds(swap_amount)),
+        offer(swap_amount),
     )
-    .expect("SimpleSwap must currently accept a null belief_price (router-compat path)");
+    .expect("the registered router must be exempt from the belief_price requirement");
     assert_eq!(
         res.attributes
             .iter()
@@ -586,20 +602,54 @@ fn simple_swap_accepts_null_belief_price_while_commit_requires_it() {
             .unwrap()
             .value,
         "swap",
-        "SimpleSwap with null belief_price dispatches the swap — no belief_price is enforced"
+        "router-originated null-belief SimpleSwap should still dispatch"
     );
 
-    // (B) The post-threshold COMMIT swap with belief_price = None is REJECTED.
+    // (C) A direct caller WITH an explicit belief_price is accepted.
+    let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
+    setup_pool_post_threshold(&mut deps);
+    deps.querier
+        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+    let with_belief = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: swap_amount,
+        },
+        // Loose belief price → estimate floor still binds; the point is that
+        // a bound is PRESENT.
+        belief_price: Some(cosmwasm_std::Decimal::percent(200)),
+        max_spread: None,
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&Addr::unchecked("direct_caller"), &funds(swap_amount)),
+        with_belief,
+    )
+    .expect("a direct SimpleSwap that supplies a belief_price must be accepted");
+    assert_eq!(
+        res.attributes
+            .iter()
+            .find(|a| a.key == "action")
+            .unwrap()
+            .value,
+        "swap"
+    );
+
+    // (D) The commit swap still requires belief_price too (unchanged, H-3).
+    let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
+    setup_pool_post_threshold(&mut deps);
+    deps.querier
+        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
     let err = execute(
         deps.as_mut(),
         mock_env(),
-        message_info(
-            &Addr::unchecked("committer"),
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: swap_amount,
-            }],
-        ),
+        message_info(&Addr::unchecked("committer"), &funds(swap_amount)),
         ExecuteMsg::Commit {
             asset: TokenInfo {
                 info: TokenType::Native {
@@ -615,6 +665,80 @@ fn simple_swap_accepts_null_belief_price_while_commit_requires_it() {
     .unwrap_err();
     assert!(
         matches!(err, ContractError::BeliefPriceRequired {}),
-        "the commit swap enforces belief_price while SimpleSwap does not — asymmetry pinned; got {err:?}"
+        "commit swap still requires belief_price; got {err:?}"
+    );
+}
+
+// ===========================================================================
+// F-3: pool-side sanity CEILING on the factory-delegated oracle rate.
+// ===========================================================================
+//
+// The pool delegates its entire USD valuation to the factory. A factory bug,
+// a mis-set pricing pool, or a wrong-decimals quote denom that slipped past
+// the factory's own gate would otherwise let an absurd rate value a dust
+// commit as a fortune and cross the threshold. The pool now rejects any rate
+// above POOL_RATE_MAX ($10,000/native). This test asserts the SAME commit is
+// rejected above the ceiling and accepted at a normal rate — so the rejection
+// is the ceiling, not an unrelated failure.
+#[test]
+fn commit_rejects_oracle_rate_above_pool_ceiling() {
+    let commit_amount = Uint128::new(5_000_000);
+    let msg = || ExecuteMsg::Commit {
+        asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: commit_amount,
+        },
+        transaction_deadline: None,
+        belief_price: None,
+        max_spread: None,
+    };
+    let info = || {
+        message_info(
+            &Addr::unchecked("committer"),
+            &[Coin {
+                denom: "ubluechip".to_string(),
+                amount: commit_amount,
+            }],
+        )
+    };
+
+    // Above the ceiling ($10,000/native == rate 10_000_000_000; use +1) →
+    // rejected as an invalid oracle price BEFORE any funds are banked.
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(10_000 * 1_000_000 + 1));
+    let err = execute(deps.as_mut(), mock_env(), info(), msg()).unwrap_err();
+    assert!(
+        matches!(err, ContractError::InvalidOraclePrice {}),
+        "a rate above the pool ceiling must be rejected; got {err:?}"
+    );
+    assert!(
+        COMMIT_LEDGER
+            .may_load(&deps.storage, &Addr::unchecked("committer"))
+            .unwrap()
+            .is_none(),
+        "no ledger entry may be written when the oracle rate is rejected"
+    );
+
+    // Same commit at a normal $1 rate → accepted (pre-threshold funding),
+    // proving the rejection above is the ceiling and nothing else.
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_storage(&mut deps);
+    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    execute(deps.as_mut(), mock_env(), info(), msg()).expect("a normal-rate commit must succeed");
+    assert!(
+        COMMIT_LEDGER
+            .may_load(&deps.storage, &Addr::unchecked("committer"))
+            .unwrap()
+            .is_some(),
+        "a normal-rate commit must record the committer"
     );
 }

@@ -981,7 +981,7 @@ fn test_simple_swap_bluechip_to_cw20() {
             },
             amount: swap_amount,
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: None,
         allow_high_max_spread: None,
         to: None,
@@ -1025,7 +1025,7 @@ fn test_swap_with_max_spread() {
             },
             amount: swap_amount,
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: Some(Decimal::percent(6)), // Above the 5% hard cap
         allow_high_max_spread: None,
         to: None,
@@ -1069,7 +1069,7 @@ fn test_swap_sell_creator_token_native() {
             },
             amount: swap_amount,
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: Some(Decimal::percent(10)),
         allow_high_max_spread: Some(true),
         to: None,
@@ -1116,7 +1116,7 @@ fn test_cw20_receive_rejects_balance_shortfall() {
             },
             amount: swap_amount,
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: Some(Decimal::percent(5)),
         allow_high_max_spread: None,
         to: None,
@@ -1149,7 +1149,7 @@ fn test_swap_wrong_asset() {
             },
             amount: Uint128::new(1_000_000),
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: None,
         allow_high_max_spread: None,
         to: None,
@@ -1464,7 +1464,7 @@ fn test_swap_cw20_to_bluechip_direct() {
             },
             amount: swap_amount,
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: Some(Decimal::percent(5)),
         allow_high_max_spread: None,
         to: None,
@@ -1519,7 +1519,7 @@ fn test_swap_cw20_with_custom_recipient() {
             },
             amount: swap_amount,
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: Some(Decimal::percent(2)),
         allow_high_max_spread: None,
         to: Some(recipient.clone()),
@@ -1649,8 +1649,11 @@ fn test_simple_swap_estimate_floor_sets_nonzero_token_out_min() {
 
     let env = mock_env();
     let swap_amount = Uint128::new(100_000_000);
+    // F-1 — the null-belief SimpleSwap path is now reachable only by the
+    // registered router (which the mock querier reports as "registered_router").
+    // The estimate floor is load-bearing on exactly that path.
     let info = message_info(
-        &Addr::unchecked("trader"),
+        &Addr::unchecked("registered_router"),
         &[Coin {
             denom: "ubluechip".to_string(),
             amount: swap_amount,
@@ -1663,7 +1666,7 @@ fn test_simple_swap_estimate_floor_sets_nonzero_token_out_min() {
             },
             amount: swap_amount,
         },
-        belief_price: None, // no belief price → estimate floor is load-bearing
+        belief_price: None, // router path → estimate floor is load-bearing
         max_spread: None,   // default 0.5%
         allow_high_max_spread: None,
         to: None,
@@ -1933,20 +1936,24 @@ fn test_committer_count_exact_across_repeat_committers() {
 
 #[test]
 fn test_swap_zero_floor_rejected() {
-    // Stock querier answers no estimate Stargate query (⇒ estimate = 0) AND
-    // no belief_price is supplied ⇒ the derived `token_out_min_amount` floor
-    // collapses to zero. `compute_token_out_min` now rejects that rather than
-    // dispatching an unprotected `MsgSwapExactAmountIn`.
-    let mut deps = mock_dependencies_with_balance(&[Coin {
+    // A zero estimate (`set_estimate_ratio(0, 1)`) AND no belief_price ⇒ the
+    // derived `token_out_min_amount` floor collapses to zero.
+    // `compute_token_out_min` rejects that rather than dispatching an
+    // unprotected `MsgSwapExactAmountIn`. F-1 — the null-belief path is
+    // reachable only by the registered router, so this exercises it as that
+    // caller (the mock querier answers RegisteredRouter = "registered_router").
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[Coin {
         denom: "ubluechip".to_string(),
         amount: Uint128::new(1_000_000_000),
     }]);
+    deps.querier.set_estimate_ratio(0, 1);
     setup_pool_post_threshold(&mut deps);
 
     let env = mock_env();
     let swap_amount = Uint128::new(100_000_000);
     let info = message_info(
-        &Addr::unchecked("trader"),
+        &Addr::unchecked("registered_router"),
         &[Coin {
             denom: "ubluechip".to_string(),
             amount: swap_amount,
@@ -2273,7 +2280,7 @@ fn test_fix_g_breaker_pauses_below_floor() {
             },
             amount: swap_amount,
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: None,
         allow_high_max_spread: None,
         to: None,
@@ -2368,7 +2375,7 @@ fn test_fix_g_breaker_allows_healthy_pool() {
             },
             amount: swap_amount,
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: None,
         allow_high_max_spread: None,
         to: None,

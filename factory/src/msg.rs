@@ -59,6 +59,15 @@ pub enum ExecuteMsg {
         config: FactoryInstantiate,
     },
     UpdateConfig {},
+    // F-1 — register/rotate the multi-hop router address. Admin-only.
+    // Pools query this (via `RegisteredRouter`) to exempt the router from
+    // the SimpleSwap belief_price requirement (the router enforces an
+    // end-to-end `minimum_receive`). Not fund-touching and self-correcting
+    // (a wrong value only makes the real router's null-belief swaps fail
+    // until re-set), so it is a direct admin op rather than timelocked.
+    SetRouter {
+        router: String,
+    },
     Create {
         pool_msg: CreatePool,
         token_info: CreatorTokenInfo,

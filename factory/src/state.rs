@@ -23,6 +23,14 @@ use cw_storage_plus::{Item, Map};
 use pool_factory_interfaces::PoolStateResponseForFactory;
 
 pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config");
+
+/// F-1 — the registered multi-hop router address. Pools query it (via
+/// `FactoryQueryMsg::RegisteredRouter`) to decide whether to waive the
+/// `belief_price` requirement on a `SimpleSwap`: the router enforces an
+/// end-to-end `minimum_receive`, so it is the one caller allowed to swap
+/// without a per-call price bound. Set/rotated by the admin via
+/// `ExecuteMsg::SetRouter`. Unset ⇒ pools reject every null-belief swap.
+pub const ROUTER_ADDRESS: Item<Addr> = Item::new("router_address");
 // In-flight pool creations keep no storage state: the creation context
 // (`pool_struct::TempPoolCreation`) rides the SubMsg payload through the
 // reply chain, and on any failure the whole tx reverts (every step uses

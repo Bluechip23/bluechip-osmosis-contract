@@ -188,6 +188,19 @@ impl PoolMockQuerier {
                 enum WrapperProbe {
                     PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
                 }
+                // F-1 — the RegisteredRouter probe is answered regardless of
+                // whether the factory oracle rate is configured, so the
+                // SimpleSwap belief-price gate can resolve on any post-threshold
+                // fixture. Reports the well-known mock router address.
+                if let Ok(WrapperProbe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::RegisteredRouter {},
+                )) = from_json::<WrapperProbe>(msg)
+                {
+                    let resp = pool_factory_interfaces::RegisteredRouterResponse {
+                        router: Some(Addr::unchecked("registered_router")),
+                    };
+                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+                }
                 if let Some(rate) = self.factory_rate {
                     let usd_at_rate = |amount: Uint128| {
                         amount

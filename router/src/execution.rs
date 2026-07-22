@@ -25,13 +25,22 @@
 //!
 //! ## Why per-hop balance reads are safe
 //!
-//! Each [`execute_swap_operation`] call uses the router's *current*
-//! balance of the offer token as the swap input. This works because the
-//! router holds zero balance between transactions (the entry-point
-//! deposit is the only credit on hop 0, and every subsequent hop is
-//! credited only by the previous hop). Operators must not send tokens
-//! directly to the router contract; doing so could cause an unrelated
-//! deposit to get swept into the next user's route.
+//! Each [`execute_swap_operation`] call swaps only `current_balance -
+//! offer_baseline`, where `offer_baseline` is the router's PRE-route balance
+//! of that hop's offer denom, snapshotted in [`start_multi_hop`] before any
+//! funds move (M-03). So each hop consumes exactly the funds THIS route
+//! produced — the attached input on hop 0, the prior hop's output on later
+//! hops — and any pre-existing or donated balance sits below the baseline
+//! and is left untouched. A stray deposit to the router is therefore NOT
+//! swept into the next user's route; it is excluded by the baseline, not
+//! captured.
+//!
+//! As defense-in-depth (so the safety does not rest solely on that
+//! arithmetic being correct), [`execute_multi_hop`] also sets a transient
+//! `ROUTE_IN_PROGRESS` guard for the duration of a route, rejecting any
+//! re-entrant `ExecuteMultiHop` a malicious pool might trigger mid-hop. The
+//! guard is cleared by the terminal `AssertReceived` step on success, or
+//! rolled back with the whole tx on any hop failure.
 
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
@@ -121,6 +130,19 @@ fn start_multi_hop(
     if offer_amount.is_zero() {
         return Err(RouterError::ZeroAmount);
     }
+    // F-5 — reentrancy guard. A route in progress means a pool called during
+    // one of this route's hops is trying to re-enter with a nested route;
+    // reject it. Set here and cleared by the terminal `AssertReceived`. The
+    // sub-message writes of a route are visible to a reentrant call within the
+    // same tx, so the flag reliably blocks nesting; on any failure the tx
+    // reverts and the flag rolls back to unset.
+    if crate::state::ROUTE_IN_PROGRESS
+        .may_load(deps.storage)?
+        .unwrap_or(false)
+    {
+        return Err(RouterError::Reentrancy);
+    }
+    crate::state::ROUTE_IN_PROGRESS.save(deps.storage, &true)?;
     // With per-hop max_spread pinned to the pools' 5% hard cap,
     // minimum_receive is the ONLY end-to-end slippage guard. Zero means a
     // 3-hop route could be sandwiched for up to ~14% with no recourse; no
@@ -339,6 +361,11 @@ pub fn execute_assert_received(
             actual: received,
         });
     }
+    // F-5 — route completed successfully; clear the reentrancy guard. This is
+    // the terminal step of every route (always appended after the hops), so
+    // the flag set in `start_multi_hop` is always cleared on the success path;
+    // on a failure path the tx reverts and the flag rolls back instead.
+    crate::state::ROUTE_IN_PROGRESS.save(deps.storage, &false)?;
     Ok(Response::new()
         .add_attribute("action", "assert_received")
         .add_attribute("recipient", recipient_addr)

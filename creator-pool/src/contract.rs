@@ -295,6 +295,24 @@ pub fn execute(
                 return Err(ContractError::ShortOfThreshold {});
             }
             offer_asset.confirm_sent_native_balance(&info)?;
+            // F-1 — a DIRECT SimpleSwap must carry an explicit `belief_price`.
+            // The on-chain estimate floor is computed at current (possibly
+            // already-front-run) pool state, so it is NOT sandwich-resistant;
+            // only a caller-supplied `belief_price` bounds a prior-tx sandwich.
+            // The registered multi-hop router is the sole exemption: it swaps
+            // with `belief_price: None` but guarantees an end-to-end
+            // `minimum_receive` across the whole route, so its per-hop calls
+            // are already bounded. Any other null-belief caller is rejected.
+            // Fail-closed: if no router is registered, every null-belief swap
+            // is refused.
+            if belief_price.is_none() {
+                let factory_addr = POOL_INFO.load(deps.storage)?.factory_addr;
+                let registered =
+                    crate::swap_helper::query_registered_router(deps.as_ref(), &factory_addr)?;
+                if registered.as_ref() != Some(&info.sender) {
+                    return Err(ContractError::BeliefPriceRequired {});
+                }
+            }
             let sender_addr = info.sender.clone();
             let to_addr: Option<Addr> = to
                 .map(|to_str| deps.api.addr_validate(&to_str))

@@ -227,6 +227,14 @@ fn execute_commit_logic(
     if usd_rate.is_zero() || commit_value.is_zero() {
         return Err(ContractError::InvalidOraclePrice {});
     }
+    // F-3 — defense-in-depth ceiling on the factory-delegated rate. The
+    // factory already gates this, so it never fires in normal operation; it
+    // firewalls a factory bug / mis-set pricing pool / wrong-decimals quote
+    // denom from pushing an absurd valuation into this pool's threshold and
+    // distribution math. See `swap_helper::POOL_RATE_MAX`.
+    if usd_rate > Uint128::new(crate::swap_helper::POOL_RATE_MAX) {
+        return Err(ContractError::InvalidOraclePrice {});
+    }
     // Load IS_THRESHOLD_HIT once and thread it through both the minimum-
     // commit check here and the main branching below (used later as
     // `threshold_already_hit`).

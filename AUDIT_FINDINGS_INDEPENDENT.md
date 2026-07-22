@@ -46,9 +46,29 @@ not read "no confirmed bugs" as "safe."
 
 ---
 
+## Remediation applied (this session)
+
+After review, the owner dispositioned the findings and three were fixed on
+this branch:
+
+| Finding | Disposition | Change |
+|---|---|---|
+| **F-1** | **Fixed** | `SimpleSwap` now rejects a null `belief_price` (`BeliefPriceRequired`) except from the factory-registered router, which enforces an end-to-end `minimum_receive`. New factory `SetRouter` admin op + `RegisteredRouter` query; pool queries it fail-closed. Tests: `direct_simple_swap_requires_belief_price_but_registered_router_is_exempt` (pool), `set_router_is_admin_only_and_query_reflects_it` (factory). |
+| **F-2** | **Accepted** (owner) | Contract design, not a flaw — permanent pre-threshold commitment is intended. No change. (The unroutable-live-fee-denom brick sub-case remains a live-parameter watch item.) |
+| **F-3** | **Fixed** | Pool now enforces a `POOL_RATE_MAX` ($10k/native) ceiling on the factory-delegated rate at the commit boundary. Test: `commit_rejects_oracle_rate_above_pool_ceiling`. |
+| **F-4** | **Accepted** (owner) | The pricing pool is an existing, relatively deep Osmosis pool, so the manipulation cost is high. No change; remains parameter-dependent. |
+| **F-5** | **Fixed** | Explicit `ROUTE_IN_PROGRESS` reentrancy guard on `ExecuteMultiHop` (set at route start, cleared by the terminal `AssertReceived`); stale pre-M-03 doc comment corrected. Test: `nested_multi_hop_is_rejected_while_route_in_progress`. |
+
+Full suite after remediation: **creator-pool 159, factory 104, router 23,
+pool-core 8 — 0 failures.**
+
+The original finding write-ups are retained below as the record.
+
+---
+
 ## Findings requiring a decision (design / trust / uncertain)
 
-### F-1 — `SimpleSwap` is sandwichable when called directly without `belief_price` (Medium; decision needed)
+### F-1 — `SimpleSwap` is sandwichable when called directly without `belief_price` (Medium) — **FIXED**
 
 - **Where:** `creator-pool/src/contract.rs:286-315` (SimpleSwap dispatch, no
   belief-price gate); protection derived in `packages/pool-core/src/swap.rs:98-149`
@@ -111,7 +131,7 @@ not read "no confirmed bugs" as "safe."
   errors rather than mis-charging) — the *consequence* (stuck funds) is the
   design gap, not a code defect.
 
-### F-3 — The pool trusts the factory oracle rate with no sanity/freshness check of its own (Informational; trust boundary)
+### F-3 — The pool trusts the factory oracle rate with no sanity/freshness check of its own (Informational; trust boundary) — **FIXED**
 
 - **Where:** `creator-pool/src/commit.rs:227-229` — the only oracle guard at the
   pool is `if usd_rate.is_zero() || commit_value.is_zero()`. All real gating
@@ -148,7 +168,7 @@ not read "no confirmed bugs" as "safe."
   mitigations (TWAP + window + RATE_MAX) are present and reasonable, but the
   residual is real and parameter-dependent.
 
-### F-5 (minor, from router sub-review) — no explicit reentrancy guard on the router
+### F-5 (minor, from router sub-review) — no explicit reentrancy guard on the router — **FIXED**
 
 - **Where:** `router/src/execution.rs` (whole module).
 - **What:** The router holds no funds between transactions and its per-hop
