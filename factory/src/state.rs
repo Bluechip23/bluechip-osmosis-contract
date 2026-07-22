@@ -269,6 +269,33 @@ pub struct PricingSource {
     pub pool_id: u64,
     pub quote_denom: String,
     pub quote_decimals: u32,
+    /// Optional second hop that converts a NON-USD quote into USD.
+    ///
+    /// When the source pool prices the native asset against a volatile token
+    /// (e.g. an OSMO/BTC or OSMO/ATOM pool) rather than a USD stable, set this
+    /// to a pool that trades `quote_denom` against a USD stable
+    /// (`quote_denom`/USDC). The valuation becomes
+    /// `TWAP(native/quote) × TWAP(quote/usd)` = native priced in USD. `None`
+    /// ⇒ the source is DIRECT: `quote_denom` is itself the USD stable (the
+    /// legacy behavior). In the routed case `quote_decimals` is unused (the
+    /// intermediate token's decimals cancel in the product); only
+    /// `usd_leg.usd_decimals` matters for normalization.
+    #[serde(default)]
+    pub usd_leg: Option<UsdLeg>,
+}
+
+/// Second leg of a routed [`PricingSource`]: a pool that prices the source's
+/// `quote_denom` in a USD stable.
+#[cw_serde]
+#[derive(Default)]
+pub struct UsdLeg {
+    /// Pool that trades the source's `quote_denom` against `usd_denom`.
+    pub pool_id: u64,
+    /// The USD-stable denom the intermediate is priced in (e.g. Noble USDC).
+    pub usd_denom: String,
+    /// Decimals of `usd_denom` (6 for USDC/USDT). Load-bearing for
+    /// normalization to the micro-USD-per-micro-native convention.
+    pub usd_decimals: u32,
 }
 
 /// Median-oracle thresholds. All fields default to the legacy single-pool

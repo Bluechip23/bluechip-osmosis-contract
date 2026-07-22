@@ -124,6 +124,41 @@ pub(crate) fn validate_factory_config(
                 i, s.quote_decimals
             ))));
         }
+        // Routed source: validate the quote->USD leg. A `None` leg means the
+        // quote denom is itself the USD stable (direct source).
+        if let Some(leg) = &s.usd_leg {
+            if leg.pool_id == 0 {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.pool_id must be non-zero",
+                    i
+                ))));
+            }
+            if leg.usd_denom.trim().is_empty() {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.usd_denom must be non-empty",
+                    i
+                ))));
+            }
+            if leg.usd_denom == s.quote_denom {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.usd_denom must differ from the source's \
+                     quote_denom (the leg must actually convert the intermediate to USD)",
+                    i
+                ))));
+            }
+            if leg.usd_denom == config.bluechip_denom {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.usd_denom must differ from bluechip_denom",
+                    i
+                ))));
+            }
+            if leg.usd_decimals > 30 {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.usd_decimals {} is implausibly large",
+                    i, leg.usd_decimals
+                ))));
+            }
+        }
     }
     // Reject duplicate pool ids across the whole source set (primary + extras).
     // The median's manipulation resistance rests on ONE independent vote per

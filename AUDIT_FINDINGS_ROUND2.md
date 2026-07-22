@@ -197,6 +197,42 @@ weigh before launch.
 
 ---
 
+## Feature added: routed (2-leg) pricing sources for non-stable quotes
+
+The owner's intended set (USDC/OSMO, BTC/OSMO, ATOM/OSMO, AKT/OSMO) is mostly
+priced against **volatile** assets, not USD stables. A `PricingSource` now takes
+an optional `usd_leg`: when the source pool prices the native asset against a
+volatile token, a second pool prices that token in USD, and the valuation is
+`TWAP(native/quote) × TWAP(quote/usd)`.
+
+- **Where:** `factory/src/state.rs` (`PricingSource.usd_leg`, `UsdLeg`);
+  `factory/src/usd_price.rs` (`probe_single_source` two-leg branch,
+  `twap_pair_to_rate`); leg validation in `factory/src/execute/config.rs`.
+- **Math:** with the native denom fixed at 6 decimals,
+  `rate = D1 × D2 × 10^(12 − usd_decimals)`; the **intermediate token's decimals
+  cancel** in the product, so only the USD stable's decimals matter (BTC's 8,
+  ATOM's 6, AKT's 6 are irrelevant to the result — you don't have to get them
+  right). Computed in `Uint256`, fail-closed on overflow, both legs sanity-gated.
+- **Tests:** `factory/src/testing/oracle_tests.rs` — pair normalization,
+  routed-source pricing, dead-leg discredit, the full mixed direct+routed set
+  (models your four pools), and leg-shape validation.
+
+**Security posture you should weigh (honest):**
+- A routed source needs **two** pools honest and fresh, so it is a strictly
+  **weaker** vote than a direct OSMO/stable source — ~2× the manipulation and
+  staleness surface per vote. The median + deviation filter + quorum still
+  protect against a *minority* of corrupted sources, so keep enough of them and
+  set `min_valid` / `max_deviation_bps` accordingly.
+- Everything still bottoms out on **USDC** (every leg converts to a USD stable),
+  so USDC's peg / pool depth is a shared reliance across all sources — inherent
+  to pricing in USD, but worth stating.
+- On-chain validation checks leg **shape**, not that the leg pool actually
+  trades the declared pair; a leg pointed at a valid-but-wrong pool would
+  produce a wrong price that the **deviation filter** catches only if it
+  diverges enough. Double-check pool ids off-chain before proposing.
+- Prefer keeping the **direct USDC/OSMO** pool as one source (your strongest,
+  single-hop anchor) and an **odd** total count.
+
 ## What I could not determine
 
 1. **Live x/twap decimal semantics per denom.** The normalization is correct

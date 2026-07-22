@@ -11,8 +11,10 @@ use cosmwasm_std::{Decimal, Uint128};
 
 use crate::execute::instantiate;
 use crate::mock_querier::{mock_dependencies, WasmMockQuerier};
-use crate::state::{FactoryInstantiate, MultiOracleConfig, PricingSource};
-use crate::usd_price::{median_rate, probe_median_usd_rate, twap_dec_to_rate_with_decimals};
+use crate::state::{FactoryInstantiate, MultiOracleConfig, PricingSource, UsdLeg};
+use crate::usd_price::{
+    median_rate, probe_median_usd_rate, twap_dec_to_rate_with_decimals, twap_pair_to_rate,
+};
 
 fn make_addr(label: &str) -> cosmwasm_std::Addr {
     MockApi::default().addr_make(label)
@@ -60,6 +62,28 @@ fn src(pool_id: u64, quote_denom: &str, quote_decimals: u32) -> PricingSource {
         pool_id,
         quote_denom: quote_denom.to_string(),
         quote_decimals,
+        usd_leg: None,
+    }
+}
+
+/// A routed source: `pool_id` prices native/`quote_denom`, then `leg_pool`
+/// prices `quote_denom`/`usd_denom`.
+fn routed_src(
+    pool_id: u64,
+    quote_denom: &str,
+    leg_pool: u64,
+    usd_denom: &str,
+    usd_decimals: u32,
+) -> PricingSource {
+    PricingSource {
+        pool_id,
+        quote_denom: quote_denom.to_string(),
+        quote_decimals: 0, // unused for routed sources (cancels in the product)
+        usd_leg: Some(UsdLeg {
+            pool_id: leg_pool,
+            usd_denom: usd_denom.to_string(),
+            usd_decimals,
+        }),
     }
 }
 
@@ -223,8 +247,115 @@ fn single_primary_source_matches_legacy_behavior() {
 }
 
 // ---------------------------------------------------------------------------
+// Routed (2-leg) sources: native/quote × quote/USD
+// ---------------------------------------------------------------------------
+
+/// The composite math: native priced in a volatile asset, times that asset
+/// priced in USD, yields native-in-USD with the intermediate decimals
+/// cancelling. D1=2.0 (native/quote) × D2=0.5 (quote/usd, 6-dec) = $1.00.
+#[test]
+fn routed_pair_normalization() {
+    assert_eq!(
+        twap_pair_to_rate("2.0", "0.5", 6).unwrap(),
+        Uint128::new(1_000_000)
+    );
+    // The intermediate's own decimals do NOT appear — only the final USD
+    // stable's. A dead/zero leg is rejected.
+    assert!(twap_pair_to_rate("2.0", "0", 6).is_err());
+}
+
+/// A routed source (e.g. OSMO/BTC → BTC/USDC) contributes a USD price. Pool 2
+/// prices native/BTC at 2.0, leg pool 20 prices BTC/USDC at 0.5 → $1.00.
+#[test]
+fn routed_source_prices_native_in_usd_via_second_leg() {
+    let mut deps = mock_dependencies(&[]);
+    deps.querier.set_twap_price_for_pool(1, "1.00"); // primary USDC/OSMO, $1
+    deps.querier.set_twap_price_for_pool(2, "2.0"); // OSMO/BTC leg 1
+    deps.querier.set_twap_price_for_pool(20, "0.5"); // BTC/USDC leg 2
+
+    let config = config_with_sources(vec![routed_src(2, "ubtc", 20, "uusdc", 6)], 1, 0);
+    let rate = probe_median_usd_rate(deps.as_ref(), &mock_env(), &config).unwrap();
+    // Sources: primary $1.00, routed $1.00 → median $1.00.
+    assert_eq!(rate, Uint128::new(1_000_000));
+}
+
+/// If EITHER leg of a routed source is dead, the whole source is discredited.
+#[test]
+fn routed_source_with_a_dead_leg_is_discredited() {
+    let mut deps = mock_dependencies(&[]);
+    deps.querier.set_twap_price_for_pool(1, "1.00"); // primary $1
+    deps.querier.set_twap_price_for_pool(2, "2.0"); // leg 1 ok
+    deps.querier.set_twap_error_for_pool(20, "leg pool too young"); // leg 2 dead
+    deps.querier.set_twap_price_for_pool(3, "1.04"); // another direct source
+
+    let config = config_with_sources(
+        vec![routed_src(2, "ubtc", 20, "uusdc", 6), src(3, "uusdt", 6)],
+        1,
+        0,
+    );
+    let rate = probe_median_usd_rate(deps.as_ref(), &mock_env(), &config).unwrap();
+    // Routed source discredited → survivors {primary $1.00, $1.04} → $1.02.
+    assert_eq!(rate, Uint128::new(1_020_000));
+}
+
+/// End-to-end shape of the owner's intended set: USDC/OSMO direct + BTC/OSMO,
+/// ATOM/OSMO, AKT/OSMO each routed through a USD leg. All ~$1 → median $1.
+#[test]
+fn mixed_direct_and_routed_set_medians_to_usd() {
+    let mut deps = mock_dependencies(&[]);
+    // Primary: USDC/OSMO direct, $1.00.
+    deps.querier.set_twap_price_for_pool(1, "1.00");
+    // BTC/OSMO (pool 2) × BTC/USDC (pool 20): 2.0 × 0.5 = $1.00.
+    deps.querier.set_twap_price_for_pool(2, "2.0");
+    deps.querier.set_twap_price_for_pool(20, "0.5");
+    // ATOM/OSMO (pool 3) × ATOM/USDC (pool 30): 0.25 × 4.0 = $1.00.
+    deps.querier.set_twap_price_for_pool(3, "0.25");
+    deps.querier.set_twap_price_for_pool(30, "4.0");
+    // AKT/OSMO (pool 4) × AKT/USDC (pool 40): 5.0 × 0.2 = $1.00.
+    deps.querier.set_twap_price_for_pool(4, "5.0");
+    deps.querier.set_twap_price_for_pool(40, "0.2");
+
+    let config = config_with_sources(
+        vec![
+            routed_src(2, "ubtc", 20, "uusdc", 6),
+            routed_src(3, "uatom", 30, "uusdc", 6),
+            routed_src(4, "uakt", 40, "uusdc", 6),
+        ],
+        3,   // require a 3-of-4 quorum
+        500, // ±5% deviation band
+    );
+    let rate = probe_median_usd_rate(deps.as_ref(), &mock_env(), &config).unwrap();
+    assert_eq!(rate, Uint128::new(1_000_000), "four ~$1 sources median to $1.00");
+}
+
+// ---------------------------------------------------------------------------
 // Config validation (propose/instantiate time)
 // ---------------------------------------------------------------------------
+
+#[test]
+fn instantiate_rejects_malformed_usd_leg() {
+    let mut deps = mock_dependencies(&[]);
+    // Routed source whose leg pool id is zero.
+    let bad = PricingSource {
+        pool_id: 2,
+        quote_denom: "ubtc".to_string(),
+        quote_decimals: 0,
+        usd_leg: Some(UsdLeg {
+            pool_id: 0,
+            usd_denom: "uusdc".to_string(),
+            usd_decimals: 6,
+        }),
+    };
+    let config = config_with_sources(vec![bad], 1, 0);
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&make_addr("admin"), &[]),
+        config,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("usd_leg.pool_id"), "got: {err}");
+}
 
 #[test]
 fn instantiate_rejects_malformed_extra_source() {

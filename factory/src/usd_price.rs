@@ -74,6 +74,9 @@ pub fn pricing_sources(config: &FactoryInstantiate) -> Vec<PricingSource> {
         pool_id: config.pricing_pool_id,
         quote_denom: config.usd_quote_denom.clone(),
         quote_decimals: 6,
+        // The primary pool is always a DIRECT USD-stable quote (it is also the
+        // cross-denom fee-swap route). A routed primary is not supported.
+        usd_leg: None,
     });
     sources.extend(config.oracle.extra_sources.iter().cloned());
     sources
@@ -160,26 +163,27 @@ pub fn probe_median_usd_rate(
     Ok(median_rate(&valid))
 }
 
-/// Query + normalize one pricing source into a `RATE_PRECISION` rate.
-/// Returns `Err` (⇒ the source is discredited) on any query error or failed
-/// sanity gate.
-pub fn probe_single_source(
+/// Query the arithmetic TWAP of `base`/`quote` on `pool_id` over the config
+/// window, returning the raw `Dec` string. Split out so both legs of a routed
+/// source share one query path.
+fn query_arithmetic_twap(
     deps: Deps,
     env: &Env,
     config: &FactoryInstantiate,
-    source: &PricingSource,
-) -> StdResult<Uint128> {
+    pool_id: u64,
+    base: &str,
+    quote: &str,
+) -> StdResult<String> {
     let start_time = env
         .block
         .time
         .minus_seconds(config.twap_window_seconds)
         .seconds() as i64;
-
     let resp = TwapQuerier::new(&deps.querier)
         .arithmetic_twap_to_now(
-            source.pool_id,
-            config.bluechip_denom.clone(),
-            source.quote_denom.clone(),
+            pool_id,
+            base.to_string(),
+            quote.to_string(),
             Some(osmosis_std::shim::Timestamp {
                 seconds: start_time,
                 nanos: 0,
@@ -188,15 +192,108 @@ pub fn probe_single_source(
         .map_err(|e| {
             StdError::generic_err(format!(
                 "x/twap query failed for pool {} ({}/{}, window {}s): {}",
-                source.pool_id,
-                config.bluechip_denom,
-                source.quote_denom,
-                config.twap_window_seconds,
-                e
+                pool_id, base, quote, config.twap_window_seconds, e
             ))
         })?;
+    Ok(resp.arithmetic_twap)
+}
 
-    twap_dec_to_rate_with_decimals(&resp.arithmetic_twap, source.quote_decimals)
+/// Query + normalize one pricing source into a `RATE_PRECISION` rate.
+/// Returns `Err` (⇒ the source is discredited) on any query error or failed
+/// sanity gate on EITHER leg.
+///
+/// - **Direct** source (`usd_leg == None`): `quote_denom` is a USD stable, so
+///   the single native/quote TWAP is the USD rate (legacy behavior).
+/// - **Routed** source (`usd_leg == Some`): the native/quote TWAP is combined
+///   with a second quote/USD TWAP, so an OSMO/BTC (or OSMO/ATOM, …) pool can
+///   contribute a USD price. Both legs must query and pass sanity or the whole
+///   source is discredited.
+pub fn probe_single_source(
+    deps: Deps,
+    env: &Env,
+    config: &FactoryInstantiate,
+    source: &PricingSource,
+) -> StdResult<Uint128> {
+    // Leg 1: native priced in the source's quote denom.
+    let d1 = query_arithmetic_twap(
+        deps,
+        env,
+        config,
+        source.pool_id,
+        &config.bluechip_denom,
+        &source.quote_denom,
+    )?;
+
+    match &source.usd_leg {
+        None => twap_dec_to_rate_with_decimals(&d1, source.quote_decimals),
+        Some(leg) => {
+            // Leg 2: the intermediate (source.quote_denom) priced in USD.
+            let d2 = query_arithmetic_twap(
+                deps,
+                env,
+                config,
+                leg.pool_id,
+                &source.quote_denom,
+                &leg.usd_denom,
+            )?;
+            twap_pair_to_rate(&d1, &d2, leg.usd_decimals)
+        }
+    }
+}
+
+/// Apply the shared zero / sub-dust / `RATE_MAX` sanity gates to a normalized
+/// rate. Returns `Err` (⇒ discredit the source) on any violation.
+fn apply_rate_sanity(rate: Uint128, ctx: &str) -> StdResult<Uint128> {
+    if rate.is_zero() {
+        return Err(StdError::generic_err(format!(
+            "{ctx}: price too small for {RATE_PRECISION}-precision rate"
+        )));
+    }
+    if rate > Uint128::new(RATE_MAX) {
+        return Err(StdError::generic_err(format!(
+            "{ctx}: price exceeds the ${} per native sanity ceiling — wrong-decimals \
+             quote denom or manipulated pricing pool",
+            RATE_MAX / RATE_PRECISION
+        )));
+    }
+    Ok(rate)
+}
+
+/// Combine a routed source's two legs into a `RATE_PRECISION` rate:
+/// `native_in_usd = TWAP(native/quote) × TWAP(quote/usd)`.
+///
+/// With `D1 = quote_raw/native_raw`, `D2 = usd_raw/quote_raw` and the native
+/// denom fixed at 6 decimals, `rate = D1 × D2 × 10^(12 - usd_decimals)`. The
+/// intermediate token's decimals cancel in the product, so only the USD
+/// stable's `usd_decimals` matters. Computed as
+/// `d1_atomics × d2_atomics / 10^(24 + usd_decimals)` in `Uint256`,
+/// fail-closed on overflow.
+pub fn twap_pair_to_rate(d1: &str, d2: &str, usd_decimals: u32) -> StdResult<Uint128> {
+    let dec1: Decimal = d1
+        .parse()
+        .map_err(|e| StdError::generic_err(format!("cannot parse leg-1 twap \"{}\": {}", d1, e)))?;
+    let dec2: Decimal = d2
+        .parse()
+        .map_err(|e| StdError::generic_err(format!("cannot parse leg-2 twap \"{}\": {}", d2, e)))?;
+    if dec1.is_zero() || dec2.is_zero() {
+        return Err(StdError::generic_err(
+            "routed twap price has a zero leg — a pricing pool has no meaningful liquidity",
+        ));
+    }
+    if usd_decimals > 30 {
+        return Err(StdError::generic_err(format!(
+            "usd_decimals {} is implausibly large",
+            usd_decimals
+        )));
+    }
+    // rate = d1_atomics * d2_atomics / 10^(24 + usd_decimals).
+    let num = Uint256::from(dec1.atomics())
+        .checked_mul(Uint256::from(dec2.atomics()))
+        .map_err(|_| StdError::generic_err("overflow combining routed twap legs"))?;
+    let den = Uint256::from(10u64).pow(24 + usd_decimals);
+    let rate = Uint128::try_from(num / den)
+        .map_err(|_| StdError::generic_err("routed twap price too large after normalization"))?;
+    apply_rate_sanity(rate, "routed twap price")
 }
 
 /// Median of a non-empty slice of rates. Sorts a copy and returns the middle
@@ -271,28 +368,7 @@ pub fn twap_dec_to_rate_with_decimals(twap: &str, quote_decimals: u32) -> StdRes
     let rate = Uint128::try_from(rate256)
         .map_err(|_| StdError::generic_err("twap price too large after normalization"))?;
 
-    if rate.is_zero() {
-        // Sub-1e-6 price: representable by Dec but truncates to a zero
-        // rate. Refuse rather than valuing every commit at $0.
-        return Err(StdError::generic_err(format!(
-            "twap price {} (quote decimals {}) too small for {}-precision rate",
-            twap, quote_decimals, RATE_PRECISION
-        )));
-    }
-    if rate > Uint128::new(RATE_MAX) {
-        // See RATE_MAX: a rate this high means a wrong-decimals quote
-        // denom or a spiked pricing pool, not a real price. Refuse
-        // rather than letting a dust commit value as thousands of
-        // dollars and cross the threshold.
-        return Err(StdError::generic_err(format!(
-            "twap price {} (quote decimals {}) exceeds the ${} per native sanity ceiling — \
-             wrong-decimals quote denom or manipulated pricing pool",
-            twap,
-            quote_decimals,
-            RATE_MAX / RATE_PRECISION
-        )));
-    }
-    Ok(rate)
+    apply_rate_sanity(rate, &format!("twap price {} (quote decimals {})", twap, quote_decimals))
 }
 
 /// Parse the x/twap `Dec` string assuming a 6-decimal quote denom (the
