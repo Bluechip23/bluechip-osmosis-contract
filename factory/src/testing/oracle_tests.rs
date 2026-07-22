@@ -262,6 +262,35 @@ fn instantiate_rejects_quorum_exceeding_source_count() {
     );
 }
 
+/// A pool id may appear only once across the source set (primary + extras),
+/// so one manipulated pool cannot buy multiple correlated votes in the median.
+#[test]
+fn instantiate_rejects_duplicate_pool_id() {
+    // Extra source reuses the primary pool id (1).
+    let mut deps = mock_dependencies(&[]);
+    let config = config_with_sources(vec![src(1, "uusdt", 6)], 1, 0);
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&make_addr("admin"), &[]),
+        config,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("duplicate"), "got: {err}");
+
+    // Two extra sources sharing a pool id.
+    let mut deps = mock_dependencies(&[]);
+    let config = config_with_sources(vec![src(2, "uusdt", 6), src(2, "uaxlusdc", 6)], 1, 0);
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&make_addr("admin"), &[]),
+        config,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("duplicate"), "got: {err}");
+}
+
 // Silence the unused-import warning for the querier type alias when the file
 // is compiled in isolation.
 #[allow(dead_code)]

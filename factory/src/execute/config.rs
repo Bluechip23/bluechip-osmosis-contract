@@ -125,6 +125,23 @@ pub(crate) fn validate_factory_config(
             ))));
         }
     }
+    // Reject duplicate pool ids across the whole source set (primary + extras).
+    // The median's manipulation resistance rests on ONE independent vote per
+    // pool; letting the same pool appear twice would give a manipulated pool
+    // multiple correlated votes and skew the median toward it. A multi-asset
+    // pool that could price against several denoms must still be listed once.
+    let mut seen_pool_ids = std::collections::HashSet::new();
+    seen_pool_ids.insert(config.pricing_pool_id);
+    for (i, s) in config.oracle.extra_sources.iter().enumerate() {
+        if !seen_pool_ids.insert(s.pool_id) {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].pool_id {} is a duplicate — each pricing pool may \
+                 appear only once (incl. the primary pricing_pool_id) so it gets one vote in \
+                 the median",
+                i, s.pool_id
+            ))));
+        }
+    }
     if config.oracle.min_valid_sources as usize > total_sources {
         return Err(ContractError::Std(StdError::generic_err(format!(
             "oracle.min_valid_sources {} exceeds the {} configured pricing sources \

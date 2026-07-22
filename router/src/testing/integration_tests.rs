@@ -1288,3 +1288,62 @@ fn router_rejects_zero_minimum_receive() {
     // offer path that reaches the zero-minimum check. Re-add coverage once
     // creator-token first-hop offers are wired.
 }
+
+/// F-5 — a route that FAILS must leave `ROUTE_IN_PROGRESS` clear so the next
+/// route still works. The guard is set very early in `start_multi_hop`; if a
+/// failure did not roll it back, the router would wedge permanently after the
+/// first failed swap. Here the first route fails at the final slippage assert
+/// (absurd `minimum_receive`), then an identical well-priced route succeeds.
+#[test]
+fn failed_route_does_not_wedge_the_reentrancy_guard() {
+    let mut world = setup_world();
+
+    let bluechip = TokenType::Native {
+        denom: BLUECHIP_DENOM.to_string(),
+    };
+    let creator_a = creator_token(&world.creator_a);
+    let creator_b = creator_token(&world.creator_b);
+    let route = || {
+        vec![
+            op(&world.pool_a, creator_a.clone(), bluechip.clone()),
+            op(&world.pool_b, bluechip.clone(), creator_b.clone()),
+        ]
+    };
+
+    // 1. Route fails at the final slippage check (minimum_receive unattainable).
+    let err = world
+        .app
+        .execute_contract(
+            world.user.clone(),
+            world.router.clone(),
+            &RouterExecuteMsg::ExecuteMultiHop {
+                operations: route(),
+                minimum_receive: Uint128::new(100_000_000),
+                deadline: None,
+                recipient: None,
+            },
+            &[Coin::new(100_000u128, creator_denom(&world.creator_a))],
+        )
+        .unwrap_err();
+    assert!(
+        err.root_cause().to_string().contains("Slippage"),
+        "expected the first route to fail on slippage, got: {err:?}"
+    );
+
+    // 2. An identical, well-priced route must now succeed — proving the guard
+    // was rolled back with the failed tx, not left latched.
+    world
+        .app
+        .execute_contract(
+            world.user.clone(),
+            world.router.clone(),
+            &RouterExecuteMsg::ExecuteMultiHop {
+                operations: route(),
+                minimum_receive: Uint128::new(1),
+                deadline: None,
+                recipient: None,
+            },
+            &[Coin::new(100_000u128, creator_denom(&world.creator_a))],
+        )
+        .expect("a valid route after a failed one must succeed (guard not wedged)");
+}
