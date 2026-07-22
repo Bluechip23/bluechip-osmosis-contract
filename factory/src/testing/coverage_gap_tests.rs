@@ -6,12 +6,17 @@
 use cosmwasm_std::testing::{message_info, mock_env, MockApi, MockStorage};
 use cosmwasm_std::{Addr, BankMsg, Coin, CosmosMsg, Decimal, OwnedDeps, Uint128};
 
+use cosmwasm_std::from_json;
+
 use crate::asset::TokenType;
+use crate::error::ContractError;
 use crate::execute::{execute, instantiate};
 use crate::mock_querier::{mock_dependencies, WasmMockQuerier};
 use crate::msg::{CreatorTokenInfo, ExecuteMsg};
 use crate::pool_struct::CreatePool;
+use crate::query::{query, QueryMsg};
 use crate::state::FactoryInstantiate;
+use pool_factory_interfaces::{FactoryQueryMsg, RegisteredRouterResponse};
 
 // --- shared helpers --------------------------------------------------------
 
@@ -172,5 +177,68 @@ fn create_pool_exact_pay_emits_no_refund() {
         !any_refund,
         "exact-pay create must not emit a refund BankMsg to sender; got {:?}",
         res.messages
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F-1 — router registration (SetRouter + RegisteredRouter query)
+// ---------------------------------------------------------------------------
+
+fn registered_router(deps: cosmwasm_std::Deps) -> Option<cosmwasm_std::Addr> {
+    let bin = query(
+        deps,
+        mock_env(),
+        QueryMsg::PoolFactoryQuery(FactoryQueryMsg::RegisteredRouter {}),
+    )
+    .unwrap();
+    from_json::<RegisteredRouterResponse>(&bin).unwrap().router
+}
+
+/// `SetRouter` is admin-only, and the `RegisteredRouter` query reflects the
+/// stored value (None before any set, the address after). This is the exact
+/// pair the pool's SimpleSwap belief-price exemption depends on (F-1).
+#[test]
+fn set_router_is_admin_only_and_query_reflects_it() {
+    let mut deps = fresh_factory();
+    let router = make_addr("the_router");
+
+    // Before registration the query reports None → pools reject every
+    // null-belief SimpleSwap (fail-safe).
+    assert_eq!(registered_router(deps.as_ref()), None);
+
+    // A non-admin cannot register a router.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&make_addr("attacker"), &[]),
+        ExecuteMsg::SetRouter {
+            router: router.to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::Unauthorized {}),
+        "non-admin SetRouter must be Unauthorized; got {err:?}"
+    );
+    assert_eq!(
+        registered_router(deps.as_ref()),
+        None,
+        "a rejected SetRouter must not mutate the stored router"
+    );
+
+    // The admin registers the router; the query now returns it.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin(), &[]),
+        ExecuteMsg::SetRouter {
+            router: router.to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        registered_router(deps.as_ref()),
+        Some(router),
+        "after SetRouter the query must return the registered router"
     );
 }

@@ -115,7 +115,7 @@ fn test_pause_unpause() {
             },
             amount: Uint128::new(100),
         },
-        belief_price: None,
+        belief_price: Some(Decimal::percent(200)),
         max_spread: None,
         allow_high_max_spread: None,
         to: None,

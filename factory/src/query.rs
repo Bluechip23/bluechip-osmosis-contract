@@ -257,6 +257,13 @@ pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) ->
                 usd_quote_denom: cfg.usd_quote_denom,
             })
         }
+        FactoryQueryMsg::RegisteredRouter {} => {
+            // F-1 — pools call this on a null-belief SimpleSwap to check
+            // whether the caller is the exempt router. `None` when unset.
+            to_json_binary(&pool_factory_interfaces::RegisteredRouterResponse {
+                router: crate::state::ROUTER_ADDRESS.may_load(deps.storage)?,
+            })
+        }
     }
 }
 

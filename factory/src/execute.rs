@@ -120,6 +120,7 @@ pub fn execute(
             execute_propose_factory_config_update(deps, env, info, config)
         }
         ExecuteMsg::UpdateConfig {} => execute_update_factory_config(deps, env, info),
+        ExecuteMsg::SetRouter { router } => execute_set_router(deps, info, router),
         ExecuteMsg::CancelConfigUpdate {} => execute_cancel_factory_config_update(deps, info),
         ExecuteMsg::Create {
             pool_msg,
@@ -273,6 +274,24 @@ pub fn pool_creation_reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Respon
         FINALIZE_POOL => finalize_pool(deps, env, msg, pool_id),
         _ => Err(ContractError::UnknownReplyId { id: msg.id }),
     }
+}
+
+/// F-1 — register/rotate the multi-hop router address (admin-only). Stored
+/// so pools can exempt the router from the SimpleSwap belief_price
+/// requirement. Not fund-touching; a wrong value only makes the real
+/// router's null-belief swaps fail until corrected, so this is a direct
+/// admin op rather than a 48h-timelocked config change.
+pub fn execute_set_router(
+    deps: DepsMut,
+    info: MessageInfo,
+    router: String,
+) -> Result<Response, ContractError> {
+    ensure_admin(deps.as_ref(), &info)?;
+    let router_addr = deps.api.addr_validate(&router)?;
+    crate::state::ROUTER_ADDRESS.save(deps.storage, &router_addr)?;
+    Ok(Response::new()
+        .add_attribute("action", "set_router")
+        .add_attribute("router", router_addr))
 }
 
 /// Admin gate used by every admin-only handler in this module's submodules.

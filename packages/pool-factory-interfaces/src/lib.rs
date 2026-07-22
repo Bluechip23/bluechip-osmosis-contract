@@ -87,6 +87,16 @@ pub enum FactoryQueryMsg {
     /// on the same response so it needs no separate fail-soft fallback.
     #[returns(CommitContextResponse)]
     CommitContext { amount: Uint128 },
+
+    /// Returns the factory's registered multi-hop router address, if any
+    /// (F-1). Pools query this on a `SimpleSwap` that omits `belief_price`:
+    /// direct callers must supply a `belief_price` (the on-chain estimate
+    /// floor is not sandwich-resistant), but the registered router is
+    /// exempt because it enforces an end-to-end `minimum_receive` across the
+    /// whole route. `None` ⇒ no router registered, so EVERY null-belief
+    /// SimpleSwap is rejected (fail-safe toward requiring the price bound).
+    #[returns(RegisteredRouterResponse)]
+    RegisteredRouter {},
 }
 
 /// Top-level envelope matching the factory's
@@ -119,6 +129,13 @@ pub struct EmergencyWithdrawDelayResponse {
 #[cw_serde]
 pub struct BluechipWalletResponse {
     pub address: Addr,
+}
+
+/// Response to `RegisteredRouter` (F-1). `router` is `None` when no router
+/// has been registered on the factory yet.
+#[cw_serde]
+pub struct RegisteredRouterResponse {
+    pub router: Option<Addr>,
 }
 
 /// Response to `CommitContext`: the `ConvertNativeToUsd` valuation

@@ -30,6 +30,12 @@ use crate::state::{
 /// denom is deterministic.
 pub const CREATOR_DENOM: &str = "factory/pool_contract/ucreator";
 
+/// F-1 — the router address the test mock queriers report from
+/// `RegisteredRouter`. A `SimpleSwap` with no `belief_price` is only
+/// accepted from this sender; tests exercising the router (null-belief)
+/// swap path send as this address.
+pub const MOCK_REGISTERED_ROUTER: &str = "registered_router";
+
 /// A `mock_dependencies` whose contract bank balance is seeded with
 /// `balances`.
 pub fn mock_dependencies_with_balance(
@@ -174,6 +180,18 @@ pub fn with_factory_oracle(
                         amount: usd_at_rate(amount),
                         rate_used: native_to_usd_rate,
                         timestamp: 0,
+                    };
+                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
+                }
+                Ok(WrapperProbe::PoolFactoryQuery(
+                    pool_factory_interfaces::FactoryQueryMsg::RegisteredRouter {},
+                )) => {
+                    // F-1 — answer the SimpleSwap router-exemption probe. The
+                    // fixture registers a well-known router address so tests
+                    // that exercise the null-belief (router) path can send as
+                    // `MOCK_REGISTERED_ROUTER`.
+                    let resp = pool_factory_interfaces::RegisteredRouterResponse {
+                        router: Some(Addr::unchecked(MOCK_REGISTERED_ROUTER)),
                     };
                     return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
                 }
