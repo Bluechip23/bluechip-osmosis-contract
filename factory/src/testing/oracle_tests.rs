@@ -264,6 +264,54 @@ fn routed_pair_normalization() {
     assert!(twap_pair_to_rate("2.0", "0", 6).is_err());
 }
 
+/// Discriminating: the composite must produce the RIGHT non-unit value, not
+/// just pass on cases that happen to equal $1.00 (which a "return constant" bug
+/// would also pass). Asserts several distinct products.
+#[test]
+fn routed_pair_produces_correct_non_unit_rates() {
+    // 3.0 × 0.5 = 1.5 → $1.50
+    assert_eq!(twap_pair_to_rate("3.0", "0.5", 6).unwrap(), Uint128::new(1_500_000));
+    // 0.5 × 0.5 = 0.25 → $0.25
+    assert_eq!(twap_pair_to_rate("0.5", "0.5", 6).unwrap(), Uint128::new(250_000));
+    // 8.0 × 0.25 = 2.0 → $2.00
+    assert_eq!(twap_pair_to_rate("8.0", "0.25", 6).unwrap(), Uint128::new(2_000_000));
+    // Realistic OSMO-priced-in-BTC × BTC-in-USDC: 0.0005 × 1000 = 0.5 → $0.50
+    // (the 8-decimal BTC intermediate cancels — it is not even an input here).
+    assert_eq!(
+        twap_pair_to_rate("0.0005", "1000", 6).unwrap(),
+        Uint128::new(500_000)
+    );
+}
+
+/// A routed source with an identity USD leg (`D2 == 1.0`) must equal the direct
+/// single-pool rate for the same native/quote TWAP — an internal consistency
+/// check between the two code paths.
+#[test]
+fn routed_with_identity_leg_matches_direct() {
+    for d1 in ["2.5", "0.75", "1.0", "9999.0"] {
+        assert_eq!(
+            twap_pair_to_rate(d1, "1.0", 6).unwrap(),
+            twap_dec_to_rate_with_decimals(d1, 6).unwrap(),
+            "routed with identity leg must equal the direct rate for {d1}"
+        );
+    }
+}
+
+/// Integration: a routed source carrying a NON-$1 price flows through the
+/// median correctly. Both sources price OSMO at $2.00 → median $2.00 (a
+/// return-constant bug would yield $1.00 and fail).
+#[test]
+fn routed_integration_carries_non_unit_price() {
+    let mut deps = mock_dependencies(&[]);
+    deps.querier.set_twap_price_for_pool(1, "2.00"); // primary USDC/OSMO, $2.00
+    deps.querier.set_twap_price_for_pool(2, "8.0"); // OSMO/BTC
+    deps.querier.set_twap_price_for_pool(20, "0.25"); // BTC/USDC → 8.0×0.25 = $2.00
+
+    let config = config_with_sources(vec![routed_src(2, "ubtc", 20, "uusdc", 6)], 2, 0);
+    let rate = probe_median_usd_rate(deps.as_ref(), &mock_env(), &config).unwrap();
+    assert_eq!(rate, Uint128::new(2_000_000), "both sources price OSMO at $2.00");
+}
+
 /// A routed source (e.g. OSMO/BTC → BTC/USDC) contributes a USD price. Pool 2
 /// prices native/BTC at 2.0, leg pool 20 prices BTC/USDC at 0.5 → $1.00.
 #[test]
@@ -326,6 +374,46 @@ fn mixed_direct_and_routed_set_medians_to_usd() {
     );
     let rate = probe_median_usd_rate(deps.as_ref(), &mock_env(), &config).unwrap();
     assert_eq!(rate, Uint128::new(1_000_000), "four ~$1 sources median to $1.00");
+}
+
+/// A MANIPULATED routed source (its composite lands far from consensus) is
+/// discredited by the deviation filter just like a direct outlier — proving the
+/// filter operates on the final composite value, not the raw legs.
+#[test]
+fn manipulated_routed_source_is_deviation_filtered() {
+    let mut deps = mock_dependencies(&[]);
+    deps.querier.set_twap_price_for_pool(1, "1.00"); // primary $1
+    deps.querier.set_twap_price_for_pool(2, "1.00"); // direct $1
+    // Routed source manipulated to $8.00 (4.0 × 2.0), well outside a 5% band.
+    deps.querier.set_twap_price_for_pool(3, "4.0");
+    deps.querier.set_twap_price_for_pool(30, "2.0");
+
+    let config = config_with_sources(
+        vec![src(2, "uusdt", 6), routed_src(3, "ubtc", 30, "uusdc", 6)],
+        2,
+        500,
+    );
+    let rate = probe_median_usd_rate(deps.as_ref(), &mock_env(), &config).unwrap();
+    // Provisional median of {1.00, 1.00, 8.00} is 1.00; the $8 routed source is
+    // dropped, survivors {1.00, 1.00} → $1.00.
+    assert_eq!(rate, Uint128::new(1_000_000));
+}
+
+/// An absurd routed composite (huge legs) fails the sanity ceiling and is
+/// discredited rather than mispricing or panicking.
+#[test]
+fn absurd_routed_composite_is_discredited() {
+    // 1e9 × 1e9 = 1e18 → far above the $10k/native ceiling.
+    assert!(twap_pair_to_rate("1000000000", "1000000000", 6).is_err());
+
+    let mut deps = mock_dependencies(&[]);
+    deps.querier.set_twap_price_for_pool(1, "1.00"); // primary healthy
+    deps.querier.set_twap_price_for_pool(2, "1000000000");
+    deps.querier.set_twap_price_for_pool(20, "1000000000");
+    // Only the primary survives; require just 1 → still prices at $1.00.
+    let config = config_with_sources(vec![routed_src(2, "ubtc", 20, "uusdc", 6)], 1, 0);
+    let rate = probe_median_usd_rate(deps.as_ref(), &mock_env(), &config).unwrap();
+    assert_eq!(rate, Uint128::new(1_000_000));
 }
 
 // ---------------------------------------------------------------------------
