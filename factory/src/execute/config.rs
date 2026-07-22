@@ -94,6 +94,47 @@ pub(crate) fn validate_factory_config(
         ))));
     }
 
+    // Multi-pool median-oracle shape validation. The primary source is
+    // covered by the pricing checks above; validate each EXTRA source and the
+    // quorum here so a malformed oracle set fails at propose time rather than
+    // bricking every valuation after the 48h timelock.
+    let total_sources = 1 + config.oracle.extra_sources.len();
+    for (i, s) in config.oracle.extra_sources.iter().enumerate() {
+        if s.pool_id == 0 {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].pool_id must be non-zero",
+                i
+            ))));
+        }
+        if s.quote_denom.trim().is_empty() {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].quote_denom must be non-empty",
+                i
+            ))));
+        }
+        if s.quote_denom == config.bluechip_denom {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].quote_denom must differ from bluechip_denom",
+                i
+            ))));
+        }
+        if s.quote_decimals > 30 {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].quote_decimals {} is implausibly large",
+                i, s.quote_decimals
+            ))));
+        }
+    }
+    if config.oracle.min_valid_sources as usize > total_sources {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "oracle.min_valid_sources {} exceeds the {} configured pricing sources \
+             (1 primary + {} extra)",
+            config.oracle.min_valid_sources,
+            total_sources,
+            config.oracle.extra_sources.len()
+        ))));
+    }
+
     // Live probe of the pricing route. The syntactic checks above
     // cannot tell a typo'd pool id (or a pool missing one of the two
     // denoms, or one too young for the window) from a working route —

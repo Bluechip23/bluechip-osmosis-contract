@@ -56,13 +56,60 @@ this branch:
 | **F-1** | **Fixed** | `SimpleSwap` now rejects a null `belief_price` (`BeliefPriceRequired`) except from the factory-registered router, which enforces an end-to-end `minimum_receive`. New factory `SetRouter` admin op + `RegisteredRouter` query; pool queries it fail-closed. Tests: `direct_simple_swap_requires_belief_price_but_registered_router_is_exempt` (pool), `set_router_is_admin_only_and_query_reflects_it` (factory). |
 | **F-2** | **Accepted** (owner) | Contract design, not a flaw — permanent pre-threshold commitment is intended. No change. (The unroutable-live-fee-denom brick sub-case remains a live-parameter watch item.) |
 | **F-3** | **Fixed** | Pool now enforces a `POOL_RATE_MAX` ($10k/native) ceiling on the factory-delegated rate at the commit boundary. Test: `commit_rejects_oracle_rate_above_pool_ceiling`. |
-| **F-4** | **Accepted** (owner) | The pricing pool is an existing, relatively deep Osmosis pool, so the manipulation cost is high. No change; remains parameter-dependent. |
+| **F-4** | **Accepted + hardened** (owner) | The pricing pool is an existing, relatively deep Osmosis pool, so the manipulation cost is already high. Additionally hardened with an opt-in **multi-pool median oracle** (below) so the valuation no longer depends on any single pool. |
 | **F-5** | **Fixed** | Explicit `ROUTE_IN_PROGRESS` reentrancy guard on `ExecuteMultiHop` (set at route start, cleared by the terminal `AssertReceived`); stale pre-M-03 doc comment corrected. Test: `nested_multi_hop_is_rejected_while_route_in_progress`. |
 
 Full suite after remediation: **creator-pool 159, factory 104, router 23,
 pool-core 8 — 0 failures.**
 
 The original finding write-ups are retained below as the record.
+
+### Multi-pool median oracle (F-4 hardening)
+
+The factory valuation can now read **multiple** Osmosis pools that hold the
+native asset and use the **median** of the ones that pass validation, instead
+of a single OSMO/USDC TWAP. This is the internal-oracle pattern from the
+original `bluechip-contracts`, ported to the x/twap-backed design.
+
+**How it works** (`factory/src/usd_price.rs::probe_median_usd_rate`):
+1. Sources = the primary `(pricing_pool_id, usd_quote_denom)` pool (also the
+   cross-denom fee-swap route) + every `oracle.extra_sources` entry.
+2. Each source's arithmetic TWAP is read over the window and **normalized to a
+   common USD scale** using its `quote_decimals` (so 6-decimal USDC and an
+   18-decimal bridged stable can be compared).
+3. A source is **discredited** (dropped, never fatal) if its query fails
+   (dead / too-young / missing-denom pool) or its rate fails the zero / dust /
+   `RATE_MAX` sanity gates.
+4. Optional **deviation filter** (`max_deviation_bps`): drop any source more
+   than N bps from the provisional median (ejects a partially-manipulated pool
+   that still passed the absolute gate).
+5. **Quorum** (`min_valid_sources`): if too few survive, **fail closed** — no
+   commit is priced — with an error listing why each source was discredited.
+6. Return the **median** of survivors.
+
+**Config** (`FactoryInstantiate.oracle: MultiOracleConfig`, admin-tunable via
+the 48h `ProposeConfigUpdate` flow, `SetRouter`-style live probe validated at
+propose/apply):
+```
+oracle: {
+  extra_sources: [ { pool_id, quote_denom, quote_decimals }, … ],
+  min_valid_sources: <u32>,   // 0 ⇒ 1; recommend a majority of sources
+  max_deviation_bps: <u64>,   // 0 disables; e.g. 500 = ±5%
+}
+```
+Empty `extra_sources` + defaults ⇒ **exactly the legacy single-pool behavior**
+(median of one), so existing deployments are unaffected until they opt in. Pool
+ids / denoms are pluggable later — the logic is fully test-covered
+(`factory/src/testing/oracle_tests.rs`, 10 tests: median, mixed-decimal
+normalization, dead-pool discredit, sanity-ceiling discredit, quorum
+fail-closed, deviation discredit, single-source legacy parity, config
+validation). The mock querier now serves per-pool TWAPs
+(`set_twap_price_for_pool` / `set_twap_error_for_pool`), so you can drive
+testnet-shaped scenarios in unit tests before wiring real pool ids.
+
+**Note:** the median is factory-side; pools receive only the aggregated
+`rate_used`, so no pool-side change was needed, and the cross-denom GAMM-fee
+swap still routes through the single primary `pricing_pool_id`.
 
 ---
 

@@ -42,6 +42,7 @@ fn make_addr(label: &str) -> Addr {
 #[cfg(test)]
 fn create_default_instantiate_msg() -> FactoryInstantiate {
     FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: admin_addr(),
         cw721_nft_contract_id: 58,
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
@@ -108,6 +109,7 @@ fn proper_initialization() {
 
     let the_admin = addr0000();
     let msg = FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: the_admin.clone(),
         cw721_nft_contract_id: 58,
         commit_threshold_limit_usd: Uint128::new(100),
@@ -162,6 +164,7 @@ fn create_pair() {
 
     let the_admin = addr0000();
     let msg = FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: the_admin.clone(),
         cw721_nft_contract_id: 58,
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
@@ -295,6 +298,7 @@ fn test_create_pair_with_custom_params() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: admin_addr(),
         cw721_nft_contract_id: 58,
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
@@ -514,6 +518,7 @@ fn test_complete_pool_creation_flow() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: admin_addr(),
         cw721_nft_contract_id: 58,
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
@@ -654,6 +659,7 @@ fn test_asset() {
 #[test]
 fn test_config() {
     let config = FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: Addr::unchecked("admin1..."),
         cw721_nft_contract_id: 58,
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
@@ -695,6 +701,7 @@ fn test_reply_handling() {
 
     let the_admin = addr0000();
     let msg = FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: the_admin.clone(),
         cw721_nft_contract_id: 58,
         commit_threshold_limit_usd: Uint128::new(100),
@@ -1332,6 +1339,7 @@ fn create_pair_sets_marketing_admin_to_creator() {
 
     let the_admin = addr0000();
     let msg = FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: the_admin.clone(),
         cw721_nft_contract_id: 58,
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),

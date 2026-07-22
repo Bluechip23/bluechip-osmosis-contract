@@ -235,6 +235,60 @@ pub struct FactoryInstantiate {
     /// deployments behave identically until the admin proposes an update.
     #[serde(default = "default_emergency_withdraw_delay_seconds")]
     pub emergency_withdraw_delay_seconds: u64,
+
+    /// Multi-pool median oracle configuration. The primary pricing source is
+    /// always `(pricing_pool_id, usd_quote_denom)` above (also the pool used
+    /// for the cross-denom GAMM-fee swap); `oracle.extra_sources` adds MORE
+    /// Osmosis pools that hold `bluechip_denom`, so the USD valuation is the
+    /// MEDIAN of all sources that pass validation rather than a single pool's
+    /// TWAP. Empty extras + default thresholds reproduce the legacy
+    /// single-pool behavior exactly (median of one). See
+    /// [`crate::usd_price::probe_median_usd_rate`].
+    ///
+    /// `#[serde(default)]` lets pre-this-field factory records deserialize
+    /// with an empty oracle set (single-pool behavior).
+    #[serde(default)]
+    pub oracle: MultiOracleConfig,
+}
+
+/// One additional native→USD pricing source: an Osmosis pool whose
+/// arithmetic TWAP prices `bluechip_denom` against `quote_denom`.
+///
+/// `quote_decimals` is the on-chain decimal count of `quote_denom` and is
+/// load-bearing: the x/twap price is `quote_raw / base_raw`, so a quote denom
+/// that does not carry 6 decimals must be normalized before it can be
+/// compared/medianed against the 6-decimal USD convention. Most Osmosis
+/// USD stables (Noble USDC, axlUSDC, USDT) are 6-decimal; an 18-decimal
+/// bridged stable (e.g. some DAI representations) must declare `18` here or
+/// its rate would read ~1e12× too high and be discredited by the sanity
+/// ceiling.
+#[cw_serde]
+#[derive(Default)]
+pub struct PricingSource {
+    pub pool_id: u64,
+    pub quote_denom: String,
+    pub quote_decimals: u32,
+}
+
+/// Median-oracle thresholds. All fields default to the legacy single-pool
+/// semantics (no extra sources, quorum of 1, no deviation filter).
+#[cw_serde]
+#[derive(Default)]
+pub struct MultiOracleConfig {
+    /// Additional pricing sources beyond the primary
+    /// `(pricing_pool_id, usd_quote_denom)`.
+    pub extra_sources: Vec<PricingSource>,
+    /// Minimum number of sources (primary + extras) that must pass validation
+    /// for a median to be produced. `0` is treated as `1`. If fewer sources
+    /// validate, the whole valuation fails closed (no commit is priced) — the
+    /// same fail-closed posture the single-pool path already has.
+    pub min_valid_sources: u32,
+    /// Maximum relative deviation, in basis points, a source may have from the
+    /// provisional median before it is DISCREDITED (dropped) and the median
+    /// recomputed from the survivors. `0` disables the deviation filter (the
+    /// median alone still absorbs a minority of manipulated/outlier pools).
+    /// Example: `500` = drop any source more than 5% from the median.
+    pub max_deviation_bps: u64,
 }
 
 pub const EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS: u64 = 60;

@@ -35,6 +35,7 @@ const CREATION_FEE: u128 = 1_000_000;
 
 fn default_factory_config() -> FactoryInstantiate {
     FactoryInstantiate {
+        oracle: Default::default(),
         cw721_nft_contract_id: 58,
         factory_admin_address: admin(),
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),

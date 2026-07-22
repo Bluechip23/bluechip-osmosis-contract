@@ -105,6 +105,7 @@ fn factory_config_with_gamm_fee(
     gamm_pool_creation_fee: Coin,
 ) -> FactoryInstantiate {
     FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: cosmwasm_std::Addr::unchecked(admin),
         commit_threshold_limit_usd: Uint128::new(THRESHOLD_USD),
         // Phase-2 doesn't instantiate a CW20 or NFT; these code-id fields are
