@@ -98,15 +98,19 @@ weigh before launch.
   swaps from factory availability, store the router address on the pool instead
   (more instantiate/config plumbing, no per-swap query).
 
-### R2-C — `SetRouter` is not timelocked (Low; already surfaced)
+### R2-C — router registration is now 48h-timelocked — **FIXED**
 
-- **Where:** `factory/src/execute.rs::execute_set_router`.
-- **What:** a direct admin op (no 48h timelock). A compromised admin key can
-  repoint the router exemption. Blast radius is bounded: the exemption only lets
-  the named address *skip the belief gate for its own swaps* (it cannot steal
-  from others), and a wrong value only breaks routing liveness until re-set. You
-  already have this; flagged again for completeness. If you'd rather it be
-  observable for 48h like other config, move it behind the timelock.
+- **Where:** `factory/src/execute.rs` (`execute_propose_router` /
+  `execute_apply_router` / `execute_cancel_router`), `PENDING_ROUTER` state.
+- **What changed:** the direct `SetRouter` admin op was replaced with the
+  standard `ProposeRouter → wait 48h → ApplyRouter` (plus `CancelRouter`) flow,
+  mirroring the factory-config timelock. A change to who is exempt from the
+  SimpleSwap belief gate is now observable for the full window, and a
+  compromised admin key cannot repoint it instantly. `RegisteredRouter` reflects
+  only the APPLIED value.
+- **Test:** `factory/src/testing/coverage_gap_tests.rs::router_registration_is_admin_only_and_timelocked`
+  (non-admin rejected; proposed-but-unapplied has no effect; apply-before-window
+  rejected; apply-after-window takes effect).
 
 ### R2-D — The median oracle assumes an honest MAJORITY of configured pools (Info; inherent to median oracles)
 

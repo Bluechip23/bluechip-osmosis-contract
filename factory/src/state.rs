@@ -29,7 +29,8 @@ pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config")
 /// `belief_price` requirement on a `SimpleSwap`: the router enforces an
 /// end-to-end `minimum_receive`, so it is the one caller allowed to swap
 /// without a per-call price bound. Set/rotated by the admin via
-/// `ExecuteMsg::SetRouter`. Unset ⇒ pools reject every null-belief swap.
+/// `ExecuteMsg::ProposeRouter` → 48h → `ApplyRouter`. Unset ⇒ pools reject
+/// every null-belief swap.
 pub const ROUTER_ADDRESS: Item<Addr> = Item::new("router_address");
 // In-flight pool creations keep no storage state: the creation context
 // (`pool_struct::TempPoolCreation`) rides the SubMsg payload through the
@@ -313,6 +314,16 @@ pub fn default_gamm_pool_creation_fee() -> Coin {
 #[cw_serde]
 pub struct PendingConfig {
     pub new_config: FactoryInstantiate,
+    pub effective_after: Timestamp,
+}
+
+/// F-1 / R2-C — pending (48h-timelocked) router-address change awaiting
+/// `effective_after`. Cleared by `ApplyRouter` (apply) or `CancelRouter`.
+pub const PENDING_ROUTER: Item<PendingRouter> = Item::new("pending_router");
+
+#[cw_serde]
+pub struct PendingRouter {
+    pub router: Addr,
     pub effective_after: Timestamp,
 }
 

@@ -182,7 +182,7 @@ fn create_pool_exact_pay_emits_no_refund() {
 }
 
 // ---------------------------------------------------------------------------
-// F-1 — router registration (SetRouter + RegisteredRouter query)
+// F-1 / R2-C — router registration (ProposeRouter/ApplyRouter + RegisteredRouter)
 // ---------------------------------------------------------------------------
 
 fn registered_router(deps: cosmwasm_std::Deps) -> Option<cosmwasm_std::Addr> {
@@ -195,11 +195,15 @@ fn registered_router(deps: cosmwasm_std::Deps) -> Option<cosmwasm_std::Addr> {
     from_json::<RegisteredRouterResponse>(&bin).unwrap().router
 }
 
-/// `SetRouter` is admin-only, and the `RegisteredRouter` query reflects the
-/// stored value (None before any set, the address after). This is the exact
-/// pair the pool's SimpleSwap belief-price exemption depends on (F-1).
+/// R2-C — registering a router is admin-only AND 48h-timelocked
+/// (`ProposeRouter` → wait → `ApplyRouter`). The `RegisteredRouter` query
+/// reflects only the APPLIED value; a pending proposal does not take effect
+/// until the timelock elapses. This is the exact pair the pool's SimpleSwap
+/// belief-price exemption depends on (F-1).
 #[test]
-fn set_router_is_admin_only_and_query_reflects_it() {
+fn router_registration_is_admin_only_and_timelocked() {
+    use crate::state::ADMIN_TIMELOCK_SECONDS;
+
     let mut deps = fresh_factory();
     let router = make_addr("the_router");
 
@@ -207,39 +211,63 @@ fn set_router_is_admin_only_and_query_reflects_it() {
     // null-belief SimpleSwap (fail-safe).
     assert_eq!(registered_router(deps.as_ref()), None);
 
-    // A non-admin cannot register a router.
+    // A non-admin cannot propose a router.
     let err = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&make_addr("attacker"), &[]),
-        ExecuteMsg::SetRouter {
+        ExecuteMsg::ProposeRouter {
             router: router.to_string(),
         },
     )
     .unwrap_err();
     assert!(
         matches!(err, ContractError::Unauthorized {}),
-        "non-admin SetRouter must be Unauthorized; got {err:?}"
-    );
-    assert_eq!(
-        registered_router(deps.as_ref()),
-        None,
-        "a rejected SetRouter must not mutate the stored router"
+        "non-admin ProposeRouter must be Unauthorized; got {err:?}"
     );
 
-    // The admin registers the router; the query now returns it.
+    // Admin proposes — but the query STILL returns None until it is applied.
     execute(
         deps.as_mut(),
         mock_env(),
         message_info(&admin(), &[]),
-        ExecuteMsg::SetRouter {
+        ExecuteMsg::ProposeRouter {
             router: router.to_string(),
         },
     )
     .unwrap();
     assert_eq!(
         registered_router(deps.as_ref()),
+        None,
+        "a proposed-but-unapplied router must not take effect"
+    );
+
+    // Applying before the timelock elapses is rejected.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin(), &[]),
+        ExecuteMsg::ApplyRouter {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::TimelockNotExpired { .. }),
+        "ApplyRouter before the timelock must fail; got {err:?}"
+    );
+
+    // After the 48h window, apply succeeds and the query returns the router.
+    let mut later = mock_env();
+    later.block.time = later.block.time.plus_seconds(ADMIN_TIMELOCK_SECONDS + 1);
+    execute(
+        deps.as_mut(),
+        later,
+        message_info(&admin(), &[]),
+        ExecuteMsg::ApplyRouter {},
+    )
+    .unwrap();
+    assert_eq!(
+        registered_router(deps.as_ref()),
         Some(router),
-        "after SetRouter the query must return the registered router"
+        "after ApplyRouter the query must return the registered router"
     );
 }
