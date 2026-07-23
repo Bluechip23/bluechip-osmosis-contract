@@ -29,7 +29,8 @@ pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config")
 /// `belief_price` requirement on a `SimpleSwap`: the router enforces an
 /// end-to-end `minimum_receive`, so it is the one caller allowed to swap
 /// without a per-call price bound. Set/rotated by the admin via
-/// `ExecuteMsg::SetRouter`. Unset ⇒ pools reject every null-belief swap.
+/// `ExecuteMsg::ProposeRouter` → 48h → `ApplyRouter`. Unset ⇒ pools reject
+/// every null-belief swap.
 pub const ROUTER_ADDRESS: Item<Addr> = Item::new("router_address");
 // In-flight pool creations keep no storage state: the creation context
 // (`pool_struct::TempPoolCreation`) rides the SubMsg payload through the
@@ -235,6 +236,87 @@ pub struct FactoryInstantiate {
     /// deployments behave identically until the admin proposes an update.
     #[serde(default = "default_emergency_withdraw_delay_seconds")]
     pub emergency_withdraw_delay_seconds: u64,
+
+    /// Multi-pool median oracle configuration. The primary pricing source is
+    /// always `(pricing_pool_id, usd_quote_denom)` above (also the pool used
+    /// for the cross-denom GAMM-fee swap); `oracle.extra_sources` adds MORE
+    /// Osmosis pools that hold `bluechip_denom`, so the USD valuation is the
+    /// MEDIAN of all sources that pass validation rather than a single pool's
+    /// TWAP. Empty extras + default thresholds reproduce the legacy
+    /// single-pool behavior exactly (median of one). See
+    /// [`crate::usd_price::probe_median_usd_rate`].
+    ///
+    /// `#[serde(default)]` lets pre-this-field factory records deserialize
+    /// with an empty oracle set (single-pool behavior).
+    #[serde(default)]
+    pub oracle: MultiOracleConfig,
+}
+
+/// One additional native→USD pricing source: an Osmosis pool whose
+/// arithmetic TWAP prices `bluechip_denom` against `quote_denom`.
+///
+/// `quote_decimals` is the on-chain decimal count of `quote_denom` and is
+/// load-bearing: the x/twap price is `quote_raw / base_raw`, so a quote denom
+/// that does not carry 6 decimals must be normalized before it can be
+/// compared/medianed against the 6-decimal USD convention. Most Osmosis
+/// USD stables (Noble USDC, axlUSDC, USDT) are 6-decimal; an 18-decimal
+/// bridged stable (e.g. some DAI representations) must declare `18` here or
+/// its rate would read ~1e12× too high and be discredited by the sanity
+/// ceiling.
+#[cw_serde]
+#[derive(Default)]
+pub struct PricingSource {
+    pub pool_id: u64,
+    pub quote_denom: String,
+    pub quote_decimals: u32,
+    /// Optional second hop that converts a NON-USD quote into USD.
+    ///
+    /// When the source pool prices the native asset against a volatile token
+    /// (e.g. an OSMO/BTC or OSMO/ATOM pool) rather than a USD stable, set this
+    /// to a pool that trades `quote_denom` against a USD stable
+    /// (`quote_denom`/USDC). The valuation becomes
+    /// `TWAP(native/quote) × TWAP(quote/usd)` = native priced in USD. `None`
+    /// ⇒ the source is DIRECT: `quote_denom` is itself the USD stable (the
+    /// legacy behavior). In the routed case `quote_decimals` is unused (the
+    /// intermediate token's decimals cancel in the product); only
+    /// `usd_leg.usd_decimals` matters for normalization.
+    #[serde(default)]
+    pub usd_leg: Option<UsdLeg>,
+}
+
+/// Second leg of a routed [`PricingSource`]: a pool that prices the source's
+/// `quote_denom` in a USD stable.
+#[cw_serde]
+#[derive(Default)]
+pub struct UsdLeg {
+    /// Pool that trades the source's `quote_denom` against `usd_denom`.
+    pub pool_id: u64,
+    /// The USD-stable denom the intermediate is priced in (e.g. Noble USDC).
+    pub usd_denom: String,
+    /// Decimals of `usd_denom` (6 for USDC/USDT). Load-bearing for
+    /// normalization to the micro-USD-per-micro-native convention.
+    pub usd_decimals: u32,
+}
+
+/// Median-oracle thresholds. All fields default to the legacy single-pool
+/// semantics (no extra sources, quorum of 1, no deviation filter).
+#[cw_serde]
+#[derive(Default)]
+pub struct MultiOracleConfig {
+    /// Additional pricing sources beyond the primary
+    /// `(pricing_pool_id, usd_quote_denom)`.
+    pub extra_sources: Vec<PricingSource>,
+    /// Minimum number of sources (primary + extras) that must pass validation
+    /// for a median to be produced. `0` is treated as `1`. If fewer sources
+    /// validate, the whole valuation fails closed (no commit is priced) — the
+    /// same fail-closed posture the single-pool path already has.
+    pub min_valid_sources: u32,
+    /// Maximum relative deviation, in basis points, a source may have from the
+    /// provisional median before it is DISCREDITED (dropped) and the median
+    /// recomputed from the survivors. `0` disables the deviation filter (the
+    /// median alone still absorbs a minority of manipulated/outlier pools).
+    /// Example: `500` = drop any source more than 5% from the median.
+    pub max_deviation_bps: u64,
 }
 
 pub const EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS: u64 = 60;
@@ -259,6 +341,16 @@ pub fn default_gamm_pool_creation_fee() -> Coin {
 #[cw_serde]
 pub struct PendingConfig {
     pub new_config: FactoryInstantiate,
+    pub effective_after: Timestamp,
+}
+
+/// F-1 / R2-C — pending (48h-timelocked) router-address change awaiting
+/// `effective_after`. Cleared by `ApplyRouter` (apply) or `CancelRouter`.
+pub const PENDING_ROUTER: Item<PendingRouter> = Item::new("pending_router");
+
+#[cw_serde]
+pub struct PendingRouter {
+    pub router: Addr,
     pub effective_after: Timestamp,
 }
 

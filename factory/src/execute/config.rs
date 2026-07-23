@@ -94,6 +94,99 @@ pub(crate) fn validate_factory_config(
         ))));
     }
 
+    // Multi-pool median-oracle shape validation. The primary source is
+    // covered by the pricing checks above; validate each EXTRA source and the
+    // quorum here so a malformed oracle set fails at propose time rather than
+    // bricking every valuation after the 48h timelock.
+    let total_sources = 1 + config.oracle.extra_sources.len();
+    for (i, s) in config.oracle.extra_sources.iter().enumerate() {
+        if s.pool_id == 0 {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].pool_id must be non-zero",
+                i
+            ))));
+        }
+        if s.quote_denom.trim().is_empty() {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].quote_denom must be non-empty",
+                i
+            ))));
+        }
+        if s.quote_denom == config.bluechip_denom {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].quote_denom must differ from bluechip_denom",
+                i
+            ))));
+        }
+        if s.quote_decimals > 30 {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].quote_decimals {} is implausibly large",
+                i, s.quote_decimals
+            ))));
+        }
+        // Routed source: validate the quote->USD leg. A `None` leg means the
+        // quote denom is itself the USD stable (direct source).
+        if let Some(leg) = &s.usd_leg {
+            if leg.pool_id == 0 {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.pool_id must be non-zero",
+                    i
+                ))));
+            }
+            if leg.usd_denom.trim().is_empty() {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.usd_denom must be non-empty",
+                    i
+                ))));
+            }
+            if leg.usd_denom == s.quote_denom {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.usd_denom must differ from the source's \
+                     quote_denom (the leg must actually convert the intermediate to USD)",
+                    i
+                ))));
+            }
+            if leg.usd_denom == config.bluechip_denom {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.usd_denom must differ from bluechip_denom",
+                    i
+                ))));
+            }
+            if leg.usd_decimals > 30 {
+                return Err(ContractError::Std(StdError::generic_err(format!(
+                    "oracle.extra_sources[{}].usd_leg.usd_decimals {} is implausibly large",
+                    i, leg.usd_decimals
+                ))));
+            }
+        }
+    }
+    // Reject duplicate pool ids across the whole source set (primary + extras).
+    // The median's manipulation resistance rests on ONE independent vote per
+    // pool; letting the same pool appear twice would give a manipulated pool
+    // multiple correlated votes and skew the median toward it. A multi-asset
+    // pool that could price against several denoms must still be listed once.
+    let mut seen_pool_ids = std::collections::HashSet::new();
+    seen_pool_ids.insert(config.pricing_pool_id);
+    for (i, s) in config.oracle.extra_sources.iter().enumerate() {
+        if !seen_pool_ids.insert(s.pool_id) {
+            return Err(ContractError::Std(StdError::generic_err(format!(
+                "oracle.extra_sources[{}].pool_id {} is a duplicate — each pricing pool may \
+                 appear only once (incl. the primary pricing_pool_id) so it gets one vote in \
+                 the median",
+                i, s.pool_id
+            ))));
+        }
+    }
+    if config.oracle.min_valid_sources as usize > total_sources {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "oracle.min_valid_sources {} exceeds the {} configured pricing sources \
+             (1 primary + {} extra)",
+            config.oracle.min_valid_sources,
+            total_sources,
+            config.oracle.extra_sources.len()
+        ))));
+    }
+
     // Live probe of the pricing route. The syntactic checks above
     // cannot tell a typo'd pool id (or a pool missing one of the two
     // denoms, or one too young for the window) from a working route —

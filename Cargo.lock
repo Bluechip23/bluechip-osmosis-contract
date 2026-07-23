@@ -678,6 +678,7 @@ dependencies = [
  "cw20",
  "osmosis-std",
  "pool-factory-interfaces",
+ "prost 0.13.5",
  "semver",
  "serde",
  "sha2",

@@ -73,6 +73,7 @@ fn test_propose_and_execute_update_config() {
     let mut deps = mock_dependencies_2(&[]);
     let the_admin = make_addr("addr0000");
     let msg = FactoryInstantiate {
+        oracle: Default::default(),
         cw721_nft_contract_id: 58,
         factory_admin_address: the_admin.clone(),
         commit_threshold_limit_usd: Uint128::new(100),
@@ -103,6 +104,7 @@ fn test_propose_and_execute_update_config() {
 
     let unauthorized_info = message_info(&Addr::unchecked("unauthorized"), &[]);
     let new_config = FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: the_admin.clone(),
         ..msg.clone()
     };
@@ -918,6 +920,7 @@ fn setup_factory_custom(deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQueri
 
 fn default_factory_instantiate_msg() -> FactoryInstantiate {
     FactoryInstantiate {
+        oracle: Default::default(),
         factory_admin_address: admin_addr(),
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,

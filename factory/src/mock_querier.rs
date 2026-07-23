@@ -5,8 +5,11 @@ use cosmwasm_std::{
     from_json, to_json_binary, Addr, Coin, Empty, OwnedDeps, Querier, QuerierResult, QueryRequest,
     SystemError, SystemResult, WasmQuery,
 };
-use osmosis_std::types::osmosis::twap::v1beta1::ArithmeticTwapToNowResponse;
+use osmosis_std::types::osmosis::twap::v1beta1::{
+    ArithmeticTwapToNowRequest, ArithmeticTwapToNowResponse,
+};
 use pool_factory_interfaces::{IsPausedResponse, PoolQueryMsg, PoolStateResponseForFactory};
+use prost::Message;
 
 use crate::query::QueryMsg;
 
@@ -47,8 +50,13 @@ pub struct WasmMockQuerier {
     // Result served for the x/twap Stargate query: Ok(dec string) is
     // returned as the arithmetic TWAP; Err(reason) makes the query fail
     // the way a typo'd pricing_pool_id / missing denom / too-young pool
-    // does on-chain. Defaults to $1.00.
+    // does on-chain. Defaults to $1.00. Used for every pool id that has no
+    // per-pool override in `twap_by_pool`.
     pub twap_result: Result<String, String>,
+    // Per-pool-id x/twap overrides for the multi-pool median oracle. The
+    // Stargate handler decodes the request's `pool_id` and returns the
+    // matching entry here if present, else falls back to `twap_result`.
+    pub twap_by_pool: std::collections::HashMap<u64, Result<String, String>>,
 }
 
 impl Querier for WasmMockQuerier {
@@ -73,8 +81,14 @@ impl WasmMockQuerier {
     #[allow(deprecated)]
     pub fn handle_query(&self, request: &QueryRequest<Empty>) -> QuerierResult {
         match &request {
-            QueryRequest::Stargate { path, .. } if path == TWAP_QUERY_PATH => {
-                match &self.twap_result {
+            QueryRequest::Stargate { path, data } if path == TWAP_QUERY_PATH => {
+                // Decode the request's pool_id so per-pool overrides can drive
+                // the multi-pool median oracle; fall back to the global result.
+                let result = ArithmeticTwapToNowRequest::decode(data.as_slice())
+                    .ok()
+                    .and_then(|req| self.twap_by_pool.get(&req.pool_id))
+                    .unwrap_or(&self.twap_result);
+                match result {
                     Ok(dec) => SystemResult::Ok(
                         to_json_binary(&ArithmeticTwapToNowResponse {
                             arithmetic_twap: dec.clone(),
@@ -163,7 +177,21 @@ impl WasmMockQuerier {
             query_error_pools: std::collections::HashSet::new(),
             pool_state_overrides: std::collections::HashMap::new(),
             twap_result: Ok(DEFAULT_MOCK_TWAP.to_string()),
+            twap_by_pool: std::collections::HashMap::new(),
         }
+    }
+
+    /// Serve `dec` as the x/twap price for a SPECIFIC pool id (multi-pool
+    /// median oracle). Overrides the global `twap_result` for that pool only.
+    pub fn set_twap_price_for_pool(&mut self, pool_id: u64, dec: &str) {
+        self.twap_by_pool.insert(pool_id, Ok(dec.to_string()));
+    }
+
+    /// Make the x/twap query for a SPECIFIC pool id fail (models a dead /
+    /// too-young / missing-denom source that the median oracle must discredit).
+    pub fn set_twap_error_for_pool(&mut self, pool_id: u64, reason: &str) {
+        self.twap_by_pool
+            .insert(pool_id, Err(reason.to_string()));
     }
 
     /// Serve `dec` (an 18-decimal Dec string, quote per base) as the

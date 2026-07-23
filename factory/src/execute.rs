@@ -120,7 +120,9 @@ pub fn execute(
             execute_propose_factory_config_update(deps, env, info, config)
         }
         ExecuteMsg::UpdateConfig {} => execute_update_factory_config(deps, env, info),
-        ExecuteMsg::SetRouter { router } => execute_set_router(deps, info, router),
+        ExecuteMsg::ProposeRouter { router } => execute_propose_router(deps, env, info, router),
+        ExecuteMsg::ApplyRouter {} => execute_apply_router(deps, env, info),
+        ExecuteMsg::CancelRouter {} => execute_cancel_router(deps, info),
         ExecuteMsg::CancelConfigUpdate {} => execute_cancel_factory_config_update(deps, info),
         ExecuteMsg::Create {
             pool_msg,
@@ -276,22 +278,74 @@ pub fn pool_creation_reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Respon
     }
 }
 
-/// F-1 — register/rotate the multi-hop router address (admin-only). Stored
-/// so pools can exempt the router from the SimpleSwap belief_price
-/// requirement. Not fund-touching; a wrong value only makes the real
-/// router's null-belief swaps fail until corrected, so this is a direct
-/// admin op rather than a 48h-timelocked config change.
-pub fn execute_set_router(
+/// F-1 / R2-C — propose a router-address change (admin-only), starting the
+/// standard 48h timelock. Rejects when a proposal is already pending so a
+/// watcher polling `PENDING_ROUTER` always sees an explicit `CancelRouter`
+/// before a replacement lands (mirrors the factory-config propose flow).
+pub fn execute_propose_router(
     deps: DepsMut,
+    env: Env,
     info: MessageInfo,
     router: String,
 ) -> Result<Response, ContractError> {
     ensure_admin(deps.as_ref(), &info)?;
+    if crate::state::PENDING_ROUTER.may_load(deps.storage)?.is_some() {
+        return Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
+            "A router update is already pending. Cancel it first via CancelRouter.",
+        )));
+    }
     let router_addr = deps.api.addr_validate(&router)?;
-    crate::state::ROUTER_ADDRESS.save(deps.storage, &router_addr)?;
+    let effective_after = env
+        .block
+        .time
+        .plus_seconds(crate::state::ADMIN_TIMELOCK_SECONDS);
+    crate::state::PENDING_ROUTER.save(
+        deps.storage,
+        &crate::state::PendingRouter {
+            router: router_addr.clone(),
+            effective_after,
+        },
+    )?;
     Ok(Response::new()
-        .add_attribute("action", "set_router")
-        .add_attribute("router", router_addr))
+        .add_attribute("action", "propose_router")
+        .add_attribute("router", router_addr)
+        .add_attribute("effective_after", effective_after.to_string()))
+}
+
+/// Apply a pending router change once the timelock has elapsed (admin-only).
+pub fn execute_apply_router(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    ensure_admin(deps.as_ref(), &info)?;
+    let pending = crate::state::PENDING_ROUTER
+        .may_load(deps.storage)?
+        .ok_or_else(|| {
+            ContractError::Std(cosmwasm_std::StdError::generic_err(
+                "No pending router update; call ProposeRouter first",
+            ))
+        })?;
+    if env.block.time < pending.effective_after {
+        return Err(ContractError::TimelockNotExpired {
+            effective_after: pending.effective_after,
+        });
+    }
+    crate::state::ROUTER_ADDRESS.save(deps.storage, &pending.router)?;
+    crate::state::PENDING_ROUTER.remove(deps.storage);
+    Ok(Response::new()
+        .add_attribute("action", "apply_router")
+        .add_attribute("router", pending.router))
+}
+
+/// Cancel a pending router change (admin-only).
+pub fn execute_cancel_router(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    ensure_admin(deps.as_ref(), &info)?;
+    crate::state::PENDING_ROUTER.remove(deps.storage);
+    Ok(Response::new().add_attribute("action", "cancel_router"))
 }
 
 /// Admin gate used by every admin-only handler in this module's submodules.
