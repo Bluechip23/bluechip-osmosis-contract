@@ -43,7 +43,6 @@ fn mock_deps_with_querier(
 
 fn default_factory_config() -> FactoryInstantiate {
     FactoryInstantiate {
-        oracle: Default::default(),
         cw721_nft_contract_id: 58,
         factory_admin_address: admin_addr(),
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
@@ -57,7 +56,6 @@ fn default_factory_config() -> FactoryInstantiate {
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
-        twap_window_seconds: 600,
         pool_creation_fee: Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -65,6 +63,10 @@ fn default_factory_config() -> FactoryInstantiate {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
+            pyth_contract_addr: "pyth_oracle".to_string(),
+            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
+            max_pyth_staleness_seconds: 300,
+            pyth_conf_threshold_bps: 200,
     }
 }
 
@@ -348,6 +350,11 @@ fn test_config_update_before_timelock_fails() {
         .block
         .time
         .plus_seconds(crate::state::ADMIN_TIMELOCK_SECONDS + 1);
+    // Refresh the mock Pyth feed relative to the advanced apply-time block
+    // so the apply re-probe isn't stale (this test exercises the timelock,
+    // not oracle staleness).
+    deps.querier
+        .set_pyth_publish_time(env.block.time.seconds() - 30);
     let res = execute(deps.as_mut(), env, admin_info, update_msg).unwrap();
     assert!(res
         .attributes

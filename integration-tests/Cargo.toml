@@ -34,4 +34,6 @@ prost = "0.13"
 # libs on the host.
 factory = { path = "../factory", features = ["library"] }
 creator-pool = { path = "../creator-pool", features = ["library"] }
+router = { path = "../router" }
+mock-pyth = { path = "../mock-pyth", features = ["library"] }
 pool-factory-interfaces = { path = "../packages/pool-factory-interfaces" }

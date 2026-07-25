@@ -1,14 +1,24 @@
 # BlueChip Production Runbook (Osmosis)
 
-How to operate this stack in production. USD pricing is a single
-stateless query against Osmosis's own `x/twap` module, so there is
-nothing to keep alive for prices. The operational surface is exactly
-one recurring job (the distribution keeper), one standing monitor (the
-pricing canary), and governance hygiene around the 48h timelocks.
+How to operate this stack in production. USD pricing comes from the
+**Pyth** OSMO/USD feed (NOT an on-chain pool TWAP — the OSMO/USD pool
+substrate is too thin to price safely; see
+`MAINNET_LIQUIDITY_RECON.md` / `ORACLE_PYTH_TRANSITION.md`). Because
+Pyth on Osmosis is push-based and nobody keeps OSMO/USD fresh on-chain,
+the operational surface is now **two** recurring jobs — the distribution
+keeper AND the price keeper — plus one standing monitor (the pricing
+canary) and governance hygiene around the 48h timelocks.
+
+> **⚠ CHANGED from the x/twap design:** there IS now something to keep
+> alive for prices. If the price keeper stops, the factory's staleness
+> gate starts failing every commit closed once the last pushed price
+> ages past `max_pyth_staleness_seconds`. Fail-safe (no mispricing, no
+> fund loss) — but commits halt until the keeper resumes.
 
 Money never moves incorrectly when your infra dies; it just stops
-moving until someone calls the permissionless entry points again.
-That fail-closed property is deliberate — operate to it.
+moving until the keepers resume and someone calls the permissionless
+entry points again. That fail-closed property is deliberate — operate
+to it.
 
 All constants below are quoted from source; paths given so they can
 be re-verified after any contract change.
@@ -17,12 +27,39 @@ be re-verified after any contract change.
 
 | Constant | Value | Where | Meaning |
 |---|---|---|---|
-| `TWAP_WINDOW_MIN/MAX_SECONDS` | **300 / 3600 s** (deployed: 600) | `factory/src/usd_price.rs` | Lookback of the x/twap price behind every commit valuation. The manipulation cost of the USD threshold is the cost of moving the pricing pool for this long |
-| `RATE_MAX` | **$10,000/native** | `factory/src/usd_price.rs` | Sanity ceiling on the parsed rate; a rate above it (wrong-decimals quote denom, spiked pool) makes commits revert rather than misprice |
+| `max_pyth_staleness_seconds` | **300 s** default (range 30–600) | `factory` config / `usd_price.rs` | A Pyth price older than this fails closed. Set it above the price keeper's push cadence + slack (e.g. 60s push ⇒ 300s gate = 4 missed-push tolerance) |
+| `MIN_PYTH_AGE_SECONDS` | **10 s** | `factory/src/usd_price.rs` | A price must be at least this old to be consumed — forces the keeper's push and the consuming commit into DIFFERENT blocks (anti same-block-MEV) |
+| `pyth_conf_threshold_bps` | **200 bps** default (range 50–500) | `factory` config / `usd_price.rs` | Reject a Pyth price whose confidence interval exceeds this fraction (feed too dispersed) |
+| `RATE_MAX` | **$10,000/native** | `factory/src/usd_price.rs` | Sanity ceiling on the parsed rate; a rate above it makes commits revert rather than misprice |
 | Distribution stall timeout | 24 h | `creator-pool` (`DISTRIBUTION_STALL_TIMEOUT_SECONDS`) | After this, batches reject and admin recovery is required |
 | Public distribution recovery | 7 days | `creator-pool` (`SelfRecoverDistribution`) | Anyone may restart a stalled distribution after this |
 | Admin config changes | 48 h | factory / router timelocks | Every propose→apply pair needs calendared two-step execution |
 | Emergency-withdraw delay | config (`EMERGENCY_WITHDRAW_DELAY_SECONDS`, mainnet 86400) | factory config | Gap between EW initiate and drain on every pool |
+
+## The price keeper (npm run price-keeper) — REQUIRED
+
+The factory reads the OSMO/USD price from the Pyth CW contract and fails
+closed past `max_pyth_staleness_seconds`. Pyth on Osmosis stores only the
+last price *someone* pushed, and nobody keeps OSMO/USD fresh (when
+measured, every feed on the mainnet Pyth contract was ~115 days stale).
+So this keeper must run continuously:
+
+1. fetch the latest signed OSMO/USD update from Pyth **Hermes**,
+2. query the Pyth contract's update fee (validated live: **1 uosmo**),
+3. submit `update_price_feeds { data: [...] }` with the fee attached.
+
+Config: `keepers/.env.example` (`PYTH_CONTRACT_ADDR`,
+`PYTH_NATIVE_USD_FEED_ID`, `HERMES_ENDPOINT`, `PYTH_PUSH_INTERVAL_MS`).
+Give it its **own wallet** (never shared with the distribution keeper or
+admin — two processes on one key race on account sequence numbers).
+Supervise it (systemd `Restart=always` / k8s). **Alert if the last
+successful push is older than the staleness gate minus one interval** —
+that is your last warning before commits start failing closed.
+
+Testnet note: mainnet Hermes serves mainnet-guardian-signed prices for
+mainnet Pyth contracts. A testnet Pyth contract verifies against a
+different (beta) guardian set, so point `HERMES_ENDPOINT` at Pyth's beta
+Hermes when pushing to osmo-test-5.
 
 ## The one recurring job: the distribution keeper
 
@@ -60,8 +97,8 @@ quotes come from `POOL_STATE` accounting reserves, and each hop's
 `max_spread` is pinned to the pools' 5% hard cap so
 `minimum_receive` is the binding slippage control.
 
-**Factory** — no bot needed. Its one live dependency is the pricing
-route (below).
+**Factory** — its one live dependency is the price keeper (above): the
+Pyth OSMO/USD feed must stay fresh or commits fail closed. No other bot.
 
 ## Infrastructure rules
 
@@ -89,22 +126,27 @@ route (below).
 
 on the **factory** every minute; page if it errors. Commit valuation
 is fail-closed through this exact path, so a green probe proves the
-entire pricing route (pool id, denom pair, TWAP window, rate sanity
-gates) that every commit depends on. There is no staleness dimension —
-the TWAP is computed at query time by the chain.
+entire pricing route (Pyth contract, feed id, staleness + confidence +
+sanity gates) that every commit depends on. Unlike the old x/twap
+design, this probe DOES have a staleness dimension: if the price keeper
+lags, the probe goes red before commits do — it is your earliest
+warning.
 
-**The one risk the probe can't see: pricing-pool liquidity decay.**
-x/twap never reports "stale" — a draining pool keeps returning prices
-while the cost of manipulating them silently falls. Alarm on the
-liquidity of `pricing_pool_id` (via Osmosis LCD/indexer) dropping
-below a floor you choose; if OSMO/USDC liquidity migrates to a newer
-pool over time, move `pricing_pool_id` with it via the 48 h config
-flow (the propose/apply both live-probe the new route before it can
-land).
+**The load-bearing dependency the probe reflects: the price keeper.**
+A red canary almost always means the keeper stopped pushing and the
+last Pyth price aged past `max_pyth_staleness_seconds`. Alarm on: the
+keeper's last-successful-push age exceeding the staleness gate minus one
+push interval (earliest signal); the keeper wallet gas balance; and the
+canary rate drifting far from a reference OSMO/USD price (exchange API)
+— which catches a wrong feed id or a bad push. The `pricing_pool_id`
+still exists but only as the fee-swap route at crossing, so it needs
+only enough depth to fill the ~$20 USDC creation fee, not
+manipulation-resistant depth.
 
 Secondary alerts:
 
-- keeper wallet gas balance
+- price-keeper wallet gas balance + last-push age
+- distribution-keeper wallet gas balance
 - any pool with `factory_notify_status.pending == true` for > 1 h
 - any pool with `distribution_state.is_stalled == true`
 - unexpected `propose_config_update` events on factory / router
@@ -114,9 +156,12 @@ Secondary alerts:
 
 ## Reference topology
 
-One distribution keeper under supervision; the pricing canary + the
-liquidity-floor alarm in your monitoring stack; a dashboard. That's
-the whole footprint — one small process and two alerts.
+**Two** keepers under supervision, each with its own wallet: the price
+keeper (`npm run price-keeper`, keeps Pyth OSMO/USD fresh — commits
+depend on it) and the distribution keeper (`npm run distribution-keeper`).
+Plus the pricing canary + keeper-last-push/gas alarms in your monitoring
+stack, and a dashboard. Two small processes; the price keeper is the one
+whose outage stops commits.
 
 ## Governance hygiene
 

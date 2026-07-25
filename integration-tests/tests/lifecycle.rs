@@ -37,8 +37,8 @@
 
 use cosmwasm_std::{Coin, Decimal, Uint128};
 
-use factory::pool_struct::{CreatePool, ThresholdPayoutAmounts};
 use factory::msg::{CreatorTokenInfo, ExecuteMsg as FactoryExecuteMsg};
+use factory::pool_struct::{CreatePool, ThresholdPayoutAmounts};
 use factory::query::{PoolsResponse, QueryMsg as FactoryQueryMsg};
 use factory::state::FactoryInstantiate;
 use pool_factory_interfaces::asset::{TokenInfo, TokenType};
@@ -54,7 +54,7 @@ use osmosis_test_tube::osmosis_std::types::osmosis::gamm::v1beta1::{
 use osmosis_test_tube::osmosis_std::types::osmosis::poolmanager::v1beta1::{
     MsgSwapExactAmountIn, MsgSwapExactAmountInResponse, SwapAmountInRoute,
 };
-use osmosis_test_tube::{Account, Bank, Gamm, Module, OsmosisTestApp, Runner, Wasm};
+use osmosis_test_tube::{Account, Bank, Gamm, Module, OsmosisTestApp, Runner, SigningAccount, Wasm};
 
 // ---------------------------------------------------------------------------
 // Constants for the scenario
@@ -81,20 +81,26 @@ fn read_wasm(name: &str) -> Vec<u8> {
     // Optimizer output lives in ../artifacts. The Makefile copies the prod
     // build onto these canonical names.
     let path = format!("{}/../artifacts/{}", env!("CARGO_MANIFEST_DIR"), name);
-    std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("missing wasm artifact {path}: {e}. Build it first (see README)."))
+    std::fs::read(&path).unwrap_or_else(|e| {
+        panic!("missing wasm artifact {path}: {e}. Build it first (see README).")
+    })
 }
+
+/// Mock Pyth OSMO/USD feed id.
+const OSMO_USD_FEED: &str = "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6";
 
 fn factory_config(
     admin: &str,
     pricing_pool_id: u64,
     pool_code_id: u64,
+    pyth_addr: &str,
 ) -> FactoryInstantiate {
     factory_config_with_gamm_fee(
         admin,
         pricing_pool_id,
         pool_code_id,
         Coin::new(GAMM_CREATE_FEE, UOSMO),
+        pyth_addr,
     )
 }
 
@@ -103,9 +109,9 @@ fn factory_config_with_gamm_fee(
     pricing_pool_id: u64,
     pool_code_id: u64,
     gamm_pool_creation_fee: Coin,
+    pyth_addr: &str,
 ) -> FactoryInstantiate {
     FactoryInstantiate {
-        oracle: Default::default(),
         factory_admin_address: cosmwasm_std::Addr::unchecked(admin),
         commit_threshold_limit_usd: Uint128::new(THRESHOLD_USD),
         // Phase-2 doesn't instantiate a CW20 or NFT; these code-id fields are
@@ -121,13 +127,65 @@ fn factory_config_with_gamm_fee(
         bluechip_denom: UOSMO.to_string(),
         pricing_pool_id,
         usd_quote_denom: UUSDC.to_string(),
-        twap_window_seconds: 300,
         // Flat create fee disabled → `Create` attaches no funds.
         pool_creation_fee: Uint128::zero(),
-        gamm_pool_creation_fee: Coin::new(GAMM_CREATE_FEE, UOSMO),
+        gamm_pool_creation_fee,
         threshold_payout_amounts: ThresholdPayoutAmounts::default(),
         emergency_withdraw_delay_seconds: 86_400,
+        // USD pricing via (mock) Pyth OSMO/USD; the pricing pool is only the
+        // fee-swap route now.
+        pyth_contract_addr: pyth_addr.to_string(),
+        pyth_native_usd_feed_id: OSMO_USD_FEED.to_string(),
+        max_pyth_staleness_seconds: 600,
+        pyth_conf_threshold_bps: 200,
     }
+}
+
+/// Store + instantiate the mock Pyth oracle and push a fresh $1.00 OSMO/USD
+/// price (aged 15s past the MIN_PYTH_AGE floor). Returns the mock address.
+fn deploy_mock_pyth(app: &OsmosisTestApp, wasm: &Wasm<OsmosisTestApp>, admin: &SigningAccount) -> String {
+    let code_id = wasm
+        .store_code(&read_wasm("mock_pyth.wasm"), None, admin)
+        .unwrap()
+        .data
+        .code_id;
+    let addr = wasm
+        .instantiate(
+            code_id,
+            &mock_pyth::InstantiateMsg {},
+            Some(&admin.address()),
+            Some("mock-pyth"),
+            &[],
+            admin,
+        )
+        .unwrap()
+        .data
+        .address;
+    refresh_pyth(app, wasm, &addr, admin, 1_000_000);
+    addr
+}
+
+/// Push a fresh $usd_micro OSMO/USD price and age it 15s.
+fn refresh_pyth(
+    app: &OsmosisTestApp,
+    wasm: &Wasm<OsmosisTestApp>,
+    pyth_addr: &str,
+    admin: &SigningAccount,
+    usd_micro: i64,
+) {
+    wasm.execute(
+        pyth_addr,
+        &mock_pyth::ExecuteMsg::SetPrice {
+            price_id: OSMO_USD_FEED.to_string(),
+            price: usd_micro,
+            expo: -6,
+            conf: 0,
+        },
+        &[],
+        admin,
+    )
+    .unwrap();
+    app.increase_time(15);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,10 +234,11 @@ fn instantiate_factory_against_live_twap() {
         .code_id;
 
     // The instantiate live-probes the pricing route; a bad config panics here.
+    let pyth = deploy_mock_pyth(&app, &wasm, &admin);
     let factory_addr = wasm
         .instantiate(
             factory_code_id,
-            &factory_config(&admin.address(), pricing_pool_id, pool_code_id),
+            &factory_config(&admin.address(), pricing_pool_id, pool_code_id, &pyth),
             Some(&admin.address()),
             Some("factory"),
             &[],
@@ -244,10 +303,11 @@ fn full_lifecycle_create_commit_cross_swap() {
         .data
         .code_id;
 
+    let pyth = deploy_mock_pyth(&app, &wasm, &admin);
     let factory_addr = wasm
         .instantiate(
             factory_code_id,
-            &factory_config(&admin.address(), pricing_pool_id, pool_code_id),
+            &factory_config(&admin.address(), pricing_pool_id, pool_code_id, &pyth),
             Some(&admin.address()),
             Some("factory"),
             &[],
@@ -413,7 +473,12 @@ fn full_lifecycle_create_commit_cross_swap() {
     // 13s rate limit, so advance chain time past the window first.
     app.increase_time(30);
     let committer_before = tt::balance(&bank, &committer.address(), &creator_denom);
-    let swap = PoolExecuteMsg::SimpleSwap {
+
+    // F-1 (audit remediation): a DIRECT SimpleSwap must now carry an
+    // explicit `belief_price`; with no router registered, a null-belief
+    // swap is refused fail-closed by the live pool. Pin that here so the
+    // API change stays deliberate.
+    let null_belief = PoolExecuteMsg::SimpleSwap {
         offer_asset: TokenInfo {
             info: TokenType::Native {
                 denom: UOSMO.to_string(),
@@ -421,6 +486,35 @@ fn full_lifecycle_create_commit_cross_swap() {
             amount: Uint128::new(100_000_000),
         },
         belief_price: None,
+        max_spread: Some(Decimal::percent(5)),
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let err = wasm
+        .execute(
+            &pool_addr,
+            &null_belief,
+            &[Coin::new(100_000_000u128, UOSMO)],
+            &committer,
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("belief_price is required"),
+        "F-1: direct null-belief SimpleSwap must be refused, got: {err}"
+    );
+
+    // The belief-priced swap goes through. `Decimal::one()` is a loose
+    // (well-above-market) bound for this pool, so the on-chain estimate
+    // floor is the binding protection — same shape a frontend quote takes.
+    let swap = PoolExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: UOSMO.to_string(),
+            },
+            amount: Uint128::new(100_000_000),
+        },
+        belief_price: Some(Decimal::one()),
         max_spread: Some(Decimal::percent(5)),
         allow_high_max_spread: None,
         to: None,
@@ -500,10 +594,11 @@ fn third_party_lp_join_and_exit_native_pool() {
         .unwrap()
         .data
         .code_id;
+    let pyth = deploy_mock_pyth(&app, &wasm, &admin);
     let factory_addr = wasm
         .instantiate(
             factory_code_id,
-            &factory_config(&admin.address(), pricing_pool_id, pool_code_id),
+            &factory_config(&admin.address(), pricing_pool_id, pool_code_id, &pyth),
             Some(&admin.address()),
             Some("factory"),
             &[],
@@ -679,7 +774,10 @@ fn third_party_lp_join_and_exit_native_pool() {
     let reserves_after_exit = gamm.query_pool_reserves(pool_id).unwrap();
 
     let reserve_of = |rs: &[Coin], d: &str| -> u128 {
-        rs.iter().find(|c| c.denom == d).map(|c| c.amount.u128()).unwrap_or(0)
+        rs.iter()
+            .find(|c| c.denom == d)
+            .map(|c| c.amount.u128())
+            .unwrap_or(0)
     };
 
     assert!(
@@ -757,11 +855,12 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
     let mut pm_params: PmParams = app
         .get_param_set("poolmanager", PmParams::TYPE_URL)
         .expect("read poolmanager params");
-    pm_params.pool_creation_fee =
-        vec![osmosis_test_tube::osmosis_std::types::cosmos::base::v1beta1::Coin {
+    pm_params.pool_creation_fee = vec![
+        osmosis_test_tube::osmosis_std::types::cosmos::base::v1beta1::Coin {
             denom: UUSDC.to_string(),
             amount: usdc_fee.to_string(),
-        }];
+        },
+    ];
     app.set_param_set(
         "poolmanager",
         Any {
@@ -786,6 +885,7 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
     // Factory config mirrors the chain: gamm fee = 20 uusdc (the USD quote
     // denom), so validate_factory_config accepts it and the CommitContext
     // response carries it to the pool.
+    let pyth = deploy_mock_pyth(&app, &wasm, &admin);
     let factory_addr = wasm
         .instantiate(
             factory_code_id,
@@ -794,6 +894,7 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
                 pricing_pool_id,
                 pool_code_id,
                 Coin::new(usdc_fee, UUSDC),
+                &pyth,
             ),
             Some(&admin.address()),
             Some("factory"),
@@ -842,7 +943,12 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
             },
         )
         .unwrap();
-    let pool_addr = pools.pools.first().expect("pool registered").pool_addr.to_string();
+    let pool_addr = pools
+        .pools
+        .first()
+        .expect("pool registered")
+        .pool_addr
+        .to_string();
 
     wasm.execute(
         &pool_addr,

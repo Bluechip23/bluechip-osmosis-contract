@@ -73,7 +73,6 @@ fn test_propose_and_execute_update_config() {
     let mut deps = mock_dependencies_2(&[]);
     let the_admin = make_addr("addr0000");
     let msg = FactoryInstantiate {
-        oracle: Default::default(),
         cw721_nft_contract_id: 58,
         factory_admin_address: the_admin.clone(),
         commit_threshold_limit_usd: Uint128::new(100),
@@ -87,7 +86,6 @@ fn test_propose_and_execute_update_config() {
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
-        twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -95,6 +93,10 @@ fn test_propose_and_execute_update_config() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
+            pyth_contract_addr: "pyth_oracle".to_string(),
+            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
+            max_pyth_staleness_seconds: 300,
+            pyth_conf_threshold_bps: 200,
     };
 
     let env = mock_env();
@@ -104,7 +106,6 @@ fn test_propose_and_execute_update_config() {
 
     let unauthorized_info = message_info(&Addr::unchecked("unauthorized"), &[]);
     let new_config = FactoryInstantiate {
-        oracle: Default::default(),
         factory_admin_address: the_admin.clone(),
         ..msg.clone()
     };
@@ -147,6 +148,12 @@ fn test_propose_and_execute_update_config() {
     let mut later_env = env.clone();
     later_env.block.time = pending.effective_after.plus_seconds(1);
 
+    // The apply step re-probes the Pyth price at the (advanced) apply-time
+    // block. Refresh the mock feed so it isn't stale relative to the new
+    // block time (this test exercises the timelock flow, not staleness).
+    deps.querier
+        .set_pyth_publish_time(later_env.block.time.seconds() - 30);
+
     let res = execute(deps.as_mut(), later_env, info.clone(), early_update_msg).unwrap();
     assert_eq!(res.attributes[0], ("action", "execute_update_config"));
 
@@ -155,14 +162,14 @@ fn test_propose_and_execute_update_config() {
 }
 
 // The pricing route (pricing_pool_id / usd_quote_denom / window) is
-// live-probed with a real x/twap query at instantiate, propose, AND
+// live-probed with a real Pyth query at instantiate, propose, AND
 // apply. Without the probe, a typo'd pool id would pass all syntactic
 // validation and surface only as a chain-wide commit outage 48h later.
 #[test]
 fn instantiate_rejects_dead_pricing_route() {
     let mut deps = mock_dependencies_2(&[]);
     deps.querier
-        .set_twap_error("pool 999 does not exist or lacks the requested denom pair");
+        .set_pyth_error("pool 999 does not exist or lacks the requested denom pair");
 
     let err = instantiate(
         deps.as_mut(),
@@ -172,7 +179,7 @@ fn instantiate_rejects_dead_pricing_route() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("live TWAP probe"),
+        err.to_string().contains("live Pyth probe"),
         "unexpected error: {}",
         err
     );
@@ -184,7 +191,7 @@ fn propose_rejects_dead_pricing_route() {
     setup_factory_custom(&mut deps);
 
     // Route breaks (or was typo'd in the proposal) after instantiate.
-    deps.querier.set_twap_error("pool not found");
+    deps.querier.set_pyth_error("pool not found");
 
     let admin_info = message_info(&admin_addr(), &[]);
     let err = execute(
@@ -197,7 +204,7 @@ fn propose_rejects_dead_pricing_route() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("live TWAP probe"),
+        err.to_string().contains("live Pyth probe"),
         "unexpected error: {}",
         err
     );
@@ -223,7 +230,7 @@ fn apply_reprobes_pricing_route() {
 
     // The pricing pool dies during the 48h window; apply must re-probe
     // and refuse rather than land a config that bricks every commit.
-    deps.querier.set_twap_error("pool drained and pruned");
+    deps.querier.set_pyth_error("pool drained and pruned");
 
     let pending = PENDING_CONFIG.load(&deps.storage).unwrap();
     let mut later_env = env;
@@ -236,7 +243,7 @@ fn apply_reprobes_pricing_route() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("live TWAP probe"),
+        err.to_string().contains("live Pyth probe"),
         "unexpected error: {}",
         err
     );
@@ -251,7 +258,7 @@ fn propose_rejects_wrong_decimals_quote_rate() {
     // The probe parses the rate through the same sanity gates the
     // commit path uses, so the misconfig dies at propose time.
     deps.querier
-        .set_twap_price("1000000000000.000000000000000000");
+        .set_pyth_price(10_001_000_000, -6, 0);
 
     let admin_info = message_info(&admin_addr(), &[]);
     let err = execute(
@@ -920,7 +927,6 @@ fn setup_factory_custom(deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQueri
 
 fn default_factory_instantiate_msg() -> FactoryInstantiate {
     FactoryInstantiate {
-        oracle: Default::default(),
         factory_admin_address: admin_addr(),
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
@@ -934,7 +940,6 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
-        twap_window_seconds: 600,
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -942,6 +947,10 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
+            pyth_contract_addr: "pyth_oracle".to_string(),
+            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
+            max_pyth_staleness_seconds: 300,
+            pyth_conf_threshold_bps: 200,
     }
 }
 

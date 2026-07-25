@@ -83,128 +83,54 @@ pub(crate) fn validate_factory_config(
             "usd_quote_denom must differ from bluechip_denom",
         )));
     }
-    if config.twap_window_seconds < crate::usd_price::TWAP_WINDOW_MIN_SECONDS
-        || config.twap_window_seconds > crate::usd_price::TWAP_WINDOW_MAX_SECONDS
+    // --- Pyth oracle config validation ---
+    if config.pyth_contract_addr.trim().is_empty() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "pyth_contract_addr must be non-empty (the Pyth CW contract address)",
+        )));
+    }
+    // A malformed/unreachable address is caught by the live Pyth probe
+    // below (the smart query fails), so no separate addr_validate here —
+    // that keeps the check chain-native rather than relying on the host
+    // bech32 prefix.
+    // Pyth feed ids are 64 lowercase hex chars (no `0x`).
+    let feed = config.pyth_native_usd_feed_id.trim();
+    if feed.len() != 64 || !feed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ContractError::Std(StdError::generic_err(
+            "pyth_native_usd_feed_id must be 64 hex characters (no 0x prefix)",
+        )));
+    }
+    if config.max_pyth_staleness_seconds < crate::usd_price::MAX_PYTH_STALENESS_MIN_SECONDS
+        || config.max_pyth_staleness_seconds > crate::usd_price::MAX_PYTH_STALENESS_MAX_SECONDS
     {
         return Err(ContractError::Std(StdError::generic_err(format!(
-            "twap_window_seconds {} outside allowed range [{}, {}]",
-            config.twap_window_seconds,
-            crate::usd_price::TWAP_WINDOW_MIN_SECONDS,
-            crate::usd_price::TWAP_WINDOW_MAX_SECONDS,
+            "max_pyth_staleness_seconds {} outside allowed range [{}, {}]",
+            config.max_pyth_staleness_seconds,
+            crate::usd_price::MAX_PYTH_STALENESS_MIN_SECONDS,
+            crate::usd_price::MAX_PYTH_STALENESS_MAX_SECONDS,
         ))));
     }
-
-    // Multi-pool median-oracle shape validation. The primary source is
-    // covered by the pricing checks above; validate each EXTRA source and the
-    // quorum here so a malformed oracle set fails at propose time rather than
-    // bricking every valuation after the 48h timelock.
-    let total_sources = 1 + config.oracle.extra_sources.len();
-    for (i, s) in config.oracle.extra_sources.iter().enumerate() {
-        if s.pool_id == 0 {
-            return Err(ContractError::Std(StdError::generic_err(format!(
-                "oracle.extra_sources[{}].pool_id must be non-zero",
-                i
-            ))));
-        }
-        if s.quote_denom.trim().is_empty() {
-            return Err(ContractError::Std(StdError::generic_err(format!(
-                "oracle.extra_sources[{}].quote_denom must be non-empty",
-                i
-            ))));
-        }
-        if s.quote_denom == config.bluechip_denom {
-            return Err(ContractError::Std(StdError::generic_err(format!(
-                "oracle.extra_sources[{}].quote_denom must differ from bluechip_denom",
-                i
-            ))));
-        }
-        if s.quote_decimals > 30 {
-            return Err(ContractError::Std(StdError::generic_err(format!(
-                "oracle.extra_sources[{}].quote_decimals {} is implausibly large",
-                i, s.quote_decimals
-            ))));
-        }
-        // Routed source: validate the quote->USD leg. A `None` leg means the
-        // quote denom is itself the USD stable (direct source).
-        if let Some(leg) = &s.usd_leg {
-            if leg.pool_id == 0 {
-                return Err(ContractError::Std(StdError::generic_err(format!(
-                    "oracle.extra_sources[{}].usd_leg.pool_id must be non-zero",
-                    i
-                ))));
-            }
-            if leg.usd_denom.trim().is_empty() {
-                return Err(ContractError::Std(StdError::generic_err(format!(
-                    "oracle.extra_sources[{}].usd_leg.usd_denom must be non-empty",
-                    i
-                ))));
-            }
-            if leg.usd_denom == s.quote_denom {
-                return Err(ContractError::Std(StdError::generic_err(format!(
-                    "oracle.extra_sources[{}].usd_leg.usd_denom must differ from the source's \
-                     quote_denom (the leg must actually convert the intermediate to USD)",
-                    i
-                ))));
-            }
-            if leg.usd_denom == config.bluechip_denom {
-                return Err(ContractError::Std(StdError::generic_err(format!(
-                    "oracle.extra_sources[{}].usd_leg.usd_denom must differ from bluechip_denom",
-                    i
-                ))));
-            }
-            if leg.usd_decimals > 30 {
-                return Err(ContractError::Std(StdError::generic_err(format!(
-                    "oracle.extra_sources[{}].usd_leg.usd_decimals {} is implausibly large",
-                    i, leg.usd_decimals
-                ))));
-            }
-        }
-    }
-    // Reject duplicate pool ids across the whole source set (primary + extras).
-    // The median's manipulation resistance rests on ONE independent vote per
-    // pool; letting the same pool appear twice would give a manipulated pool
-    // multiple correlated votes and skew the median toward it. A multi-asset
-    // pool that could price against several denoms must still be listed once.
-    let mut seen_pool_ids = std::collections::HashSet::new();
-    seen_pool_ids.insert(config.pricing_pool_id);
-    for (i, s) in config.oracle.extra_sources.iter().enumerate() {
-        if !seen_pool_ids.insert(s.pool_id) {
-            return Err(ContractError::Std(StdError::generic_err(format!(
-                "oracle.extra_sources[{}].pool_id {} is a duplicate — each pricing pool may \
-                 appear only once (incl. the primary pricing_pool_id) so it gets one vote in \
-                 the median",
-                i, s.pool_id
-            ))));
-        }
-    }
-    if config.oracle.min_valid_sources as usize > total_sources {
+    if config.pyth_conf_threshold_bps < crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MIN
+        || config.pyth_conf_threshold_bps > crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MAX
+    {
         return Err(ContractError::Std(StdError::generic_err(format!(
-            "oracle.min_valid_sources {} exceeds the {} configured pricing sources \
-             (1 primary + {} extra)",
-            config.oracle.min_valid_sources,
-            total_sources,
-            config.oracle.extra_sources.len()
+            "pyth_conf_threshold_bps {} outside allowed range [{}, {}]",
+            config.pyth_conf_threshold_bps,
+            crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MIN,
+            crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MAX,
         ))));
     }
 
-    // Live probe of the pricing route. The syntactic checks above
-    // cannot tell a typo'd pool id (or a pool missing one of the two
-    // denoms, or one too young for the window) from a working route —
-    // and because the price path is fail-closed, that typo would
-    // otherwise surface only as a chain-wide commit outage costing a
-    // further 48h timelock cycle to repair. Running the actual x/twap
-    // query against the proposed config turns it into an instant
-    // instantiate/propose/apply-time error. The parsed rate also rides
-    // through the zero / dust / RATE_MAX sanity gates, so a
-    // wrong-decimals quote denom is caught here too.
+    // Live probe of the Pyth route. A typo'd contract/feed, a stale feed,
+    // or a wide-confidence price would otherwise surface only as a
+    // chain-wide commit outage after the 48h timelock. Reading the real
+    // Pyth price against the proposed config turns it into an instant
+    // instantiate/propose/apply-time error. (A propose-time transient
+    // staleness is possible if the keeper lapsed; re-propose once fresh.)
     crate::usd_price::probe_native_usd_rate(deps, env, config).map_err(|e| {
         ContractError::Std(StdError::generic_err(format!(
-            "pricing config failed live TWAP probe (pool {}, {}/{}, window {}s): {}",
-            config.pricing_pool_id,
-            config.bluechip_denom,
-            config.usd_quote_denom,
-            config.twap_window_seconds,
-            e
+            "pricing config failed live Pyth probe (contract {}, feed {}): {}",
+            config.pyth_contract_addr, config.pyth_native_usd_feed_id, e
         )))
     })?;
 

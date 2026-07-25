@@ -11,7 +11,8 @@
     "distribution-keeper": "tsx src/distribution-keeper.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "price-keeper": "tsx src/price-keeper.ts"
   },
   "dependencies": {
     "@cosmjs/cosmwasm-stargate": "^0.33.1",

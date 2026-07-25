@@ -1,249 +1,254 @@
-//! Native→USD valuation backed by Osmosis's chain-native `x/twap` module.
+//! Native→USD valuation backed by the **Pyth** price oracle.
 //!
-//! A single stateless chain query: the arithmetic TWAP of the
-//! factory-configured `bluechip_denom` / `usd_quote_denom` pool over
-//! the last `twap_window_seconds`. The pairing asset is the chain's
-//! native token, whose price against a USD stablecoin is maintained by
-//! the chain itself — no keeper, no push liveness, and manipulating
-//! the valuation requires moving one of Osmosis's deepest pools for
-//! the entire TWAP window.
+//! Every commit values attached native (uosmo) against the
+//! USD-denominated threshold. The price comes from Pyth's OSMO/USD feed,
+//! read from the configured Pyth CW contract, gated for staleness,
+//! confidence, future-skew and a minimum age (anti same-block-MEV), then
+//! normalized to the `RATE_PRECISION` micro-USD-per-micro-native scale
+//! that the whole system already speaks (`rate_used`).
 //!
-//! Fail-closed: any TWAP query error (mis-configured pool id, pool too
-//! young for the window, module pruning) surfaces as an error to the
-//! caller, so a commit that cannot be valued reverts rather than being
-//! mispriced.
+//! Why Pyth and not an on-chain pool TWAP: the Osmosis OSMO/USD pool
+//! substrate has collapsed to a few thousand dollars per venue, making a
+//! pool-TWAP oracle manipulable for ~$1–3k (see MAINNET_LIQUIDITY_RECON.md
+//! / ORACLE_PYTH_TRANSITION.md). Pyth aggregates many CEX/DEX venues, so
+//! moving its price is orders of magnitude costlier.
+//!
+//! Fail-closed: any query error, a stale/too-fresh/future price, a wide
+//! confidence interval, or a failed sanity gate surfaces as `Err`, so a
+//! commit that cannot be safely valued reverts rather than being mispriced.
+//!
+//! The pricing pool (`pricing_pool_id` / `usd_quote_denom`) is NO LONGER a
+//! price source — it survives only as the cross-denom fee-swap EXECUTION
+//! route at threshold crossing (acquiring the USDC pool-creation fee).
 
-use cosmwasm_std::{Decimal, Deps, Env, StdError, StdResult, Uint128, Uint256};
-use osmosis_std::types::osmosis::twap::v1beta1::TwapQuerier;
+use cosmwasm_std::{Deps, Env, StdError, StdResult, Uint128};
 use pool_factory_interfaces::ConversionResponse;
 
-use crate::state::{FactoryInstantiate, PricingSource, FACTORYINSTANTIATEINFO};
+use crate::pyth_types::{PriceFeedResponse, PythQueryMsg};
+use crate::state::{effective_pyth_conf_bps, FactoryInstantiate, FACTORYINSTANTIATEINFO};
 
 /// Fixed-point scale for `ConversionResponse.rate_used`: micro-USD per
 /// micro-native. `1_000_000` == $1.00 per native token (both sides carry
 /// 6 decimals, so the per-base-unit and per-token rates coincide).
-///
-/// The 6/6-decimal assumption is load-bearing: `RATE_MAX` below exists
-/// precisely to catch a quote asset that violates it.
 pub const RATE_PRECISION: u128 = 1_000_000;
 
 /// Sanity ceiling on the parsed rate: $10,000 per native token. No
-/// plausible host-chain native asset trades anywhere near this, so a
-/// rate above it means either the quote denom does not carry 6 decimals
-/// (an 18-decimal stable inflates the rate ~1e12×, letting a dust
-/// commit cross the USD threshold) or the pricing pool is being spiked.
-/// Fail closed on both.
+/// plausible host-chain native asset trades anywhere near this, so a rate
+/// above it means the feed/expo is misconfigured or the price is being
+/// spoofed. Fail closed.
 pub const RATE_MAX: u128 = 10_000 * RATE_PRECISION;
 
-/// Lower/upper bounds on the configurable TWAP window. Below 300s a
-/// single block carries enough weight in the arithmetic mean that a
-/// one-block spike moves the rate materially — the manipulation cost
-/// collapses toward a spot read; above 3600s the price lags real
-/// markets enough to misvalue commits in fast moves (and approaches
-/// the x/twap pruning horizon).
-pub const TWAP_WINDOW_MIN_SECONDS: u64 = 300;
-pub const TWAP_WINDOW_MAX_SECONDS: u64 = 3_600;
+/// Maximum acceptable age (seconds) of the Pyth price relative to the
+/// chain's block time — the staleness gate. A price older than this fails
+/// closed. Mirrors the original integration's
+/// `MAX_PRICE_AGE_SECONDS_BEFORE_STALE`.
+pub const DEFAULT_MAX_PYTH_STALENESS_SECONDS: u64 = 300;
+pub const MAX_PYTH_STALENESS_MIN_SECONDS: u64 = 30;
+pub const MAX_PYTH_STALENESS_MAX_SECONDS: u64 = 600;
 
-/// Query the chain's arithmetic TWAP for the configured pricing pool and
-/// return the native→USD rate in `RATE_PRECISION` fixed point.
+/// Minimum age (seconds) the Pyth price must have before it can be
+/// consumed. Forces the `UpdatePriceFeeds` push and the consuming commit
+/// into DIFFERENT blocks, removing the same-block bundled-update MEV where
+/// a bot submits `tx1: UpdatePriceFeeds(favorable)` + `tx2: Commit` in one
+/// block. On 5–7s blocks a 10s floor guarantees ≥1 block of separation.
+pub const MIN_PYTH_AGE_SECONDS: u64 = 10;
+
+/// Clock-skew tolerance for a publish_time slightly ahead of block time.
+pub const PYTH_FUTURE_SKEW_TOLERANCE_SECONDS: u64 = 5;
+
+/// Confidence-interval gate bounds (basis points of price). A Pyth price
+/// whose `conf/price` exceeds the configured bps is rejected (the feed is
+/// too dispersed to trust). Admin-set value is clamped to this range.
+pub const PYTH_CONF_THRESHOLD_BPS_DEFAULT: u16 = 200; // 2%
+pub const PYTH_CONF_THRESHOLD_BPS_MIN: u16 = 50; // 0.5%
+pub const PYTH_CONF_THRESHOLD_BPS_MAX: u16 = 500; // 5%
+
+/// Allowed Pyth exponent range for a USD price feed.
+pub const PYTH_EXPO_MIN: i32 = -12;
+pub const PYTH_EXPO_MAX: i32 = -4;
+
+/// Query the Pyth OSMO/USD rate for the stored factory config.
 pub fn query_native_usd_rate(deps: Deps, env: &Env) -> StdResult<Uint128> {
     let config = FACTORYINSTANTIATEINFO.load(deps.storage)?;
     probe_native_usd_rate(deps, env, &config)
 }
 
-/// Run the TWAP query against an explicit (possibly not-yet-stored)
-/// config. Split out from [`query_native_usd_rate`] so config
-/// validation can probe a *proposed* pricing route live at
-/// instantiate/propose/apply time instead of discovering a typo'd pool
-/// id only when every commit starts reverting.
+/// Read the Pyth rate against an explicit (possibly not-yet-stored)
+/// config. Split out from [`query_native_usd_rate`] so config validation
+/// can probe a *proposed* Pyth route live at instantiate/propose/apply
+/// time instead of discovering a typo'd contract/feed only when every
+/// commit starts reverting.
 pub fn probe_native_usd_rate(
     deps: Deps,
     env: &Env,
     config: &FactoryInstantiate,
 ) -> StdResult<Uint128> {
-    probe_median_usd_rate(deps, env, config)
+    probe_pyth_usd_rate(deps, env, config)
 }
 
-/// The full ordered pricing-source set: the primary
-/// `(pricing_pool_id, usd_quote_denom)` pool (6-decimal quote by
-/// convention — it is also the cross-denom fee-swap route) followed by every
-/// configured `oracle.extra_sources` entry.
-pub fn pricing_sources(config: &FactoryInstantiate) -> Vec<PricingSource> {
-    let mut sources = Vec::with_capacity(1 + config.oracle.extra_sources.len());
-    sources.push(PricingSource {
-        pool_id: config.pricing_pool_id,
-        quote_denom: config.usd_quote_denom.clone(),
-        quote_decimals: 6,
-        // The primary pool is always a DIRECT USD-stable quote (it is also the
-        // cross-denom fee-swap route). A routed primary is not supported.
-        usd_leg: None,
-    });
-    sources.extend(config.oracle.extra_sources.iter().cloned());
-    sources
-}
-
-/// Multi-pool MEDIAN native→USD rate.
+/// The full Pyth read + validation pipeline, returning the native→USD
+/// rate in `RATE_PRECISION` (micro-USD per micro-native) fixed point.
 ///
-/// Reads the arithmetic TWAP of every configured pricing source over the
-/// window, normalizes each to the `RATE_PRECISION` (micro-USD per
-/// micro-native) convention, and returns the MEDIAN of the sources that pass
-/// validation. Design mirrors the internal multi-pool oracle in the original
-/// bluechip-contracts:
-///
-/// 1. **Validate each source independently.** A source is DISCREDITED (simply
-///    dropped, never fatal) if its x/twap query errors (typo'd pool id, pool
-///    missing a denom, pool younger than the window) OR its parsed rate fails
-///    the zero / sub-dust / `RATE_MAX` sanity gates. A single dead or spiked
-///    pool therefore cannot take the whole valuation down.
-/// 2. **Deviation discredit (optional).** When `oracle.max_deviation_bps > 0`,
-///    compute a provisional median of the survivors and drop any source more
-///    than that many bps away from it, then recompute. This ejects a pool that
-///    passed the absolute sanity gate but disagrees with the consensus (a
-///    partially-manipulated pool).
-/// 3. **Quorum.** If fewer than `max(1, oracle.min_valid_sources)` sources
-///    survive, FAIL CLOSED — no commit is priced — exactly the posture the
-///    single-pool path already has when its one query fails.
-/// 4. **Median.** Returned as the rate for the whole tx window (the caller
-///    threads the SAME `rate_used` through every conversion in a commit).
-///
-/// Empty `extra_sources` + default thresholds ⇒ a single primary source,
-/// median-of-one — byte-identical to the pre-oracle single-pool behavior.
-pub fn probe_median_usd_rate(
+/// Pipeline (each step fails closed):
+/// 1. Smart-query the configured Pyth contract for the native/USD feed.
+/// 2. Verify the returned feed id matches the requested one (defense in
+///    depth against a mis-routing Pyth contract).
+/// 3. Reject a negative or far-future `publish_time`.
+/// 4. Reject a price older than `max_pyth_staleness_seconds` (stale).
+/// 5. Reject a price younger than `MIN_PYTH_AGE_SECONDS` (anti same-block MEV).
+/// 6. Reject a non-positive price.
+/// 7. Reject a confidence interval wider than the configured bps gate.
+/// 8. Reject an out-of-range exponent.
+/// 9. Normalize `price × 10^expo` to the 6-decimal `RATE_PRECISION` scale.
+/// 10. Apply the shared zero / dust / `RATE_MAX` sanity gate.
+pub fn probe_pyth_usd_rate(
     deps: Deps,
     env: &Env,
     config: &FactoryInstantiate,
 ) -> StdResult<Uint128> {
-    let sources = pricing_sources(config);
-    let total = sources.len();
+    let feed_id = config.pyth_native_usd_feed_id.as_str();
 
-    // 1. Per-source query + validation. Discredited sources are dropped; their
-    // reasons are retained so a quorum failure can tell the operator WHY each
-    // source was rejected (e.g. wrong-decimals quote denom, dead pool).
-    let mut valid: Vec<Uint128> = Vec::with_capacity(total);
-    let mut discredited: Vec<String> = Vec::new();
-    for source in &sources {
-        match probe_single_source(deps, env, config, source) {
-            Ok(rate) => valid.push(rate),
-            Err(e) => discredited.push(format!("pool {}: {}", source.pool_id, e)),
+    // 1. Query the Pyth contract.
+    let response: PriceFeedResponse = deps.querier.query_wasm_smart(
+        config.pyth_contract_addr.as_str(),
+        &PythQueryMsg::PriceFeed {
+            id: feed_id.to_string(),
+        },
+    )?;
+
+    // 2. Extract the price, verifying the feed id. Case-INSENSITIVE: Pyth
+    // returns the id lowercase, and config validation permits any hex case,
+    // so a mixed-case config must still match rather than fail closed on
+    // every read.
+    let price_data = if let Some(feed) = response.price_feed {
+        if !feed.id.eq_ignore_ascii_case(feed_id) {
+            return Err(StdError::generic_err(format!(
+                "Pyth response feed_id mismatch: requested {}, got {}",
+                feed_id, feed.id
+            )));
         }
+        feed.price
+    } else if let Some(price) = response.price {
+        price
+    } else {
+        return Err(StdError::generic_err(
+            "invalid Pyth response: missing price data",
+        ));
+    };
+
+    let current_time = env.block.time.seconds();
+
+    // 3. Reject negative / far-future publish_time.
+    if price_data.publish_time < 0 {
+        return Err(StdError::generic_err("Pyth publish_time is negative"));
+    }
+    let publish_time_u64 = price_data.publish_time as u64;
+    if publish_time_u64 > current_time.saturating_add(PYTH_FUTURE_SKEW_TOLERANCE_SECONDS) {
+        return Err(StdError::generic_err(
+            "Pyth publish_time is in the future beyond the allowed skew tolerance",
+        ));
     }
 
-    // 2. Optional deviation discredit against the provisional median.
-    let mut deviation_dropped = 0usize;
-    if config.oracle.max_deviation_bps > 0 && !valid.is_empty() {
-        let provisional = median_rate(&valid);
-        let max_bps = Uint256::from(config.oracle.max_deviation_bps);
-        let med = Uint256::from(provisional);
-        let before = valid.len();
-        valid.retain(|rate| {
-            let r = Uint256::from(*rate);
-            let diff = if r > med { r - med } else { med - r };
-            // |r - med| * 10_000 <= med * max_bps
-            diff * Uint256::from(10_000u64) <= med * max_bps
-        });
-        deviation_dropped = before - valid.len();
-    }
-
-    // 3. Quorum. Fail closed when too few sources survive.
-    let min_valid = config.oracle.min_valid_sources.max(1) as usize;
-    if valid.len() < min_valid {
+    // 4-5. Staleness + minimum-age gates.
+    let age_seconds = current_time.saturating_sub(publish_time_u64);
+    let max_staleness = config.max_pyth_staleness_seconds;
+    if age_seconds > max_staleness {
         return Err(StdError::generic_err(format!(
-            "insufficient valid pricing sources: {} of {} configured survived validation \
-             ({} deviation-dropped), need at least {} — refusing to price the commit. \
-             Discredited: [{}]",
-            valid.len(),
-            total,
-            deviation_dropped,
-            min_valid,
-            discredited.join("; ")
+            "Pyth price is stale: age {}s exceeds max {}s",
+            age_seconds, max_staleness
+        )));
+    }
+    if age_seconds < MIN_PYTH_AGE_SECONDS {
+        return Err(StdError::generic_err(format!(
+            "Pyth price too fresh: age {}s below minimum {}s (forces cross-block \
+             separation between UpdatePriceFeeds and this consumption to prevent \
+             same-block bundled-update MEV; retry next block)",
+            age_seconds, MIN_PYTH_AGE_SECONDS
         )));
     }
 
-    // 4. Median of survivors.
-    Ok(median_rate(&valid))
-}
-
-/// Query the arithmetic TWAP of `base`/`quote` on `pool_id` over the config
-/// window, returning the raw `Dec` string. Split out so both legs of a routed
-/// source share one query path.
-fn query_arithmetic_twap(
-    deps: Deps,
-    env: &Env,
-    config: &FactoryInstantiate,
-    pool_id: u64,
-    base: &str,
-    quote: &str,
-) -> StdResult<String> {
-    let start_time = env
-        .block
-        .time
-        .minus_seconds(config.twap_window_seconds)
-        .seconds() as i64;
-    let resp = TwapQuerier::new(&deps.querier)
-        .arithmetic_twap_to_now(
-            pool_id,
-            base.to_string(),
-            quote.to_string(),
-            Some(osmosis_std::shim::Timestamp {
-                seconds: start_time,
-                nanos: 0,
-            }),
-        )
-        .map_err(|e| {
-            StdError::generic_err(format!(
-                "x/twap query failed for pool {} ({}/{}, window {}s): {}",
-                pool_id, base, quote, config.twap_window_seconds, e
-            ))
-        })?;
-    Ok(resp.arithmetic_twap)
-}
-
-/// Query + normalize one pricing source into a `RATE_PRECISION` rate.
-/// Returns `Err` (⇒ the source is discredited) on any query error or failed
-/// sanity gate on EITHER leg.
-///
-/// - **Direct** source (`usd_leg == None`): `quote_denom` is a USD stable, so
-///   the single native/quote TWAP is the USD rate (legacy behavior).
-/// - **Routed** source (`usd_leg == Some`): the native/quote TWAP is combined
-///   with a second quote/USD TWAP, so an OSMO/BTC (or OSMO/ATOM, …) pool can
-///   contribute a USD price. Both legs must query and pass sanity or the whole
-///   source is discredited.
-pub fn probe_single_source(
-    deps: Deps,
-    env: &Env,
-    config: &FactoryInstantiate,
-    source: &PricingSource,
-) -> StdResult<Uint128> {
-    // Leg 1: native priced in the source's quote denom.
-    let d1 = query_arithmetic_twap(
-        deps,
-        env,
-        config,
-        source.pool_id,
-        &config.bluechip_denom,
-        &source.quote_denom,
-    )?;
-
-    match &source.usd_leg {
-        None => twap_dec_to_rate_with_decimals(&d1, source.quote_decimals),
-        Some(leg) => {
-            // Leg 2: the intermediate (source.quote_denom) priced in USD.
-            let d2 = query_arithmetic_twap(
-                deps,
-                env,
-                config,
-                leg.pool_id,
-                &source.quote_denom,
-                &leg.usd_denom,
-            )?;
-            twap_pair_to_rate(&d1, &d2, leg.usd_decimals)
-        }
+    // 6. Positive price. Load-bearing for the conf gate below — do not reorder.
+    let price_i64 = price_data.price.i64();
+    if price_i64 <= 0 {
+        return Err(StdError::generic_err("Pyth price is negative or zero"));
     }
+    // `try_into` (not `as`) so a future reordering of the guard above
+    // produces an explicit error rather than a silent wrap.
+    let price_u64: u64 = price_i64
+        .try_into()
+        .map_err(|_| StdError::generic_err("Pyth price overflow"))?;
+
+    // 7. Confidence-interval gate.
+    let conf_bps = effective_pyth_conf_bps(config);
+    let conf_threshold = price_u64
+        .saturating_mul(conf_bps as u64)
+        .saturating_div(10_000);
+    let conf_u64 = price_data.conf.u64();
+    if conf_u64 > conf_threshold {
+        return Err(StdError::generic_err(format!(
+            "Pyth confidence interval too wide: conf={} exceeds {} bps of price={}",
+            conf_u64, conf_bps, price_i64
+        )));
+    }
+
+    // 8. Exponent range.
+    let expo = price_data.expo;
+    if !(PYTH_EXPO_MIN..=PYTH_EXPO_MAX).contains(&expo) {
+        return Err(StdError::generic_err(format!(
+            "unexpected Pyth expo {}: expected between {} and {}",
+            expo, PYTH_EXPO_MIN, PYTH_EXPO_MAX
+        )));
+    }
+
+    // 9. Normalize `price × 10^expo` into 6-decimal RATE_PRECISION units.
+    // The normalized 6-decimal USD-per-token value IS `rate_used`, because
+    // both the native denom and the rate carry 6 decimals.
+    let rate = normalize_pyth_price_to_rate(price_u64.into(), expo)?;
+
+    // 10. Shared sanity gate.
+    apply_rate_sanity(rate, "Pyth price")
 }
 
-/// Apply the shared zero / sub-dust / `RATE_MAX` sanity gates to a normalized
-/// rate. Returns `Err` (⇒ discredit the source) on any violation.
-fn apply_rate_sanity(rate: Uint128, ctx: &str) -> StdResult<Uint128> {
+/// Normalize a raw Pyth `price` (with exponent `expo`, so the real value
+/// is `price × 10^expo`) into a `RATE_PRECISION` (6-decimal) rate.
+/// A price at expo `-6` maps 1:1; expo `< -6` divides out the extra
+/// decimals; expo `> -6` multiplies up.
+///
+/// TOTAL (never panics): `expo` is gated to `[PYTH_EXPO_MIN, PYTH_EXPO_MAX]`
+/// here as well as by `probe_pyth_usd_rate`, so the `6 - |expo|` /
+/// `|expo| - 6` exponents below can never underflow and the `10^n` powers
+/// stay bounded. Direct callers (tests, future code) get a fail-closed
+/// `Err` on an out-of-range `expo` rather than a wasm trap.
+pub fn normalize_pyth_price_to_rate(price: u128, expo: i32) -> StdResult<Uint128> {
+    if !(PYTH_EXPO_MIN..=PYTH_EXPO_MAX).contains(&expo) {
+        return Err(StdError::generic_err(format!(
+            "Pyth expo {} out of range [{}, {}] for normalization",
+            expo, PYTH_EXPO_MIN, PYTH_EXPO_MAX
+        )));
+    }
+    let rate = match expo.cmp(&-6) {
+        std::cmp::Ordering::Equal => price,
+        std::cmp::Ordering::Less => {
+            // expo < -6: value has more than 6 decimals; divide.
+            let divisor = 10u128.pow((expo.abs() - 6) as u32);
+            price / divisor
+        }
+        std::cmp::Ordering::Greater => {
+            // expo > -6 (i.e. -5, -4): fewer decimals; multiply. `expo` is
+            // gated to [-12,-4] above, so `unsigned_abs()` ∈ [4,12] and the
+            // Greater branch only runs for {-5,-4} ⇒ `6 - |expo|` ∈ {1,2}.
+            let multiplier = 10u128.pow(6 - expo.unsigned_abs());
+            price
+                .checked_mul(multiplier)
+                .ok_or_else(|| StdError::generic_err("overflow normalizing Pyth price"))?
+        }
+    };
+    Ok(Uint128::from(rate))
+}
+
+/// Apply the shared zero / sub-dust / `RATE_MAX` sanity gates to a
+/// normalized rate. Returns `Err` (⇒ fail closed) on any violation.
+pub fn apply_rate_sanity(rate: Uint128, ctx: &str) -> StdResult<Uint128> {
     if rate.is_zero() {
         return Err(StdError::generic_err(format!(
             "{ctx}: price too small for {RATE_PRECISION}-precision rate"
@@ -251,131 +256,11 @@ fn apply_rate_sanity(rate: Uint128, ctx: &str) -> StdResult<Uint128> {
     }
     if rate > Uint128::new(RATE_MAX) {
         return Err(StdError::generic_err(format!(
-            "{ctx}: price exceeds the ${} per native sanity ceiling — wrong-decimals \
-             quote denom or manipulated pricing pool",
+            "{ctx}: price exceeds the ${} per native sanity ceiling",
             RATE_MAX / RATE_PRECISION
         )));
     }
     Ok(rate)
-}
-
-/// Combine a routed source's two legs into a `RATE_PRECISION` rate:
-/// `native_in_usd = TWAP(native/quote) × TWAP(quote/usd)`.
-///
-/// With `D1 = quote_raw/native_raw`, `D2 = usd_raw/quote_raw` and the native
-/// denom fixed at 6 decimals, `rate = D1 × D2 × 10^(12 - usd_decimals)`. The
-/// intermediate token's decimals cancel in the product, so only the USD
-/// stable's `usd_decimals` matters. Computed as
-/// `d1_atomics × d2_atomics / 10^(24 + usd_decimals)` in `Uint256`,
-/// fail-closed on overflow.
-pub fn twap_pair_to_rate(d1: &str, d2: &str, usd_decimals: u32) -> StdResult<Uint128> {
-    let dec1: Decimal = d1
-        .parse()
-        .map_err(|e| StdError::generic_err(format!("cannot parse leg-1 twap \"{}\": {}", d1, e)))?;
-    let dec2: Decimal = d2
-        .parse()
-        .map_err(|e| StdError::generic_err(format!("cannot parse leg-2 twap \"{}\": {}", d2, e)))?;
-    if dec1.is_zero() || dec2.is_zero() {
-        return Err(StdError::generic_err(
-            "routed twap price has a zero leg — a pricing pool has no meaningful liquidity",
-        ));
-    }
-    if usd_decimals > 30 {
-        return Err(StdError::generic_err(format!(
-            "usd_decimals {} is implausibly large",
-            usd_decimals
-        )));
-    }
-    // rate = d1_atomics * d2_atomics / 10^(24 + usd_decimals).
-    let num = Uint256::from(dec1.atomics())
-        .checked_mul(Uint256::from(dec2.atomics()))
-        .map_err(|_| StdError::generic_err("overflow combining routed twap legs"))?;
-    let den = Uint256::from(10u64).pow(24 + usd_decimals);
-    let rate = Uint128::try_from(num / den)
-        .map_err(|_| StdError::generic_err("routed twap price too large after normalization"))?;
-    apply_rate_sanity(rate, "routed twap price")
-}
-
-/// Median of a non-empty slice of rates. Sorts a copy and returns the middle
-/// element (odd count) or the floor-average of the two middle elements (even
-/// count). Deterministic — no float, no `Math.random`. Panics only on an
-/// empty slice, which callers guard against.
-pub fn median_rate(rates: &[Uint128]) -> Uint128 {
-    let mut sorted = rates.to_vec();
-    sorted.sort_unstable();
-    let n = sorted.len();
-    if n % 2 == 1 {
-        sorted[n / 2]
-    } else {
-        // Floor average of the two middle values via Uint256 to avoid any
-        // intermediate overflow.
-        let lo = Uint256::from(sorted[n / 2 - 1]);
-        let hi = Uint256::from(sorted[n / 2]);
-        Uint128::try_from((lo + hi) / Uint256::from(2u64)).unwrap_or(sorted[n / 2 - 1])
-    }
-}
-
-/// Parse the x/twap module's 18-decimal `Dec` string (quote per base) into a
-/// `RATE_PRECISION` fixed-point rate, normalizing for the quote denom's
-/// decimal count.
-///
-/// The x/twap price `D` is `quote_raw / base_raw`. With the native (base)
-/// denom fixed at 6 decimals and the quote denom carrying `q` decimals, the
-/// USD-per-native rate in `RATE_PRECISION` units is `D * 10^(12 - q)`:
-/// - `q == 6` reduces to `D * RATE_PRECISION` — the original 6/6 behavior;
-/// - `q == 18` (an 18-decimal bridged stable) divides out the extra 1e12 so
-///   an honest $1 price still reads `1_000_000`.
-pub fn twap_dec_to_rate_with_decimals(twap: &str, quote_decimals: u32) -> StdResult<Uint128> {
-    let dec: Decimal = twap
-        .parse()
-        .map_err(|e| StdError::generic_err(format!("cannot parse twap dec \"{}\": {}", twap, e)))?;
-    if dec.is_zero() {
-        return Err(StdError::generic_err(
-            "twap price is zero — pricing pool has no meaningful liquidity",
-        ));
-    }
-    // Bound the exponent so an absurd `quote_decimals` cannot build a giant
-    // power of ten. No real denom exceeds ~24 decimals.
-    if quote_decimals > 30 {
-        return Err(StdError::generic_err(format!(
-            "quote_decimals {} is implausibly large",
-            quote_decimals
-        )));
-    }
-
-    // rate = D * 10^(12 - q). Work from `dec.atomics()` (= D * 1e18) in
-    // Uint256 so neither a high-decimal quote nor a large price overflows.
-    //   rate = atomics * 10^(12 - q) / 1e18
-    // Split into a multiply and a divide that are each always non-negative.
-    let atomics = Uint256::from(dec.atomics()); // D * 1e18
-    let ten = Uint256::from(10u64);
-    let pow = |n: u32| -> Uint256 { ten.pow(n) };
-
-    // numerator exponent and denominator exponent of 10, kept >= 0.
-    // rate = atomics * 10^num / 10^den where num - den = (12 - q) - 18 = -(6 + q)? -- derive directly:
-    // rate = atomics * 10^(12 - q) / 10^18
-    //  q <= 12:  num = 12 - q, den = 18
-    //  q  > 12:  num = 0,      den = 18 + (q - 12) = 6 + q
-    let (num_exp, den_exp) = if quote_decimals <= 12 {
-        (12 - quote_decimals, 18u32)
-    } else {
-        (0u32, 6 + quote_decimals)
-    };
-    let scaled = atomics
-        .checked_mul(pow(num_exp))
-        .map_err(|_| StdError::generic_err("overflow normalizing twap price"))?;
-    let rate256 = scaled / pow(den_exp);
-    let rate = Uint128::try_from(rate256)
-        .map_err(|_| StdError::generic_err("twap price too large after normalization"))?;
-
-    apply_rate_sanity(rate, &format!("twap price {} (quote decimals {})", twap, quote_decimals))
-}
-
-/// Parse the x/twap `Dec` string assuming a 6-decimal quote denom (the
-/// primary-pool convention). Thin wrapper over
-/// [`twap_dec_to_rate_with_decimals`].
-pub fn twap_dec_to_rate(twap: &str) -> StdResult<Uint128> {
-    twap_dec_to_rate_with_decimals(twap, 6)
 }
 
 /// Value `native_amount` (base units) in micro-USD at `rate`.
@@ -406,9 +291,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_one_dollar_rate() {
-        // x/twap Dec "1.000000000000000000" == $1 per token == rate 1e6.
-        let rate = twap_dec_to_rate("1.000000000000000000").unwrap();
+    fn normalizes_expo_minus_8() {
+        // OSMO/USD $0.03037 published at expo -8: price=3_037_100.
+        // real = 3_037_100 × 10^-8 = $0.030371 → 6-dec rate 30_371.
+        let rate = normalize_pyth_price_to_rate(3_037_100, -8).unwrap();
+        assert_eq!(rate, Uint128::new(30_371));
+    }
+
+    #[test]
+    fn normalizes_expo_minus_6_identity() {
+        // $1.00 at expo -6 = price 1_000_000 → rate 1_000_000.
+        let rate = normalize_pyth_price_to_rate(1_000_000, -6).unwrap();
         assert_eq!(rate, Uint128::new(1_000_000));
         assert_eq!(
             native_to_usd(Uint128::new(25_000_000_000), rate).unwrap(),
@@ -417,50 +310,76 @@ mod tests {
     }
 
     #[test]
-    fn parses_fractional_rate() {
-        // $0.50 per token: 2 native == 1 USD.
-        let rate = twap_dec_to_rate("0.5").unwrap();
-        assert_eq!(rate, Uint128::new(500_000));
+    fn normalizes_expo_minus_5_multiplies() {
+        // $2.50 at expo -5 = price 250_000 → rate 2_500_000.
+        let rate = normalize_pyth_price_to_rate(250_000, -5).unwrap();
+        assert_eq!(rate, Uint128::new(2_500_000));
+    }
+
+    #[test]
+    fn sanity_rejects_zero_and_ceiling() {
+        assert!(apply_rate_sanity(Uint128::zero(), "x").is_err());
         assert_eq!(
-            native_to_usd(Uint128::new(2_000_000), rate).unwrap(),
-            Uint128::new(1_000_000)
+            apply_rate_sanity(Uint128::new(RATE_MAX), "x").unwrap(),
+            Uint128::new(RATE_MAX)
         );
+        assert!(apply_rate_sanity(Uint128::new(RATE_MAX + 1), "x").is_err());
     }
 
     #[test]
-    fn rejects_zero_and_dust_rates() {
-        assert!(twap_dec_to_rate("0").is_err());
-        // 1e-7 truncates below the 1e6 fixed point.
-        assert!(twap_dec_to_rate("0.0000001").is_err());
-        assert!(twap_dec_to_rate("not-a-number").is_err());
+    fn dust_price_fails_closed() {
+        // expo -12, price 1 → 1 / 10^6 = 0 → dust → reject.
+        let rate = normalize_pyth_price_to_rate(1, -12).unwrap();
+        assert_eq!(rate, Uint128::zero());
+        assert!(apply_rate_sanity(rate, "x").is_err());
     }
 
     #[test]
-    fn rejects_rates_above_sanity_ceiling() {
-        // Exactly at the ceiling is accepted...
-        assert_eq!(twap_dec_to_rate("10000").unwrap(), Uint128::new(RATE_MAX));
-        // ...one micro-USD above is refused.
-        let err = twap_dec_to_rate("10000.000001").unwrap_err();
-        assert!(err.to_string().contains("sanity ceiling"), "{}", err);
-        // The wrong-decimals scenario: an 18-decimal quote denom
-        // inflates a $1 price to ~1e12 — must be refused, not used to
-        // value commits.
-        assert!(twap_dec_to_rate("1000000000000").is_err());
+    fn normalize_across_full_expo_range_is_consistent() {
+        // A $1.00 price expressed at every allowed expo must normalize to the
+        // SAME 6-dec rate (1_000_000). price = 1 * 10^|expo|.
+        for expo in PYTH_EXPO_MIN..=PYTH_EXPO_MAX {
+            let raw = 10u128.pow(expo.unsigned_abs());
+            let rate = normalize_pyth_price_to_rate(raw, expo).unwrap();
+            assert_eq!(
+                rate,
+                Uint128::new(1_000_000),
+                "expo {expo}: $1.00 must normalize to 1_000_000, got {rate}"
+            );
+        }
     }
 
     #[test]
-    fn round_trips_with_inverse_at_same_rate() {
-        // native -> usd -> native at the same rate loses at most 1 base
-        // unit to truncation (the pool-side inverse is
-        // usd * RATE_PRECISION / rate).
-        let rate = twap_dec_to_rate("3.141592000000000000").unwrap();
-        let native = Uint128::new(123_456_789);
-        let usd = native_to_usd(native, rate).unwrap();
-        let back = usd
-            .checked_mul(Uint128::new(RATE_PRECISION))
-            .unwrap()
-            .checked_div(rate)
-            .unwrap();
-        assert!(native.checked_sub(back).unwrap() <= Uint128::new(1));
+    fn normalize_rejects_out_of_range_expo_without_panicking() {
+        // The pub fn must be TOTAL — no wasm trap on a hostile/out-of-range
+        // expo, only a fail-closed Err. These would previously underflow /
+        // overflow the power-of-ten arithmetic.
+        for bad in [-13i32, -3, 0, 7, i32::MIN, i32::MAX] {
+            let r = normalize_pyth_price_to_rate(1_000_000, bad);
+            assert!(r.is_err(), "expo {bad} must Err, not panic/succeed");
+        }
+    }
+
+    #[test]
+    fn conf_gate_saturation_is_benign_huge_price_hits_rate_max() {
+        // A near-i64::MAX price would saturate the conf-threshold multiply.
+        // That is safe because such a price normalizes ABOVE RATE_MAX and is
+        // rejected by the sanity ceiling regardless of the conf outcome.
+        let huge = (i64::MAX as u128) - 1;
+        // At expo -6 it maps ~1:1 → astronomically above RATE_MAX.
+        let rate = normalize_pyth_price_to_rate(huge, -6).unwrap();
+        assert!(apply_rate_sanity(rate, "x").is_err(), "huge price must fail RATE_MAX");
+    }
+
+    #[test]
+    fn realistic_osmo_price_normalizes() {
+        // Live Pyth OSMO/USD shape: price 3_193_516 at expo -8 = $0.03193516
+        // → 6-dec rate 31_935 ($0.031935/OSMO).
+        let rate = normalize_pyth_price_to_rate(3_193_516, -8).unwrap();
+        assert_eq!(rate, Uint128::new(31_935));
+        // Value a $0.25 threshold worth of OSMO: 0.25 / 0.031935 ≈ 7.8 OSMO
+        // = 7_800_000 base units (6 decimals). * rate / 1e6 ≈ $0.249 micro-USD.
+        let usd = native_to_usd(Uint128::new(7_800_000), rate).unwrap();
+        assert!(usd >= Uint128::new(249_000) && usd <= Uint128::new(250_000), "got {usd}");
     }
 }

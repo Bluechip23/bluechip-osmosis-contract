@@ -162,21 +162,41 @@ pub struct FactoryInstantiate {
     /// having every downstream commit path treat that denom's
     /// balance as the real pairing asset.
     pub bluechip_denom: String,
-    /// Osmosis pool id whose arithmetic TWAP prices `bluechip_denom`
-    /// against `usd_quote_denom`. Point this at the chain's deepest
-    /// native/USD-stable pool (e.g. the main OSMO/USDC pool) — the
-    /// manipulation cost of every USD valuation in the protocol is the
-    /// cost of moving THIS pool for `twap_window_seconds`.
+    /// Osmosis pool id used ONLY as the cross-denom fee-swap EXECUTION
+    /// route at threshold crossing — it acquires the chain's
+    /// `usd_quote_denom`-denominated `gamm_pool_creation_fee` by swapping
+    /// `bluechip_denom` → `usd_quote_denom` through this pool. It is NO
+    /// LONGER a price source (USD pricing is via Pyth below); the fee swap
+    /// is tiny (~$20) so this pool need only hold enough liquidity to fill
+    /// that, not to resist price manipulation. When the gamm fee is
+    /// denominated in the native denom this pool is unused.
     pub pricing_pool_id: u64,
-    /// The USD-stable quote denom on the pricing pool (e.g. Noble USDC's
-    /// IBC denom on Osmosis). Must be a 6-decimal dollar asset — the
-    /// TWAP quote-per-base price is consumed directly as USD-per-native.
+    /// The USD-stable quote denom of the `gamm_pool_creation_fee` acquired
+    /// through `pricing_pool_id` at crossing (e.g. Noble USDC's IBC denom).
     pub usd_quote_denom: String,
-    /// Arithmetic-TWAP lookback window in seconds. Bounds:
-    /// [`crate::usd_price::TWAP_WINDOW_MIN_SECONDS`],
-    /// [`crate::usd_price::TWAP_WINDOW_MAX_SECONDS`]. Default 600 (10min).
-    #[serde(default = "default_twap_window_seconds")]
-    pub twap_window_seconds: u64,
+    /// Address of the Pyth CW contract to read the native/USD price from.
+    /// The USD valuation of every commit is `price(pyth) × amount`. Read
+    /// live at instantiate/propose/apply so a typo surfaces immediately.
+    pub pyth_contract_addr: String,
+    /// The Pyth price-feed id (64-hex, no `0x`) for `bluechip_denom`/USD
+    /// (e.g. the OSMO/USD feed). The read verifies the returned feed id
+    /// matches this before trusting the price.
+    pub pyth_native_usd_feed_id: String,
+    /// Maximum acceptable age (seconds) of the Pyth price vs block time —
+    /// the staleness gate. A price older than this fails closed, so a
+    /// lagging price keeper halts commits rather than mispricing them.
+    /// Bounds `[MAX_PYTH_STALENESS_MIN_SECONDS, MAX_PYTH_STALENESS_MAX_SECONDS]`;
+    /// `#[serde(default)]` fills `DEFAULT_MAX_PYTH_STALENESS_SECONDS` (300).
+    #[serde(default = "default_max_pyth_staleness_seconds")]
+    pub max_pyth_staleness_seconds: u64,
+    /// Confidence-interval gate in basis points of price. A Pyth price
+    /// whose `conf/price` exceeds this is rejected (too dispersed). Clamped
+    /// to `[PYTH_CONF_THRESHOLD_BPS_MIN, PYTH_CONF_THRESHOLD_BPS_MAX]` at
+    /// read time so neither a mis-set value nor an unset slot can disable
+    /// the check. `#[serde(default)]` fills `PYTH_CONF_THRESHOLD_BPS_DEFAULT`
+    /// (200 = 2%).
+    #[serde(default = "default_pyth_conf_threshold_bps")]
+    pub pyth_conf_threshold_bps: u16,
     /// Flat fee charged on every `Create`
     /// call, denominated in base units of `bluechip_denom`.
     /// Forwarded to `bluechip_wallet_address`; surplus refunded to the
@@ -236,87 +256,6 @@ pub struct FactoryInstantiate {
     /// deployments behave identically until the admin proposes an update.
     #[serde(default = "default_emergency_withdraw_delay_seconds")]
     pub emergency_withdraw_delay_seconds: u64,
-
-    /// Multi-pool median oracle configuration. The primary pricing source is
-    /// always `(pricing_pool_id, usd_quote_denom)` above (also the pool used
-    /// for the cross-denom GAMM-fee swap); `oracle.extra_sources` adds MORE
-    /// Osmosis pools that hold `bluechip_denom`, so the USD valuation is the
-    /// MEDIAN of all sources that pass validation rather than a single pool's
-    /// TWAP. Empty extras + default thresholds reproduce the legacy
-    /// single-pool behavior exactly (median of one). See
-    /// [`crate::usd_price::probe_median_usd_rate`].
-    ///
-    /// `#[serde(default)]` lets pre-this-field factory records deserialize
-    /// with an empty oracle set (single-pool behavior).
-    #[serde(default)]
-    pub oracle: MultiOracleConfig,
-}
-
-/// One additional native→USD pricing source: an Osmosis pool whose
-/// arithmetic TWAP prices `bluechip_denom` against `quote_denom`.
-///
-/// `quote_decimals` is the on-chain decimal count of `quote_denom` and is
-/// load-bearing: the x/twap price is `quote_raw / base_raw`, so a quote denom
-/// that does not carry 6 decimals must be normalized before it can be
-/// compared/medianed against the 6-decimal USD convention. Most Osmosis
-/// USD stables (Noble USDC, axlUSDC, USDT) are 6-decimal; an 18-decimal
-/// bridged stable (e.g. some DAI representations) must declare `18` here or
-/// its rate would read ~1e12× too high and be discredited by the sanity
-/// ceiling.
-#[cw_serde]
-#[derive(Default)]
-pub struct PricingSource {
-    pub pool_id: u64,
-    pub quote_denom: String,
-    pub quote_decimals: u32,
-    /// Optional second hop that converts a NON-USD quote into USD.
-    ///
-    /// When the source pool prices the native asset against a volatile token
-    /// (e.g. an OSMO/BTC or OSMO/ATOM pool) rather than a USD stable, set this
-    /// to a pool that trades `quote_denom` against a USD stable
-    /// (`quote_denom`/USDC). The valuation becomes
-    /// `TWAP(native/quote) × TWAP(quote/usd)` = native priced in USD. `None`
-    /// ⇒ the source is DIRECT: `quote_denom` is itself the USD stable (the
-    /// legacy behavior). In the routed case `quote_decimals` is unused (the
-    /// intermediate token's decimals cancel in the product); only
-    /// `usd_leg.usd_decimals` matters for normalization.
-    #[serde(default)]
-    pub usd_leg: Option<UsdLeg>,
-}
-
-/// Second leg of a routed [`PricingSource`]: a pool that prices the source's
-/// `quote_denom` in a USD stable.
-#[cw_serde]
-#[derive(Default)]
-pub struct UsdLeg {
-    /// Pool that trades the source's `quote_denom` against `usd_denom`.
-    pub pool_id: u64,
-    /// The USD-stable denom the intermediate is priced in (e.g. Noble USDC).
-    pub usd_denom: String,
-    /// Decimals of `usd_denom` (6 for USDC/USDT). Load-bearing for
-    /// normalization to the micro-USD-per-micro-native convention.
-    pub usd_decimals: u32,
-}
-
-/// Median-oracle thresholds. All fields default to the legacy single-pool
-/// semantics (no extra sources, quorum of 1, no deviation filter).
-#[cw_serde]
-#[derive(Default)]
-pub struct MultiOracleConfig {
-    /// Additional pricing sources beyond the primary
-    /// `(pricing_pool_id, usd_quote_denom)`.
-    pub extra_sources: Vec<PricingSource>,
-    /// Minimum number of sources (primary + extras) that must pass validation
-    /// for a median to be produced. `0` is treated as `1`. If fewer sources
-    /// validate, the whole valuation fails closed (no commit is priced) — the
-    /// same fail-closed posture the single-pool path already has.
-    pub min_valid_sources: u32,
-    /// Maximum relative deviation, in basis points, a source may have from the
-    /// provisional median before it is DISCREDITED (dropped) and the median
-    /// recomputed from the survivors. `0` disables the deviation filter (the
-    /// median alone still absorbs a minority of manipulated/outlier pools).
-    /// Example: `500` = drop any source more than 5% from the median.
-    pub max_deviation_bps: u64,
 }
 
 pub const EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS: u64 = 60;
@@ -326,8 +265,25 @@ pub fn default_emergency_withdraw_delay_seconds() -> u64 {
     86_400
 }
 
-pub fn default_twap_window_seconds() -> u64 {
-    600
+pub fn default_max_pyth_staleness_seconds() -> u64 {
+    crate::usd_price::DEFAULT_MAX_PYTH_STALENESS_SECONDS
+}
+
+pub fn default_pyth_conf_threshold_bps() -> u16 {
+    crate::usd_price::PYTH_CONF_THRESHOLD_BPS_DEFAULT
+}
+
+/// The effective Pyth confidence-interval gate (bps), clamped to the
+/// allowed range so neither a mis-set config value nor a future edit can
+/// disable the check (config validation also range-checks it at
+/// propose/instantiate; this clamp is defense-in-depth for the runtime
+/// read and any direct state write / migration). Read by the live Pyth
+/// valuation.
+pub fn effective_pyth_conf_bps(config: &FactoryInstantiate) -> u16 {
+    config.pyth_conf_threshold_bps.clamp(
+        crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MIN,
+        crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MAX,
+    )
 }
 
 /// Default (zero) GAMM pool-creation fee — collection disabled.

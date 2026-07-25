@@ -35,7 +35,6 @@ const CREATION_FEE: u128 = 1_000_000;
 
 fn default_factory_config() -> FactoryInstantiate {
     FactoryInstantiate {
-        oracle: Default::default(),
         cw721_nft_contract_id: 58,
         factory_admin_address: admin(),
         commit_threshold_limit_usd: Uint128::new(25_000_000_000),
@@ -49,7 +48,6 @@ fn default_factory_config() -> FactoryInstantiate {
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
         usd_quote_denom: "uusdc".to_string(),
-        twap_window_seconds: 600,
         pool_creation_fee: Uint128::new(CREATION_FEE),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -57,6 +55,10 @@ fn default_factory_config() -> FactoryInstantiate {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
+            pyth_contract_addr: "pyth_oracle".to_string(),
+            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
+            max_pyth_staleness_seconds: 300,
+            pyth_conf_threshold_bps: 200,
     }
 }
 

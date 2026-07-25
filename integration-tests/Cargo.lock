@@ -1271,9 +1271,11 @@ dependencies = [
  "cosmwasm-std",
  "creator-pool",
  "factory",
+ "mock-pyth",
  "osmosis-test-tube",
  "pool-factory-interfaces",
  "prost 0.13.5",
+ "router",
  "serde",
  "serde_json",
 ]
@@ -1395,6 +1397,15 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mock-pyth"
+version = "1.0.0"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-storage-plus",
 ]
 
 [[package]]
@@ -1915,6 +1926,19 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "router"
+version = "1.0.0"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-storage-plus",
+ "cw2",
+ "cw20",
+ "pool-factory-interfaces",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

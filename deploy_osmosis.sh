@@ -215,13 +215,48 @@ else
     # instantiate; anything else is unroutable at crossing).
     GAMM_POOL_CREATION_FEE="${GAMM_POOL_CREATION_FEE:-0}"
     GAMM_POOL_CREATION_FEE_DENOM="${GAMM_POOL_CREATION_FEE_DENOM:-$NATIVE_DENOM}"
+
+    # ---- Pyth oracle (USD pricing) ---------------------------------
+    # USD valuation of every commit comes from the Pyth OSMO/USD feed —
+    # NOT an on-chain pool TWAP (the OSMO/USD pool substrate is too thin
+    # to price safely; see MAINNET_LIQUIDITY_RECON.md / ORACLE_PYTH_TRANSITION.md).
+    # `pricing_pool_id` / `usd_quote_denom` survive only as the cross-denom
+    # fee-swap route at threshold crossing.
+    #
+    # REQUIRED env (see osmo_testnet.env): PYTH_CONTRACT_ADDR (the chain's
+    # Pyth CW contract) + PYTH_NATIVE_USD_FEED_ID (64-hex OSMO/USD feed id).
+    # Optional gates: PYTH_MAX_STALENESS_SECONDS (default 300, range 30..600),
+    # PYTH_CONF_THRESHOLD_BPS (default 200, range 50..500).
+    #
+    # OPERATIONAL NOTE: Pyth on Osmosis is push-based and the OSMO/USD feed
+    # is NOT kept fresh by the ecosystem — you MUST run a price keeper
+    # (Hermes -> UpdatePriceFeeds) or the staleness gate fails every commit
+    # closed. The instantiate live-probe below reads the feed; if the keeper
+    # is not yet pushing, instantiate will refuse (feed stale) — start the
+    # keeper first.
+    if [ -z "${PYTH_CONTRACT_ADDR:-}" ] || [ -z "${PYTH_NATIVE_USD_FEED_ID:-}" ]; then
+        echo "ERROR: PYTH_CONTRACT_ADDR and PYTH_NATIVE_USD_FEED_ID must be set" >&2
+        echo "       (the Pyth CW contract + the 64-hex OSMO/USD feed id)." >&2
+        exit 1
+    fi
+    PYTH_MAX_STALENESS_SECONDS="${PYTH_MAX_STALENESS_SECONDS:-300}"
+    PYTH_CONF_THRESHOLD_BPS="${PYTH_CONF_THRESHOLD_BPS:-200}"
+    if ! echo "$PYTH_NATIVE_USD_FEED_ID" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        echo "ERROR: PYTH_NATIVE_USD_FEED_ID must be 64 hex chars (no 0x), got:" >&2
+        echo "       $PYTH_NATIVE_USD_FEED_ID" >&2
+        exit 1
+    fi
+
     FACTORY_INIT="$(jq -nc \
+        --arg pyth_addr        "$PYTH_CONTRACT_ADDR" \
+        --arg pyth_feed        "$PYTH_NATIVE_USD_FEED_ID" \
+        --arg pyth_staleness   "$PYTH_MAX_STALENESS_SECONDS" \
+        --arg pyth_conf_bps    "$PYTH_CONF_THRESHOLD_BPS" \
         --arg admin            "$ADDR" \
         --arg wallet           "$PROTOCOL_WALLET" \
         --arg native_denom     "$NATIVE_DENOM" \
         --arg usd_quote        "$USD_QUOTE_DENOM" \
         --arg pricing_pool     "$PRICING_POOL_ID" \
-        --arg twap_window      "$TWAP_WINDOW_SECONDS" \
         --arg threshold_usd    "$COMMIT_THRESHOLD_LIMIT_USD" \
         --arg fee_bc           "$COMMIT_FEE_BLUECHIP" \
         --arg fee_cr           "$COMMIT_FEE_CREATOR" \
@@ -240,7 +275,6 @@ else
             bluechip_denom:                     $native_denom,
             usd_quote_denom:                    $usd_quote,
             pricing_pool_id:                    ($pricing_pool    | tonumber),
-            twap_window_seconds:                ($twap_window     | tonumber),
             commit_threshold_limit_usd:         $threshold_usd,
             commit_fee_bluechip:                $fee_bc,
             commit_fee_creator:                 $fee_cr,
@@ -251,8 +285,17 @@ else
             emergency_withdraw_delay_seconds:   ($emergency_delay | tonumber),
             cw20_token_contract_id:             ($cw20_id         | tonumber),
             cw721_nft_contract_id:              ($cw721_id        | tonumber),
-            create_pool_wasm_contract_id:       ($pool_id         | tonumber)
+            create_pool_wasm_contract_id:       ($pool_id         | tonumber),
+            pyth_contract_addr:                 $pyth_addr,
+            pyth_native_usd_feed_id:            $pyth_feed,
+            max_pyth_staleness_seconds:         ($pyth_staleness  | tonumber),
+            pyth_conf_threshold_bps:            ($pyth_conf_bps   | tonumber)
         }')"
+
+    # Show the operator the EXACT payload before anything is broadcast.
+    echo "--- FactoryInstantiate payload (Pyth oracle) ---"
+    echo "$FACTORY_INIT" | jq .
+    echo ""
 
     # --admin: keep a migration authority so audited wasm fixes can ship.
     # Post-deploy checklist: rotate it to the protocol multisig.
@@ -306,14 +349,18 @@ if CONFIG="$(query_smart "$FACTORY_ADDR" '{"factory":{}}')"; then
         twap_window_seconds:        .factory.twap_window_seconds,
         commit_threshold_limit_usd: .factory.commit_threshold_limit_usd,
         pool_creation_fee:          .factory.pool_creation_fee,
-        bluechip_wallet_address:    .factory.bluechip_wallet_address
+        bluechip_wallet_address:    .factory.bluechip_wallet_address,
+        pyth_contract_addr:         .factory.pyth_contract_addr,
+        pyth_native_usd_feed_id:    .factory.pyth_native_usd_feed_id,
+        max_pyth_staleness_seconds: .factory.max_pyth_staleness_seconds,
+        pyth_conf_threshold_bps:    .factory.pyth_conf_threshold_bps
     }' 2>/dev/null || echo "$CONFIG"
 else
     echo "WARNING: factory config query failed" >&2
 fi
 
 echo ""
-echo "--- live x/twap pricing probe: ConvertNativeToUsd(1 ${NATIVE_DENOM%u*}OSMO) ---"
+echo "--- live Pyth pricing probe: ConvertNativeToUsd(1 OSMO) ---"
 PROBE_MSG='{"pool_factory_query":{"convert_native_to_usd":{"amount":"1000000"}}}'
 if PROBE="$(query_smart "$FACTORY_ADDR" "$PROBE_MSG")" \
     && USD="$(echo "$PROBE" | jq -re '.amount' 2>/dev/null)"; then
@@ -322,10 +369,11 @@ if PROBE="$(query_smart "$FACTORY_ADDR" "$PROBE_MSG")" \
     echo "pricing route OK — commits will value correctly"
 else
     echo "WARNING: pricing probe FAILED. Commits fail closed until this works." >&2
-    echo "         Likely causes: PRICING_POOL_ID ($PRICING_POOL_ID) is not a" >&2
-    echo "         $NATIVE_DENOM/$USD_QUOTE_DENOM pool, or it lacks" >&2
-    echo "         ${TWAP_WINDOW_SECONDS}s of TWAP history. Fix via the 48h" >&2
-    echo "         ProposeConfigUpdate flow or redeploy with a corrected env." >&2
+    echo "         Likely causes: the Pyth price keeper is not pushing (feed" >&2
+    echo "         STALE — start the Hermes → UpdatePriceFeeds keeper), a wrong" >&2
+    echo "         PYTH_CONTRACT_ADDR / PYTH_NATIVE_USD_FEED_ID, or a" >&2
+    echo "         wide-confidence reading. Fix via the 48h ProposeConfigUpdate" >&2
+    echo "         flow (or restart the keeper) and re-run this probe." >&2
     echo "         raw: ${PROBE:-<no response>}" >&2
 fi
 

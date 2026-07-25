@@ -4,6 +4,7 @@ members = [
     "creator-pool",
     "factory",
     "router",
+    "mock-pyth",
 ]
 exclude = [
     # cargo-fuzz crate uses libFuzzer + nightly; excluded from the
