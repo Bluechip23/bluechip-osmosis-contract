@@ -3,7 +3,7 @@
 //! Exercises `usd_price::probe_pyth_usd_rate` end to end through the mock
 //! Pyth querier: the happy-path read + normalization, and every fail-closed
 //! gate (staleness, min-age, future-skew, wide confidence, out-of-range
-//! exponent, non-positive price, sanity ceiling, unreachable contract).
+//! exponent, non-positive price, plausibility band, unreachable contract).
 //! The Pyth price is driven by `WasmMockQuerier::set_pyth_*`.
 
 use cosmwasm_std::testing::{mock_env, MockApi};
@@ -153,12 +153,14 @@ fn nonpositive_price_fails_closed() {
 #[test]
 fn above_rate_max_fails_closed() {
     let mut deps = mock_dependencies(&[]);
-    // $10_001 per OSMO at expo -6 = price 10_001_000_000 → over RATE_MAX.
+    // $10_001 per OSMO at expo -6 = price 10_001_000_000, far over the $100
+    // OSMO plausibility ceiling (which also catches a feed pointing at a
+    // higher-priced asset).
     deps.querier.set_pyth_price(10_001_000_000, -6, 0);
     deps.querier.set_pyth_publish_time(1_000_000);
     let env = env_at_age(1_000_000, 30);
     let err = probe_native_usd_rate(deps.as_ref(), &env, &pyth_config()).unwrap_err();
-    assert!(err.to_string().contains("sanity ceiling"), "got: {err}");
+    assert!(err.to_string().contains("plausibility ceiling"), "got: {err}");
 }
 
 #[test]

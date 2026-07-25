@@ -57,7 +57,7 @@ pub enum ExecuteMsg {
     // Time-locked release of the creator's RAW excess coins earmarked at
     // threshold crossing (see `CreatorExcessLiquidity`). Sends the raw
     // `bluechip_amount` + `token_amount` to the creator once `unlock_time`
-    // has passed (FIX C). Claimable even after an emergency drain (FIX D).
+    // has passed. Claimable even after an emergency drain.
     ClaimCreatorExcessLiquidity {
         #[serde(default)]
         transaction_deadline: Option<Timestamp>,
@@ -281,7 +281,7 @@ pub struct PoolInstantiateMsg {
     /// Creator-chosen token display name / ticker / decimals. Used at
     /// instantiate to register bank denom `Metadata` (`MsgSetDenomMetadata`)
     /// so explorers/wallets render the creator's name and the 6-decimal
-    /// scaling instead of the raw `factory/{addr}/{sub}` micro-denom (M-01).
+    /// scaling instead of the raw `factory/{addr}/{sub}` micro-denom.
     /// `#[serde(default)]` keeps pre-this-field create messages valid; when
     /// `token_symbol` is empty the pool skips metadata registration.
     #[serde(default)]
@@ -292,7 +292,7 @@ pub struct PoolInstantiateMsg {
     pub token_decimals: u8,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
-    /// FIX E — uosmo amount of the native GAMM pool-creation fee, set by the
+    /// uosmo amount of the native GAMM pool-creation fee, set by the
     /// factory from its `gamm_pool_creation_fee.amount` config. Pinned at
     /// instantiate into `CREATION_FEE_RESERVE_TARGET`; the pool retains this
     /// much bluechip out of the protocol's 1% commit fee to cover the fee the

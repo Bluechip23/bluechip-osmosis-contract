@@ -28,7 +28,7 @@
 //! Each [`execute_swap_operation`] call swaps only `current_balance -
 //! offer_baseline`, where `offer_baseline` is the router's PRE-route balance
 //! of that hop's offer denom, snapshotted in [`start_multi_hop`] before any
-//! funds move (M-03). So each hop consumes exactly the funds THIS route
+//! funds move. So each hop consumes exactly the funds THIS route
 //! produced — the attached input on hop 0, the prior hop's output on later
 //! hops — and any pre-existing or donated balance sits below the baseline
 //! and is left untouched. A stray deposit to the router is therefore NOT
@@ -130,7 +130,7 @@ fn start_multi_hop(
     if offer_amount.is_zero() {
         return Err(RouterError::ZeroAmount);
     }
-    // F-5 — reentrancy guard. A route in progress means a pool called during
+    // Reentrancy guard. A route in progress means a pool called during
     // one of this route's hops is trying to re-enter with a nested route;
     // reject it. Set here and cleared by the terminal `AssertReceived`. The
     // sub-message writes of a route are visible to a reentrant call within the
@@ -192,7 +192,7 @@ fn start_multi_hop(
     let last_idx = operations.len() - 1;
     let mut messages: Vec<SubMsg> = Vec::with_capacity(operations.len() + 1);
 
-    // M-03 — snapshot the router's PRE-route balance of each hop's offer
+    // Snapshot the router's PRE-route balance of each hop's offer
     // denom so each hop swaps only the funds THIS route produces, never a
     // pre-existing/donated balance. For the FIRST hop's offer denom the
     // snapshot already includes the just-attached `offer_amount` (funds are
@@ -303,7 +303,7 @@ pub fn execute_swap_operation(
         .offer_asset_info
         .query_pool_strict(&deps.querier, env.contract.address.clone())?;
 
-    // M-03 — swap only the funds THIS route produced for this hop, not the
+    // Swap only the funds THIS route produced for this hop, not the
     // router's whole balance of the offer denom. `offer_baseline` is the
     // pre-route balance snapshotted by `start_multi_hop`; the delta is the
     // attached input (hop 0) or the prior hop's output (later hops). A
@@ -361,7 +361,7 @@ pub fn execute_assert_received(
             actual: received,
         });
     }
-    // F-5 — route completed successfully; clear the reentrancy guard. This is
+    // Route completed successfully; clear the reentrancy guard. This is
     // the terminal step of every route (always appended after the hops), so
     // the flag set in `start_multi_hop` is always cleared on the success path;
     // on a failure path the tx reverts and the flag rolls back instead.

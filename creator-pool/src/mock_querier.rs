@@ -1,9 +1,9 @@
 //! Test-only querier that answers the poolmanager `EstimateSwapExactAmountIn`
-//! Stargate query (FIX A) plus the factory USD-valuation wasm queries.
+//! Stargate query plus the factory USD-valuation wasm queries.
 //!
 //! The stock `cosmwasm_std::testing::MockQuerier` returns
 //! `UnsupportedRequest` for `QueryRequest::Stargate` and offers no override
-//! hook, so the on-chain swap-estimate floor introduced in FIX A cannot be
+//! hook, so the on-chain swap-estimate floor cannot be
 //! exercised through it. This wrapper decodes the osmosis-std estimate
 //! request and returns a CONFIGURABLE expected-out amount
 //! (`token_out = token_in * estimate_num / estimate_den`, default 1:1), so
@@ -35,7 +35,7 @@ use prost::Message;
 pub const ESTIMATE_QUERY_PATH: &str =
     "/osmosis.poolmanager.v1beta1.Query/EstimateSwapExactAmountIn";
 
-/// Stargate path osmosis-std emits for `TotalPoolLiquidity` (FIX G breaker).
+/// Stargate path osmosis-std emits for `TotalPoolLiquidity` (breaker).
 pub const TOTAL_POOL_LIQUIDITY_QUERY_PATH: &str =
     "/osmosis.poolmanager.v1beta1.Query/TotalPoolLiquidity";
 
@@ -57,7 +57,7 @@ pub struct PoolMockQuerier {
     gamm_pool_creation_fee: Option<Coin>,
     pricing_pool_id: u64,
     usd_quote_denom: String,
-    /// FIX G — per-side liquidity returned for the poolmanager
+    /// Per-side liquidity returned for the poolmanager
     /// `TotalPoolLiquidity` query. Defaults to a healthy (well-above-floor)
     /// pair on the standard fixture denoms so swaps aren't spuriously paused;
     /// breaker tests override it via [`set_pool_liquidity`] to drive a side
@@ -108,7 +108,7 @@ impl PoolMockQuerier {
     }
 
     /// Configure the per-side liquidity the `TotalPoolLiquidity` query
-    /// returns (FIX G breaker). Pass amounts below 25% of the seeded side to
+    /// returns (breaker). Pass amounts below 25% of the seeded side to
     /// drive the breaker; omit a denom entirely to simulate a fully-drained
     /// side (reads as zero → trips the breaker).
     pub fn set_pool_liquidity(&mut self, coins: Vec<Coin>) {
@@ -170,7 +170,7 @@ impl PoolMockQuerier {
                 SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
             }
             QueryRequest::Stargate { path, .. } if path == TOTAL_POOL_LIQUIDITY_QUERY_PATH => {
-                // FIX G — echo the configured per-side liquidity. The breaker
+                // Echo the configured per-side liquidity. The breaker
                 // matches these coins by denom against SEED_LIQUIDITY.
                 let liquidity: Vec<OsmoCoin> = self
                     .pool_liquidity
@@ -188,7 +188,7 @@ impl PoolMockQuerier {
                 enum WrapperProbe {
                     PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
                 }
-                // F-1 — the RegisteredRouter probe is answered regardless of
+                // The RegisteredRouter probe is answered regardless of
                 // whether the factory oracle rate is configured, so the
                 // SimpleSwap belief-price gate can resolve on any post-threshold
                 // fixture. Reports the well-known mock router address.

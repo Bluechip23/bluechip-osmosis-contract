@@ -184,7 +184,7 @@ fn create_pool_exact_pay_emits_no_refund() {
 }
 
 // ---------------------------------------------------------------------------
-// F-1 / R2-C — router registration (ProposeRouter/ApplyRouter + RegisteredRouter)
+// Router registration (ProposeRouter/ApplyRouter + RegisteredRouter)
 // ---------------------------------------------------------------------------
 
 fn registered_router(deps: cosmwasm_std::Deps) -> Option<cosmwasm_std::Addr> {
@@ -197,11 +197,11 @@ fn registered_router(deps: cosmwasm_std::Deps) -> Option<cosmwasm_std::Addr> {
     from_json::<RegisteredRouterResponse>(&bin).unwrap().router
 }
 
-/// R2-C — registering a router is admin-only AND 48h-timelocked
+/// Registering a router is admin-only AND 48h-timelocked
 /// (`ProposeRouter` → wait → `ApplyRouter`). The `RegisteredRouter` query
 /// reflects only the APPLIED value; a pending proposal does not take effect
 /// until the timelock elapses. This is the exact pair the pool's SimpleSwap
-/// belief-price exemption depends on (F-1).
+/// belief-price exemption depends on.
 #[test]
 fn router_registration_is_admin_only_and_timelocked() {
     use crate::state::ADMIN_TIMELOCK_SECONDS;

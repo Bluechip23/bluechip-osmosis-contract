@@ -3,7 +3,7 @@
 //! Phase-2: the internal LP system and the creator fee-pot are gone. The
 //! only claim that survives is the time-locked creator-excess release.
 //!
-//! FIX C: the release transfers the RAW earmarked coins — `bluechip_amount`
+//! The release transfers the RAW earmarked coins — `bluechip_amount`
 //! (bluechip denom) + `token_amount` (creator denom) — that were parked in
 //! the contract's bank balance at threshold crossing, straight to the
 //! creator. There is no LP-share query/proportion anymore.

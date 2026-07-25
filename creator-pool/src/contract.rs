@@ -113,7 +113,7 @@ pub fn instantiate(
     let create_denom =
         pool_core::osmosis_msgs::create_denom_msg(&env.contract.address, &msg.subdenom);
 
-    // M-01 — register bank Metadata for the freshly created denom so
+    // Register bank Metadata for the freshly created denom so
     // explorers/wallets show the creator's chosen name/symbol and the
     // 6-decimal scaling instead of the raw `factory/{addr}/{sub}` micro
     // denom. Dispatched as a `reply_on_error` SubMsg (swallowed in `reply`)
@@ -184,7 +184,7 @@ pub fn instantiate(
     USD_RAISED_FROM_COMMIT.save(deps.storage, &Uint128::zero())?;
     COMMITFEEINFO.save(deps.storage, &msg.commit_fee_info)?;
     NATIVE_RAISED_FROM_COMMIT.save(deps.storage, &Uint128::zero())?;
-    // FIX E — pin the gamm creation-fee reserve target from the factory-
+    // Pin the gamm creation-fee reserve target from the factory-
     // supplied amount and start the running reserve at zero. The pool retains
     // bluechip out of the protocol's 1% commit fee up to this target so the
     // fee the gamm module auto-charges at threshold-crossing is paid from
@@ -192,7 +192,7 @@ pub fn instantiate(
     crate::state::CREATION_FEE_RESERVE_TARGET
         .save(deps.storage, &msg.gamm_pool_creation_fee_amount)?;
     crate::state::BLUECHIP_FEE_RESERVED.save(deps.storage, &Uint128::zero())?;
-    // O(1) distinct-committer counter (FIX B): starts at zero, bumped once
+    // O(1) distinct-committer counter: starts at zero, bumped once
     // per newly-seen committer in `COMMIT_LEDGER`.
     crate::state::COMMITTER_COUNT.save(deps.storage, &0u32)?;
     IS_THRESHOLD_HIT.save(deps.storage, &false)?;
@@ -232,7 +232,7 @@ fn check_pool_not_paused(storage: &dyn Storage) -> Result<(), ContractError> {
 ///
 /// Retained as the canonical "pool must be live and writable" gate for
 /// fund-touching handlers. The creator-excess claim intentionally does
-/// NOT use it (FIX D — that claim must survive a drain); kept here so the
+/// NOT use it (that claim must survive a drain); kept here so the
 /// strict-gate helper stays available and documented.
 #[allow(dead_code)]
 fn check_pool_writable(storage: &dyn Storage) -> Result<(), ContractError> {
@@ -295,7 +295,7 @@ pub fn execute(
                 return Err(ContractError::ShortOfThreshold {});
             }
             offer_asset.confirm_sent_native_balance(&info)?;
-            // F-1 — a DIRECT SimpleSwap must carry an explicit `belief_price`.
+            // A DIRECT SimpleSwap must carry an explicit `belief_price`.
             // The on-chain estimate floor is computed at current (possibly
             // already-front-run) pool state, so it is NOT sandwich-resistant;
             // only a caller-supplied `belief_price` bounds a prior-tx sandwich.
@@ -336,7 +336,7 @@ pub fn execute(
         ExecuteMsg::ClaimCreatorExcessLiquidity {
             transaction_deadline,
         } => {
-            // FIX D: the creator-excess earmark is the creator's OWN
+            // The creator-excess earmark is the creator's OWN
             // time-locked coins, and an emergency drain deliberately
             // preserves it (see pool_core::admin core drain). So this claim
             // must remain reachable even after a drain (which also leaves
@@ -481,7 +481,7 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
         }
         REPLY_ID_SWAP_FORWARD => pool_core::swap::handle_swap_forward_reply(deps, env, msg),
         crate::state::REPLY_ID_SET_DENOM_METADATA => {
-            // M-01 — denom metadata is display-only; a failure to register
+            // Denom metadata is display-only; a failure to register
             // it must never brick pool creation. `reply_on_error` only fires
             // on failure, so simply acknowledge it and move on (the denom and
             // all pool state are already committed).

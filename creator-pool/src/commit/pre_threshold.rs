@@ -30,7 +30,7 @@ pub(super) fn process_pre_threshold_commit(
     analytics: &mut PoolAnalytics,
 ) -> Result<Response, ContractError> {
     // Append to the ledger and bump the O(1) distinct-committer counter
-    // iff `sender` is new (FIX B). `record_committer` does the
+    // iff `sender` is new. `record_committer` does the
     // has()-before-update check so repeat committers never double-count.
     super::record_committer(deps.storage, &sender, commit_value)?;
     // `new_usd_total` is the dispatcher's already-computed

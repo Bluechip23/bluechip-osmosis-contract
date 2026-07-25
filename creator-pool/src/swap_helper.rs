@@ -18,25 +18,25 @@ use pool_factory_interfaces::{
 /// message boundaries.
 pub const RATE_PRECISION: u128 = 1_000_000;
 
-/// F-3 — pool-side sanity CEILING on the factory-supplied native→USD rate
+/// Pool-side sanity CEILING on the factory-supplied native→USD rate
 /// ($10,000 per native token). Mirrors `factory::usd_price::RATE_MAX`.
 ///
-/// The factory already gates its TWAP read against this ceiling, so under
-/// normal operation this NEVER fires. It exists as a defense-in-depth
-/// firewall at the trust boundary: the pool delegates its entire valuation
-/// to the factory, and every threshold / distribution calculation rides on
-/// `rate_used`. A factory bug, a mis-set pricing pool, or a wrong-decimals
-/// quote denom that slipped past the factory would otherwise let an absurd
-/// rate value a dust commit as thousands of dollars and cross the threshold.
+/// The factory already gates its Pyth price against a tighter plausibility
+/// ceiling, so under normal operation this NEVER fires. It exists as a
+/// defense-in-depth firewall at the trust boundary: the pool delegates its
+/// entire valuation to the factory, and every threshold / distribution
+/// calculation rides on `rate_used`. A factory bug, a mis-configured Pyth
+/// feed, or a wrong-decimals value that slipped past the factory would
+/// otherwise let an absurd rate value a dust commit as thousands of dollars
+/// and cross the threshold.
 /// Only the ceiling is enforced (not a floor): an inflated rate is the theft
 /// vector (dust crosses cheaply / steals distribution share), whereas a
 /// deflated rate only makes crossing HARDER, so an asymmetric bound is
 /// correct. `rate == 0` is rejected separately at the call site.
 pub const POOL_RATE_MAX: u128 = 10_000 * RATE_PRECISION;
 
-/// Values `native_amount` in USD via the factory, which computes the
-/// price from Osmosis's chain-native x/twap over the configured
-/// native/USD-stable pool, and returns the factory's live
+/// Values `native_amount` in USD via the factory, which reads the price
+/// from the configured Pyth native/USD feed, and returns the factory's live
 /// `bluechip_wallet_address` in the same response — the two pieces of
 /// factory state every commit needs, fetched in a single cross-contract
 /// round-trip. The caller reuses `rate_used` for the inverse conversion
@@ -45,10 +45,12 @@ pub const POOL_RATE_MAX: u128 = 10_000 * RATE_PRECISION;
 /// admin wallet rotation takes effect for every existing pool without a
 /// separate query.
 ///
-/// Fail-closed: any error (factory unreachable, TWAP query failure)
-/// propagates and reverts the commit rather than mispricing it. There is
-/// no staleness window to check — the TWAP is computed against current
-/// chain state at query time.
+/// Fail-closed: any error (factory unreachable, Pyth query failure, or a
+/// stale / low-confidence / out-of-band price rejected by the factory's
+/// gates) propagates and reverts the commit rather than mispricing it. The
+/// factory enforces the staleness window against the Pyth publish_time, so
+/// a lagging price keeper halts commits rather than pricing them off a
+/// stale feed.
 pub fn get_commit_context(
     deps: Deps,
     factory_addr: &Addr,
@@ -62,7 +64,7 @@ pub fn get_commit_context(
     )
 }
 
-/// F-1 — query the factory for its registered multi-hop router address.
+/// Query the factory for its registered multi-hop router address.
 /// Used by `SimpleSwap` to decide whether a caller that supplied no
 /// `belief_price` is the exempt router (which enforces an end-to-end
 /// `minimum_receive`) or a direct caller (who must supply a price bound so

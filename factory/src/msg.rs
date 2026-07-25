@@ -32,7 +32,7 @@ pub struct CreatePoolReplyMsg {
     /// `CreatorTokenInfo` so the pool can register bank denom `Metadata`
     /// (via `MsgSetDenomMetadata`) at instantiate — otherwise explorers and
     /// wallets show the raw `factory/{addr}/{sub}` micro-denom with no name
-    /// or decimal scaling (M-01). Must stay wire-compatible with the pool's
+    /// or decimal scaling. Must stay wire-compatible with the pool's
     /// `PoolInstantiateMsg`; `#[serde(default)]` keeps old create messages
     /// deserializing (a pool receiving empty strings simply skips metadata).
     #[serde(default)]
@@ -43,7 +43,7 @@ pub struct CreatePoolReplyMsg {
     pub token_decimals: u8,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
-    /// FIX E — uosmo amount of the native GAMM pool-creation fee, forwarded
+    /// uosmo amount of the native GAMM pool-creation fee, forwarded
     /// from the factory config's `gamm_pool_creation_fee.amount`. The pool
     /// pins it as `CREATION_FEE_RESERVE_TARGET` and funds the fee from the
     /// protocol's retained 1% commit fee rather than the seed or the creator.
@@ -59,7 +59,7 @@ pub enum ExecuteMsg {
         config: FactoryInstantiate,
     },
     UpdateConfig {},
-    // F-1 / R2-C — register/rotate the multi-hop router address, behind the
+    // Register/rotate the multi-hop router address, behind the
     // standard 48h propose/apply timelock so a change to who is exempt from
     // the SimpleSwap belief_price requirement is observable for the full
     // window like every other factory config change. Pools read the applied

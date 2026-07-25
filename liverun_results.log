@@ -1,0 +1,233 @@
+STACK deploy 02:31
+factory                                  osmo13uvcm9jk4atluv4xvxjthpmnhj4j7l780mxsd3t75d8usua2e7ksqpu63y
+router                                   osmo1d4qf5q642trc4gw7xzs55jpsunl6lud4uzejsndnkdqu59947guqqdaekk
+mock_pyth                                osmo1aqvmj8tpmf2gu5es27l87d9uxxxs7vv6p22kp8r8yjj4v3vs2jkqhhxt3l @ $10/OSMO
+fund bob +30 OSMO                        AEBCF454B7040C73D33DA76ABB1BC553399A7B7470FBDBD79C62ABFE2382E76E
+fund carol +25 OSMO                      72CE7306E41BED19D84EC7DAC6FEE320863D85FF74663E08A6469A9061028249
+fund dave +5 OSMO                        764AE3FF479BAE8A8293B9118E28F1197AA98D874398A28D7E44B41612C33C8D
+P1 cross commit (bob $130 overshoot)     7D2623D89A97D3F058AF814D0B8C85C3D8C135F2AE07F0AB528AF46C39472EB6
+
+===== FINAL 5-POOL RUN (excess factory) 02:43 =====
+factory(final)                           osmo1flguuys8shhn2370xqgvv8cruessvq3zw77ffj7gsztfn0nnc36q8edhxm
+router(final)                            osmo1u2677eg7jaf54s0trxla6pyl92ste673em4xr9gsc6fm4j3ygxksjwrqxa
+config                                   threshold $100, price $10/OSMO, max_lock 4 OSMO, lock_days 0
+===== POOL LPONE (Live Pool One) overshoot=yes ===== 
+LPONE pool_addr                          osmo1nwf9pn96dkezpc5z3586y35rla6jq67gmevkczpcu4kyc8tup39qy3mjcq
+===== POOL LPTWO (Live Pool Two) overshoot=no ===== 
+===== POOL LPTRE (Live Pool Three) overshoot=no ===== 
+===== POOL LPFOR (Live Pool Four) overshoot=no ===== 
+===== POOL LPFIV (Live Pool Five) overshoot=yes ===== 
+ALL POOLS COMPLETE                       02:44
+
+===== POOL LPONE (Live Pool One) 1 committer / $130 OVERSHOOT =====
+LPONE pool_addr                          osmo1nwf9pn96dkezpc5z3586y35rla6jq67gmevkczpcu4kyc8tup39qy3mjcq
+LPONE commit bob $130(overshoot)         85D4375E6E0CA224487FBC2CD363E126092928597D13EDB64E9F9A21BCDB2446
+LPONE is_fully_commited                  "fully_committed"
+LPONE gamm pool                          {"pool_id":1345,"lp_share_denom":"gamm/pool/1345"}
+LPONE distribution                       4904C64596DAF274A441FD84135790B89F29EE660BD9ECFC4B83E7ABE206A2C2
+LPONE distribution_state(null=done)      null
+LPONE bob share (100%, expect 500000000000) 500000000000
+LPONE ClaimCreatorExcessLiquidity        0D69AE06A5F43647914109CE64EA16EF961487C5C3412C23BDD6C6B8B1A4520C
+LPONE excess claimed -> alice native/token deltas above see log
+===== POOL LPTWO (Live Pool Two) overshoot=no ===== 
+LPTWO pool_addr                          osmo1wne8umvyqy2am2n423u35waekfe3up4m7yls0rwwhct8jzr0h5lqgwpztx
+LPTWO commit bob 2500000uosmo($25.x)     D52B77D97D544363ACD961403A46E66BE958EFBCB3EDACE73C44E6ABCF707883
+LPTWO commit carol 7500000uosmo($75.x)   DE1024BF8F60FC98BB5DB31ACE8D6ECACFB07FACE78627B23A45CF526053588A
+LPTWO crossed? is_fully_commited         "fully_committed"
+LPTWO gamm pool                          {"pool_id":1346,"lp_share_denom":"gamm/pool/1346"}
+LPTWO distribution batch                 D439758411D24FC37FF67DDBC1BEE2A54BBC029A0C8AB8CE0AB686DAC69D7BAC
+LPTWO distribution_state (null=done)     null
+LPTWO share bob (factory/osmo1wne8umvyqy2am2n423u35waekfe3up4m7yls0rwwhct8jzr0h5lqgwpztx/lptwo) 125000000000
+LPTWO share carol (factory/osmo1wne8umvyqy2am2n423u35waekfe3up4m7yls0rwwhct8jzr0h5lqgwpztx/lptwo) 375000000000
+LPTWO creator_earnings(pre-claim)        {"creator_wallet_address":"osmo192xm4dql0wzs727lae96td9ffuvxadam342efr","excess":{"bluechip_amount":"5400000","token_amount":"201063829787","unlock_time":"1784947799322273792","claimable_now":true},"is_threshold_hit":true,"threshold_crossed_at":"1784947799322273792"}
+LPTWO ClaimCreatorExcessLiquidity        99E8BE754B5022D21AF1CB2652BC0BD94110C5AF6B32DFF326B4CC27D09FDFCA
+LPTWO alice native +excess               469006202 -> 474396040 (creator-tok 551063829787)
+LPTWO creator_earnings(post-claim, excess should be null) {"creator_wallet_address":"osmo192xm4dql0wzs727lae96td9ffuvxadam342efr","excess":null,"is_threshold_hit":true,"threshold_crossed_at":"1784947799322273792"}
+LPTWO DONE                               osmo1wne8umvyqy2am2n423u35waekfe3up4m7yls0rwwhct8jzr0h5lqgwpztx
+===== POOL LPTRE (Live Pool Three) overshoot=no ===== 
+===== POOL LPFOR (Live Pool Four) overshoot=no ===== 
+LPFOR pool_addr                          osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr
+LPFOR commit bob 1000000uosmo($10.x)     9DB31AD8A026EB8E8089E09D30CD6E90B25A1D7936DDD6D29346E613E9041431
+LPFOR commit carol 3000000uosmo($30.x)   DE66CB745095599C58047F4623572934C3730F0C12A83A41D136D55E76008A59
+LPFOR commit dave 2000000uosmo($20.x)    7C7D4C64F04099097BE62FDCBA4B1EC6A084870DBB351CD66833DD9BF9F765CF
+LPFOR commit keeper 4000000uosmo($40.x)  F0898DC155E49B4B5F564109B0E8D4B888D9C7860B14BB656A9C863DA59EF3E1
+LPFOR crossed? is_fully_commited         "fully_committed"
+LPFOR gamm pool                          {"pool_id":1347,"lp_share_denom":"gamm/pool/1347"}
+LPFOR distribution batch                 9397906497033283494B2163ADE73800CFC0EBD35942034E104339E039BA9EB8
+LPFOR distribution_state (null=done)     null
+LPFOR share bob (factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor) 50000000000
+LPFOR share carol (factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor) 150000000000
+LPFOR share dave (factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor) 100000000000
+LPFOR share keeper (factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor) 200000000000
+LPFOR creator_earnings(pre-claim)        {"creator_wallet_address":"osmo192xm4dql0wzs727lae96td9ffuvxadam342efr","excess":{"bluechip_amount":"5400000","token_amount":"201063829787","unlock_time":"1784947996637846443","claimable_now":true},"is_threshold_hit":true,"threshold_crossed_at":"1784947996637846443"}
+LPFOR ClaimCreatorExcessLiquidity        C1CBBD51FDA803C16A92249FE97722D91CF4025D29E676C78089152A483876A8
+LPFOR alice native +excess               474787241 -> 480177071 (creator-tok 551063829787)
+LPFOR creator_earnings(post-claim, excess should be null) {"creator_wallet_address":"osmo192xm4dql0wzs727lae96td9ffuvxadam342efr","excess":null,"is_threshold_hit":true,"threshold_crossed_at":"1784947996637846443"}
+LPFOR DONE                               osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr
+===== POOL LPFIV (Live Pool Five) overshoot=yes ===== 
+LPFIV pool_addr                          osmo1dg0n3taw8w8aywfzqaxz8mkvupny027lwan78rvrj6hjquny95psyh4f9z
+LPFIV commit bob 2000000uosmo($20.x)     5CBE7B0B580BF8F90D6AB7FD8515B03FF6F3FD05432C327BCB5C7C07EC31B84A
+LPFIV commit carol 2000000uosmo($20.x)   4B4BBA69A7887622C40F309135748F7F09FCF42EF1BC9CB5CF511DA827AE5F71
+LPFIV commit dave 2000000uosmo($20.x)    79D5E452EFA2342199D4DF458C8A727739CF8FDFD1CA5BB4D262412BA258349B
+LPFIV commit keeper 2000000uosmo($20.x)  C0D81632C2BDFBE8F43E00F9B95B18CB1E0D86385B0F78ED9070921C190D0C01
+ALL POOLS COMPLETE                       02:56
+
+===== LPFIV completion (pusher $40 overshoot -> cross) =====
+LPFIV commit pusher $40(overshoot)       CB7E50CA536776B959066163EA01CC0C2DAC33BEBBD25C18EEE6365CD7238053
+LPFIV is_fully_commited                  "fully_committed"
+LPFIV gamm pool                          {"pool_id":1348,"lp_share_denom":"gamm/pool/1348"}
+LPFIV distribution                       A57547EFC7E9CC443D04B9C922228E8A39E952D94001FD87DD7EB149CEA14FEE
+LPFIV distribution_state(null=done)      null
+LPFIV share bob (expect 100000000000 =20%) 100000000000
+LPFIV share carol (expect 100000000000 =20%) 100000000000
+LPFIV share dave (expect 100000000000 =20%) 100000000000
+LPFIV share keeper (expect 100000000000 =20%) 100000000000
+LPFIV share pusher (expect 100000000000 =20%) 100000000000
+LPFIV ClaimCreatorExcessLiquidity        1A3BF1458E4DA0BFC24BA435497C1BEBD049E3DDE20C8EBDF6D3ECF2F91465E6
+LPFIV DONE                               osmo1dg0n3taw8w8aywfzqaxz8mkvupny027lwan78rvrj6hjquny95psyh4f9z
+
+===== LPTRE (re-create) 3 committers / 1-3 each =====
+LPTRE create tx                          651EA7F37E3147C89F9213DAB7812426C4B764C5593C0E8B93B48C8DF6D435F4
+LPTRE pool_addr                          osmo19l8ec2tty8w9w6kspt5ff9g59yd7ftf5qky468zmmt3u4zkgrz9svy2lzy
+LPTRE commit bob $33.3                   2B80BDD91E9A2CDCB5C656A2A32706681C1E6284D3B35E214BA603214E5667E9
+LPTRE commit carol $33.3                 A16C671CA94762E2C18637758B92A8CC8AAD85294F45C4EC8D55CDDE5A1FF48F
+LPTRE commit dave $33.3                  9369637BFA1FFA1E5A3CD3FEF49C418159932C813A2E322D6431FD25A4576C07
+LPTRE is_fully_commited                  "fully_committed"
+LPTRE gamm pool                          {"pool_id":1349,"lp_share_denom":"gamm/pool/1349"}
+LPTRE distribution                       D60C7FA1D3D12AF93A86E45F3F2936246ACB614AB71C1784E6C112EC0DAAD5C3
+LPTRE distribution_state(null=done)      null
+LPTRE share bob (~166.7B =1/3)           166666700000
+LPTRE share carol (~166.7B =1/3)         166666650000
+LPTRE share dave (~166.7B =1/3)          166666650000
+LPTRE ClaimCreatorExcessLiquidity        828332D41E256552A66C6888580C341F0B71147552ED95481F649F77BE31595A
+LPTRE DONE                               osmo19l8ec2tty8w9w6kspt5ff9g59yd7ftf5qky468zmmt3u4zkgrz9svy2lzy
+
+===== LP FUNCTIONALITY =====
+----- LP on lpone (pool osmo1nwf9pn96dkezpc5z3586y35rla6jq67gmevkczpcu4kyc8tup39qy3mjcq, gamm 1345) ----- 
+lpone gamm reserves (pre-LP)             {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo1nwf9pn96dkezpc5z3586y35rla6jq67gmevkczpcu4kyc8tup39qy3mjcq/lpone","amount":"148936170213"},{"denom":"uosmo","amount":"3130000"}]}
+lpone LP deposit tx                      D481EEE66444FD1C981CC243098CB86E9F94E93AAC10B2990356C7A7A65C861A
+lpone alice LP shares received           158146964856230031900
+lpone swap1 buy 0.2 OSMO->tok (gamm)     EB72055D431EE7F5D017380739AED3FD36AFA052A61CBC8F6AC40A47387A33BF
+lpone swap1 sell tok->OSMO (gamm)        6A0C5D01106A4263AAB9C104C9941BAEAE6B7C95956A13632766FB335E28E73F
+lpone swap2 buy 0.2 OSMO->tok (gamm)     4BAA4FCC4A00F59DDDB1487272CB6DD28662EAAF5F82B2D44B09BD6F12B90CCE
+lpone swap2 sell tok->OSMO (gamm)        322B6FEDE8F668EE0CC62C39CCEB3E16275A265FB0E85C62EE07915E8529019B
+lpone gamm reserves (post-swaps, fees accrued) {"shares":"258146964856230031900","assets":[{"denom":"factory/osmo1nwf9pn96dkezpc5z3586y35rla6jq67gmevkczpcu4kyc8tup39qy3mjcq/lpone","amount":"384455703542"},{"denom":"uosmo","amount":"8082726"}]}
+lpone LP remove(exit) tx                 026D19FEE5783114258B0E809030D8CDCECFD6309BC0EDBE0DA799BEFE631E38
+lpone alice LP shares after exit (expect 0) 0
+lpone alice OSMO deposit->exit           491545009 -> 491529465
+lpone alice TOK  deposit->exit           551063829787 -> 551052496592
+lpone LP DONE                            
+----- LP on lptwo (pool osmo1wne8umvyqy2am2n423u35waekfe3up4m7yls0rwwhct8jzr0h5lqgwpztx, gamm 1346) ----- 
+lptwo gamm reserves (pre-LP)             {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo1wne8umvyqy2am2n423u35waekfe3up4m7yls0rwwhct8jzr0h5lqgwpztx/lptwo","amount":"148936170213"},{"denom":"uosmo","amount":"3100000"}]}
+lptwo LP deposit tx                      FA911B3A5593EB9A0428A39C950A6D744C4DC6CBCCCAEA776CF80C7E1C57BB01
+lptwo alice LP shares received           159677419354838709600
+lptwo gamm reserves (post-deposit, pre-swap) {"shares":"259677419354838709600","assets":[{"denom":"factory/osmo1wne8umvyqy2am2n423u35waekfe3up4m7yls0rwwhct8jzr0h5lqgwpztx/lptwo","amount":"386753603296"},{"denom":"uosmo","amount":"8050000"}]}
+lptwo swap1 buy 0.2 OSMO->tok (gamm)     F09ECB6E6ECDD5987FD18A8D86A1D265D5C34CF80B69795AA844C741EBC7536A
+lptwo swap1 sell tok->OSMO (gamm)        12B94D854F318DB1DD3D07F7E52CE98504223F07D2D4A98012940176EA782ACF
+lptwo swap2 buy 0.2 OSMO->tok (gamm)     23013A03E027EAF91B5B7763F9299376CBEE6BC5B0423667A96BFEBA589A420E
+lptwo swap2 sell tok->OSMO (gamm)        CC2AC037E0E05D51051B61A4ECDA37CA2EAA40D5D06B7527932A5F9E9441525E
+lptwo gamm reserves (post-swaps, fees accrued) {"shares":"259677419354838709600","assets":[{"denom":"factory/osmo1wne8umvyqy2am2n423u35waekfe3up4m7yls0rwwhct8jzr0h5lqgwpztx/lptwo","amount":"386734926514"},{"denom":"uosmo","amount":"8052726"}]}
+lptwo LP remove(exit) tx                 B8E35D21DC2D7AF27BEC6CD8505C0398AAC5572278D79B3958A0E1A15C363C1B
+lptwo alice LP shares after exit (expect 0) 0
+lptwo alice OSMO deposit->exit           491529465 -> 491513927
+lptwo alice TOK  deposit->exit           551063829787 -> 551052345305
+lptwo LP DONE                            
+----- LP on lptre (pool osmo19l8ec2tty8w9w6kspt5ff9g59yd7ftf5qky468zmmt3u4zkgrz9svy2lzy, gamm 1349) ----- 
+lptre gamm reserves (pre-LP)             {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo19l8ec2tty8w9w6kspt5ff9g59yd7ftf5qky468zmmt3u4zkgrz9svy2lzy/lptre","amount":"148936122680"},{"denom":"uosmo","amount":"3099999"}]}
+lptre LP deposit tx                      A1FF35CE0F6EC6AC6ADBC020A845E0EE00AF13409855CB53186FB8206C739E75
+lptre alice LP shares received           159677470863779572600
+lptre gamm reserves (post-deposit, pre-swap) {"shares":"259677470863779572600","assets":[{"denom":"factory/osmo19l8ec2tty8w9w6kspt5ff9g59yd7ftf5qky468zmmt3u4zkgrz9svy2lzy/lptre","amount":"386753556578"},{"denom":"uosmo","amount":"8050000"}]}
+lptre swap1 buy 0.2 OSMO->tok (gamm)     B815E0E9DFE6C67CDD1C169844D6916628544BC6D3DDA996E0D618BB53E69E2E
+lptre swap1 sell tok->OSMO (gamm)        DEE7111C302FC67BDE5EFC0CF0CE37AA737F53A3D967005C63986F870C353447
+lptre swap2 buy 0.2 OSMO->tok (gamm)     C806E011E8323E5B70A3B20381BE29E0048AD3BA1E158A6CA460B1D66C8A0BFA
+lptre swap2 sell tok->OSMO (gamm)        48DEFDF732B744474A042DDD0E36B94F82EEF114B167C1B97DEC02FE6C8DE891
+lptre gamm reserves (post-swaps, fees accrued) {"shares":"259677470863779572600","assets":[{"denom":"factory/osmo19l8ec2tty8w9w6kspt5ff9g59yd7ftf5qky468zmmt3u4zkgrz9svy2lzy/lptre","amount":"386734879798"},{"denom":"uosmo","amount":"8052726"}]}
+lptre LP remove(exit) tx                 52680BD6DD2DDD79CCC6E17ACAD57C5A0FC025CAD518D3310B298EB7D5467D91
+lptre alice LP shares after exit (expect 0) 0
+lptre alice OSMO deposit->exit           491513927 -> 491498395
+lptre alice TOK  deposit->exit           551063877320 -> 551052392838
+lptre LP DONE                            
+----- LP on lpfor (pool osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr, gamm 1347) ----- 
+lpfor gamm reserves (pre-LP)             {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor","amount":"148936170213"},{"denom":"uosmo","amount":"3100000"}]}
+lpfor LP deposit tx                      
+lpfor alice LP shares received           
+lpfor gamm reserves (post-deposit, pre-swap) 
+lpfor swap1 buy 0.2 OSMO->tok (gamm)     33E32785F4BD2BC8500AF5794B3153AE6B497A8E6E5C58F7253BFA31CD2D2784
+lpfor swap1 sell tok->OSMO (gamm)        CA50F0478D1D66F463A4D053BC81B633321AAD92479101C69CE471A723FA0A5E
+lpfor swap2 buy 0.2 OSMO->tok (gamm)     CCFA8BC25903985C7BF3D3225CF663083C3D0E3D415DF04955A2B25971BEDBDC
+lpfor swap2 sell tok->OSMO (gamm)        0E722F2F4773C36574BC2A256949DDE333083BA5EF017ED27DFC45D001F0A005
+lpfor gamm reserves (post-swaps, fees accrued) {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor","amount":"148918189261"},{"denom":"uosmo","amount":"3102624"}]}
+lpfor LP remove(exit) tx                 
+lpfor alice LP shares after exit (expect 0) 0
+lpfor alice OSMO deposit->exit           491498395 -> 491498395
+lpfor alice TOK  deposit->exit            -> 551063829787
+lpfor LP DONE                            
+----- LP on lpfiv (pool osmo1dg0n3taw8w8aywfzqaxz8mkvupny027lwan78rvrj6hjquny95psyh4f9z, gamm 1348) ----- 
+lpfiv gamm reserves (pre-LP)             {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo1dg0n3taw8w8aywfzqaxz8mkvupny027lwan78rvrj6hjquny95psyh4f9z/lpfiv","amount":"148936170213"},{"denom":"uosmo","amount":"3120000"}]}
+lpfiv LP deposit tx                      BB2F4CD42A0AE5942E4612D7D73A0728C2A1C99D195F607626D601D078196B02
+lpfiv alice LP shares received           158653846153846153800
+lpfiv gamm reserves (post-deposit, pre-swap) {"shares":"258653846153846153800","assets":[{"denom":"factory/osmo1dg0n3taw8w8aywfzqaxz8mkvupny027lwan78rvrj6hjquny95psyh4f9z/lpfiv","amount":"385229132571"},{"denom":"uosmo","amount":"8070000"}]}
+lpfiv swap1 buy 0.2 OSMO->tok (gamm)     0111C079AB347EB515C470A625F5DF325F3FC49EE3D2678263C978084657B026
+lpfiv swap1 sell tok->OSMO (gamm)        63330BE8A079ECA80A2AD301154C7AB40E9A31C2D13E775BBAB3F980A5F34FAD
+lpfiv swap2 buy 0.2 OSMO->tok (gamm)     731BE269001D95ED62AA80EAEB2176A5E52AC9ABFF09E5D20A51790BC28F894F
+lpfiv swap2 sell tok->OSMO (gamm)        00DB0451830599BA6E46775272FD5C34FA789D6CA2FE94F19AB676A7CE6A5A4A
+lpfiv gamm reserves (post-swaps, fees accrued) {"shares":"258653846153846153800","assets":[{"denom":"factory/osmo1dg0n3taw8w8aywfzqaxz8mkvupny027lwan78rvrj6hjquny95psyh4f9z/lpfiv","amount":"385210574398"},{"denom":"uosmo","amount":"8072726"}]}
+lpfiv LP remove(exit) tx                 BFDFD838578CB25F5313861D924005737167D0C89E2EA171C167C4A07714D4DB
+lpfiv alice LP shares after exit (expect 0) 
+lpfiv alice OSMO deposit->exit           491498395 -> 
+lpfiv alice TOK  deposit->exit           551063829787 -> 
+lpfiv LP DONE                            
+LP 2-5 DONE
+
+===== LPFOR LP redo =====
+----- LP on lpfor (pool osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr, gamm 1347) ----- 
+lpfor gamm reserves (pre-LP)             {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor","amount":"148918189261"},{"denom":"uosmo","amount":"3102624"}]}
+lpfor LP deposit tx                      59D1F6A898CF1FAD5903B159F02E0BED79030E741FC054382B0E6366188A71EF
+lpfor alice LP shares received           159542374454655156400
+lpfor gamm reserves (post-deposit, pre-swap) {"shares":"259542374454655156400","assets":[{"denom":"factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor","amount":"386505804403"},{"denom":"uosmo","amount":"8052624"}]}
+lpfor swap1 buy 0.2 OSMO->tok (gamm)     07F99A6B2D5EA13130413E2C0DD479C4B18D68603EA6A78CDB667817310F928D
+lpfor swap1 sell tok->OSMO (gamm)        377DD3DF80B0B53FE5DA1CEDFF2724AA42B452B03C199CF2B5C5EE3FFF542136
+lpfor swap2 buy 0.2 OSMO->tok (gamm)     0104BB893EFD8B8E9A698E8E1309410F44DAFCB891A4AEC0AF42079A2038C2E7
+lpfor swap2 sell tok->OSMO (gamm)        892357875D8ABFA41ED72AA53B84CA206D0C9DAF2BD0198FE70E6CB61E1F2C85
+lpfor gamm reserves (post-swaps, fees accrued) {"shares":"259542374454655156400","assets":[{"denom":"factory/osmo1d8fdkh783jn28p9aeglnx7378a64d42ms8q068ckhfpwrjh8r3ksusrjpr/lpfor","amount":"386487145523"},{"denom":"uosmo","amount":"8055350"}]}
+lpfor LP remove(exit) tx                 33B13B58D4D4EBB6EB3B603F1DA77F3533C0DE873BAB77776C9BC624C28B19D8
+lpfor alice LP shares after exit (expect 0) 0
+lpfor alice OSMO deposit->exit           491482853 -> 491467314
+lpfor alice TOK  deposit->exit           551063829787 -> 551052360052
+lpfor LP DONE                            
+
+===== SAFETY: belief-price gate (F-1) on crossed pool lptwo =====
+REJECTED (as expected): null-belief direct SimpleSwap matched 'belief_price is required|belief'
+ACCEPTED: belief-priced direct SimpleSwap ED82F55ACA33F0F1AF78A2AC8EBDD9BA906B5D72BC2DF3475B0E0FFAA26F5816
+
+===== SAFETY: RATE plausibility ceiling (audit fix) + staleness (fail-closed) via a fresh pre-threshold pool =====
+SAFE pool_addr                           osmo13j9w44yjkmaxcph90xms4mxgfemh45vyajfgk3j3594gyeqmtw7sw923e7
+!! UNEXPECTED for commit at $200/OSMO (over $100 plausibility ceiling) ssage; message index: 0: spendable balance 977468uosmo is smaller than 1000000uosmo: insufficient funds [cosmos/cosmos-sdk@v0.50.14/x/bank/keeper/send.go:382] with gas used: '141384': unknown request
+REJECTED (as expected): commit against a stale Pyth price matched 'stale|InvalidOraclePrice|age'
+REJECTED (as expected): sub-$5 pre-threshold commit matched 'minimum|min_commit|too small|below'
+
+===== SAFETY: no-double-cross (post-threshold commit on already-crossed lptwo) =====
+post-threshold commit accepted (swap-like, no re-cross) E331BBF7B2A090AEA10FF7504F0AEA7516BE247503EF93AE172364840C4D86C7
+lptwo still single gamm pool (no re-cross) {"pool_id":1346,"lp_share_denom":"gamm/pool/1346"}
+
+===== SAFETY: router registration timelock (Propose -> early Apply rejected -> wait 120s -> Apply) =====
+ProposeRouter                            ok
+!! UNEXPECTED for ApplyRouter before 120s timelock : 0: Update is not yet effective. Can be applied after 1784949771.824467318: execute wasm contract failed [CosmWasm/wasmd@v0.53.3/x/wasm/keeper/keeper.go:436] with gas used: '136735': unknown request
+router timelock note                     waiting 125s then applying
+ApplyRouter after timelock               B5900B7BBBA94CD2E73097F3EE500EA9B7C7BFF5BE0049AF43A2F9C28F1D2793
+RegisteredRouter                         {"router":"osmo1u2677eg7jaf54s0trxla6pyl92ste673em4xr9gsc6fm4j3ygxksjwrqxa"}
+
+===== SAFETY: emergency withdraw arc (60s timelock) on sacrificial pool id=4 =====
+EW gamm reserves before                  {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo1dg0n3taw8w8aywfzqaxz8mkvupny027lwan78rvrj6hjquny95psyh4f9z/lpfiv","amount":"148928995307"},{"denom":"uosmo","amount":"3121054"}]}
+EW phase1 initiate+pause                 77FE365C57C428D4189A31111FAFBFEBD8D6DC12B4BC01E562E034837F331FAF
+EW pool paused?                          {"paused":true}
+!! UNEXPECTED for commit while pool paused (emergency) ssage; message index: 0: spendable balance 445878uosmo is smaller than 1000000uosmo: insufficient funds [cosmos/cosmos-sdk@v0.50.14/x/bank/keeper/send.go:382] with gas used: '141519': unknown request
+REJECTED (as expected): EW phase2 drain before 60s timelock matched 'timelock|not.*expired|too early|TimelockNotExpired'
+EW phase2 drain (after 60s)              9FD047C30F45B34624B549697AF1744643159A5D8ED7C17170B2FB269D57040F
+EW alice(bluechip wallet) native before->after 491362030 -> 491319300
+EW gamm reserves after drain             {"shares":"100000000000000000000","assets":[{"denom":"factory/osmo1dg0n3taw8w8aywfzqaxz8mkvupny027lwan78rvrj6hjquny95psyh4f9z/lpfiv","amount":"148928995307"},{"denom":"uosmo","amount":"3121054"}]}
+SAFETY CHECKS COMPLETE                   03:25
+
+===== SAFETY REDO (bob funded) =====
+REJECTED (audit-fix RATE band): $200 commit plausibility ceiling (feed/expo misconfigured, or the feed points at a higher-priced asset): query wasm contract failed: execute wasm contract failed [CosmWasm/wasmd@v0.53.3/x/wasm/keeper/keeper.go:436] with gas used: '317294': unknown request
+REJECTED (paused latch): commit to emergency-withdrawn LPFIV paused due to low liquidity, please supply liquidity before swapping: execute wasm contract failed [CosmWasm/wasmd@v0.53.3/x/wasm/keeper/keeper.go:436] with gas used: '157281': unknown request

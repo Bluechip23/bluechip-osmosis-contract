@@ -78,7 +78,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     let effective_bluechip_excess = amount_after_fees.checked_sub(threshold_portion_after_fees)?;
 
     // Update commit ledger with only the threshold portion, bumping the
-    // O(1) distinct-committer counter if the crosser is new (FIX B). The
+    // O(1) distinct-committer counter if the crosser is new. The
     // counter is read by `trigger_threshold_payout` below to size the
     // initial `distributions_remaining`, so it MUST reflect the crosser
     // before the payout runs — hence the insert-and-count happens here.
@@ -145,8 +145,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // Order matters: acquire a cross-denom creation fee FIRST (fee_swap,
     // when the chain's fee is not native-denominated), create the native
     // pool NEXT (the gamm module charges the fee from the pool's balance),
-    // THEN remit any creation-fee reserve leftover to the bluechip wallet
-    // (FIX E).
+    // THEN remit any creation-fee reserve leftover to the bluechip wallet.
     let mut response = Response::new().add_messages(messages);
     if let Some(swap) = payout_msgs.fee_swap {
         response = response.add_message(swap);
@@ -198,7 +197,7 @@ pub(crate) fn process_threshold_hit_exact(
     }
 
     // Insert the crosser into the ledger + bump COMMITTER_COUNT if new
-    // (FIX B) before `trigger_threshold_payout` reads it below.
+    // before `trigger_threshold_payout` reads it below.
     super::record_committer(deps.storage, &sender, commit_value)?;
     let final_raised = new_total.min(commit_config.commit_amount_for_threshold_usd);
     USD_RAISED_FROM_COMMIT.save(deps.storage, &final_raised)?;
@@ -240,7 +239,7 @@ pub(crate) fn process_threshold_hit_exact(
     );
     // Order matters: acquire a cross-denom creation fee FIRST (fee_swap),
     // create the native pool NEXT (the gamm module charges the fee), THEN
-    // remit any creation-fee reserve leftover (FIX E).
+    // remit any creation-fee reserve leftover.
     let mut response = Response::new().add_messages(messages);
     if let Some(swap) = payout.fee_swap {
         response = response.add_message(swap);

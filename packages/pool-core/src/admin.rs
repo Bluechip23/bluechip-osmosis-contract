@@ -9,7 +9,7 @@
 //! pool's held `gamm/pool/{id}` LP shares (and any residual bluechip /
 //! creator-token bank balance) to the bluechip wallet — EXCLUDING the
 //! time-locked creator-excess earmark, which is preserved so the creator
-//! can still claim it after a drain (FIX D).
+//! can still claim it after a drain.
 
 use crate::asset::{get_native_denom, query_balance, TokenType};
 use crate::error::ContractError;
@@ -137,7 +137,7 @@ pub fn execute_emergency_withdraw_initiate(
 /// the residual bank balances of both pool denoms to the (live-queried)
 /// bluechip wallet and flips `EMERGENCY_DRAINED`.
 ///
-/// FIX D — the creator-excess earmark is PRESERVED across a drain. The
+/// The creator-excess earmark is PRESERVED across a drain. The
 /// caller passes the earmarked amounts (from `CREATOR_EXCESS_POSITION`) as
 /// `earmark_bluechip` / `earmark_creator`; the drain EXCLUDES them from the
 /// residual-bank sweep (saturating), so the time-locked excess stays in the

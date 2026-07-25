@@ -1,6 +1,6 @@
-//! Threshold-crossing ATOMICITY under real VM revert — the one property
-//! every audit round said "cannot be proven by unit tests" (MockStorage
-//! does not roll back on Err; only a real chain reverts a failed tx).
+//! Threshold-crossing ATOMICITY under real VM revert — a property that
+//! cannot be proven by unit tests (MockStorage does not roll back on Err;
+//! only a real chain reverts a failed tx).
 //!
 //! Strategy: force a REAL module-level failure in the MIDDLE of the
 //! crossing's message chain — after the fee bank-sends and the three
@@ -16,12 +16,11 @@
 //! fee-swap → create-pool[reply_on_success] → remit → notify; see
 //! `threshold_crossing.rs`.)
 //!
-//! A second test exercises the F-2 sub-case all three audit reports
-//! flagged: a live fee denom that is NEITHER the native denom NOR the
-//! quote denom bricks every crossing attempt (funds stay, nothing is
-//! taken) until governance restores the fee — then the same pool crosses
-//! cleanly, proving the brick is parameter-recoverable and not permanent
-//! state damage.
+//! A second test exercises the sub-case where a live fee denom that is
+//! NEITHER the native denom NOR the quote denom bricks every crossing
+//! attempt (funds stay, nothing is taken) until governance restores the
+//! fee — then the same pool crosses cleanly, proving the brick is
+//! parameter-recoverable and not permanent state damage.
 
 mod common;
 
@@ -228,7 +227,7 @@ fn mid_crossing_module_failure_reverts_mints_ledger_fees_and_funds() {
     .expect("post-recovery swap through the stored pool id");
 }
 
-/// F-2's sharpest sub-case, live: governance re-denominates the pool
+/// The sharpest sub-case, live: governance re-denominates the pool
 /// -creation fee into a coin the crossing cannot acquire (neither native
 /// nor the quote denom). Every crossing attempt must revert with an
 /// actionable error and TAKE NOTHING; when the fee is restored the same

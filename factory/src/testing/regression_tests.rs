@@ -536,7 +536,7 @@ fn test_propose_pool_config_commit_floor_bounds() {
 /// When the same creator creates two pools, both pool's registry entries
 /// should be independently stored (keyed by pool_id, not creator address).
 #[test]
-fn test_m_new_5_multi_pool_creator_no_registry_collision() {
+fn test_multi_pool_creator_no_registry_collision() {
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
 
@@ -649,7 +649,7 @@ fn test_m_new_5_multi_pool_creator_no_registry_collision() {
 }
 
 #[test]
-fn test_l_new_8_factory_migration_contract_name() {
+fn test_factory_migration_contract_name() {
     let mut deps = mock_deps_with_querier(&[]);
     setup_factory(&mut deps);
 
@@ -1535,7 +1535,7 @@ mod pair_uniqueness_tests {
         );
     }
 
-    /// L-01 — register_pool must fail closed on EVERY registry key, not just
+    /// register_pool must fail closed on EVERY registry key, not just
     /// PAIRS: a duplicate pool_id, a duplicate pool address, and a
     /// pool_address that disagrees with pool_details.creator_pool_addr are
     /// each rejected (with a distinct pair each time so the PAIRS guard is
@@ -1673,7 +1673,7 @@ mod pair_uniqueness_tests {
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
         // Simulate a genuine pre-index legacy contract: it predates
-        // REGISTRY_BACKFILL_DONE, so the one-time gate (M-05) is unset and
+        // REGISTRY_BACKFILL_DONE, so the one-time gate is unset and
         // the back-fill must run. (`setup_factory`'s modern instantiate set
         // the flag; clear it to model the legacy scenario faithfully.)
         crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
@@ -1735,7 +1735,7 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
-        // Model a pre-index legacy contract (see M-05): clear the one-time
+        // Model a pre-index legacy contract: clear the one-time
         // back-fill gate so the walk runs.
         crate::state::REGISTRY_BACKFILL_DONE.remove(&mut deps.storage);
         let res = crate::migrate::migrate(deps.as_mut(), mock_env(), Empty {}).expect("migrate ok");
@@ -1798,7 +1798,7 @@ mod pair_uniqueness_tests {
 
         cw2::set_contract_version(&mut deps.storage, "crates.io:bluechip-factory", "0.1.0")
             .unwrap();
-        // Model a pre-index legacy contract (see M-05): clear the gate so the
+        // Model a pre-index legacy contract: clear the gate so the
         // FIRST migrate runs the back-fill. The first migrate then SETS the
         // gate, so the second migrate below must skip the walk (backfilled=0)
         // — which is exactly the idempotency this test pins.

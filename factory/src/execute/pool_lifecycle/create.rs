@@ -316,7 +316,7 @@ pub(crate) fn execute_create_creator_pool(
         },
         commit_threshold_limit_usd: factory_cw20.commit_threshold_limit_usd,
         subdenom: subdenom.clone(),
-        // M-01 — forward the creator's chosen name/symbol/decimals so the
+        // Forward the creator's chosen name/symbol/decimals so the
         // pool can register bank denom Metadata at instantiate. Already
         // validated by `validate_creator_token_info` above.
         token_name: token_info.name.clone(),
@@ -324,7 +324,7 @@ pub(crate) fn execute_create_creator_pool(
         token_decimals: token_info.decimal,
         max_bluechip_lock_per_pool: factory_cw20.max_bluechip_lock_per_pool,
         creator_excess_liquidity_lock_days: factory_cw20.creator_excess_liquidity_lock_days,
-        // FIX E — thread only the AMOUNT of the GAMM pool-creation fee to the
+        // Thread only the AMOUNT of the GAMM pool-creation fee to the
         // pool, NOT the coin itself. The pool no longer receives the fee as
         // instantiate funds; instead it retains this much bluechip out of the
         // protocol's own 1% commit fee (into CREATION_FEE_RESERVE_TARGET) so
@@ -336,7 +336,7 @@ pub(crate) fn execute_create_creator_pool(
     };
 
     // The pool is instantiated with NO funds. The gamm creation fee is
-    // funded post-hoc from the retained commit-fee reserve (FIX E), so the
+    // funded post-hoc from the retained commit-fee reserve, so the
     // factory neither pre-funds the pool nor collects the fee from the
     // creator here.
     let pool_instantiate = WasmMsg::Instantiate {

@@ -84,7 +84,7 @@ fn denom_of(t: &crate::asset::TokenType) -> String {
 /// belief_floor), or route through the multi-hop router, which enforces
 /// an end-to-end `minimum_receive`. The post-threshold commit path
 /// (`commit::post_threshold`) requires `belief_price` for exactly this
-/// reason (H-3).
+/// reason.
 ///
 /// The function stays PURE and testable: the on-chain estimate is passed
 /// in as `estimated_out` (the query is done by the caller, which holds the
@@ -219,9 +219,9 @@ pub fn compute_token_out_min<C: CustomQuery>(
     Ok(token_out_min)
 }
 
-/// Outcome of the FIX-G relative liquidity circuit breaker.
+/// Outcome of the relative liquidity circuit breaker.
 ///
-/// H-1: the breaker must be able to LATCH the pool paused
+/// The breaker must be able to LATCH the pool paused
 /// (`POOL_PAUSED` + `POOL_PAUSED_AUTO`) and have that write survive. A
 /// handler that returns `Err` has ALL of its storage writes rolled back by
 /// the CosmWasm VM, so the old "save the pause flags, then `return Err`"
@@ -243,7 +243,7 @@ pub enum BreakerOutcome {
     Tripped,
 }
 
-/// FIX G — native relative circuit breaker.
+/// Native relative circuit breaker.
 ///
 /// Queries the LIVE per-side liquidity of the native GAMM pool (`pool_id`)
 /// via the poolmanager `total_pool_liquidity` query and compares each side
@@ -257,7 +257,7 @@ pub enum BreakerOutcome {
 /// Called at the START of swap routing on BOTH swap sites (SimpleSwap here,
 /// and the post-threshold commit path), before dispatching the swap.
 ///
-/// H-1: on a trip the pause writes are persisted here and the caller
+/// On a trip the pause writes are persisted here and the caller
 /// returns `Ok` so the latch survives (an `Err` from the caller would roll
 /// the pause back). The caller is responsible for refunding any attached
 /// offer funds in that `Ok` response, since no revert-based auto-refund
@@ -323,7 +323,7 @@ pub fn enforce_liquidity_breaker<C: CustomQuery>(
 }
 
 /// Build the `Ok` response a swap site returns when the breaker latches the
-/// pool paused (H-1): refund the attached offer coin to the sender (there is
+/// pool paused: refund the attached offer coin to the sender (there is
 /// no revert-based auto-refund on an `Ok` path) and emit the auto-pause
 /// attributes. Kept here so both swap sites produce an identical response.
 pub fn breaker_tripped_refund_response(
@@ -444,7 +444,7 @@ fn execute_simple_swap_with_ctx(
         .may_load(deps.storage)?
         .ok_or(ContractError::ShortOfThreshold {})?;
 
-    // FIX G — trip the native relative circuit breaker BEFORE dispatching
+    // Trip the native relative circuit breaker BEFORE dispatching
     // the swap: if either side of the live pool has fallen below
     // BREAKER_FLOOR_PERCENT% of its seeded liquidity, this auto-pauses the
     // pool and rejects. Shares the exact helper with the post-threshold
@@ -454,7 +454,7 @@ fn execute_simple_swap_with_ctx(
     // regardless of the swap DIRECTION (`offer_denom`/`ask_denom` flip on a
     // sell).
     //
-    // H-1: on a trip the breaker has already latched the pause; we return
+    // On a trip the breaker has already latched the pause; we return
     // `Ok` (refunding the attached offer coin) so the pause persists — an
     // `Err` here would roll the pause write back.
     match enforce_liquidity_breaker(

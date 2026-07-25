@@ -1289,7 +1289,7 @@ fn router_rejects_zero_minimum_receive() {
     // creator-token first-hop offers are wired.
 }
 
-/// F-5 — a route that FAILS must leave `ROUTE_IN_PROGRESS` clear so the next
+/// A route that FAILS must leave `ROUTE_IN_PROGRESS` clear so the next
 /// route still works. The guard is set very early in `start_multi_hop`; if a
 /// failure did not roll it back, the router would wedge permanently after the
 /// first failed swap. Here the first route fails at the final slippage assert

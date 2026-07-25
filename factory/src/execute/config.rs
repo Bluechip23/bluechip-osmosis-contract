@@ -23,10 +23,57 @@ use super::ensure_admin;
 /// Shared between `instantiate` and
 /// `execute_propose_factory_config_update` so the same rules apply to
 /// the initial config and any subsequent config proposal.
+/// Fields that may be updated WITHOUT re-running the live Pyth probe. The
+/// probe's result is independent of every one of them — it reads only
+/// `pyth_contract_addr`, `pyth_native_usd_feed_id`, `max_pyth_staleness_seconds`
+/// and `pyth_conf_threshold_bps` — and each remains validated by the cheap,
+/// always-run checks in `validate_factory_config`. Letting these through
+/// without a fresh feed means a lapsed price keeper cannot block unrelated
+/// admin actions (most importantly rotating a compromised
+/// `bluechip_wallet_address`).
+///
+/// Returns true when `proposed` differs from `current` ONLY in these fields.
+///
+/// SAFETY: implemented by neutralizing exactly this operational allowlist and
+/// then comparing the WHOLE struct, so ANY field not listed here — every field
+/// the probe reads, the priced-asset / fee-swap route fields, and any field
+/// added to `FactoryInstantiate` in the future — forces a re-probe by default.
+/// NEVER add a pricing- or fee-route-relevant field to this list.
+fn only_probe_independent_fields_changed(
+    current: &FactoryInstantiate,
+    proposed: &FactoryInstantiate,
+) -> bool {
+    let mut probe_view = proposed.clone();
+    probe_view.factory_admin_address = current.factory_admin_address.clone();
+    probe_view.bluechip_wallet_address = current.bluechip_wallet_address.clone();
+    probe_view.commit_fee_bluechip = current.commit_fee_bluechip;
+    probe_view.commit_fee_creator = current.commit_fee_creator;
+    probe_view.commit_threshold_limit_usd = current.commit_threshold_limit_usd;
+    probe_view.max_bluechip_lock_per_pool = current.max_bluechip_lock_per_pool;
+    probe_view.creator_excess_liquidity_lock_days = current.creator_excess_liquidity_lock_days;
+    probe_view.pool_creation_fee = current.pool_creation_fee;
+    probe_view.threshold_payout_amounts = current.threshold_payout_amounts.clone();
+    probe_view.emergency_withdraw_delay_seconds = current.emergency_withdraw_delay_seconds;
+    probe_view.cw20_token_contract_id = current.cw20_token_contract_id;
+    probe_view.cw721_nft_contract_id = current.cw721_nft_contract_id;
+    probe_view.create_pool_wasm_contract_id = current.create_pool_wasm_contract_id;
+    // Deliberately NOT copied (⇒ a change forces a re-probe): the probe inputs
+    // pyth_contract_addr / pyth_native_usd_feed_id / max_pyth_staleness_seconds /
+    // pyth_conf_threshold_bps, and the priced-asset / fee-swap route fields
+    // bluechip_denom / pricing_pool_id / usd_quote_denom / gamm_pool_creation_fee.
+    probe_view == *current
+}
+
+/// `current` is the config already stored on the factory (for propose/apply);
+/// pass `None` at instantiate (no prior config, so the live probe always runs).
+/// When `current` is `Some` and only probe-independent operational fields
+/// changed, the live Pyth probe is skipped so a keeper outage can't block the
+/// change — every other (cheap) validation below still runs unconditionally.
 pub(crate) fn validate_factory_config(
     deps: cosmwasm_std::Deps,
     env: &Env,
     config: &FactoryInstantiate,
+    current: Option<&FactoryInstantiate>,
 ) -> Result<(), ContractError> {
     deps.api
         .addr_validate(config.factory_admin_address.as_str())?;
@@ -65,12 +112,14 @@ pub(crate) fn validate_factory_config(
             "bluechip_denom must be non-empty",
         )));
     }
-    // USD pricing config. Every commit is valued through the x/twap of
-    // (pricing_pool_id, bluechip_denom / usd_quote_denom), so a broken
-    // value here bricks commits chain-wide; validate at propose time.
+    // Cross-denom fee-swap route. `pricing_pool_id` is NOT a price source
+    // (USD valuation is via Pyth); it is only the pool used to acquire the
+    // `usd_quote_denom`-denominated gamm creation fee at crossing. A broken
+    // value here would brick crossings when the gamm fee is in that quote
+    // denom, so validate at propose time.
     if config.pricing_pool_id == 0 {
         return Err(ContractError::Std(StdError::generic_err(
-            "pricing_pool_id must be non-zero (the Osmosis pool whose TWAP prices              bluechip_denom in usd_quote_denom)",
+            "pricing_pool_id must be non-zero (the Osmosis pool that swaps bluechip_denom into usd_quote_denom for the gamm creation fee at crossing)",
         )));
     }
     if config.usd_quote_denom.trim().is_empty() {
@@ -125,14 +174,27 @@ pub(crate) fn validate_factory_config(
     // or a wide-confidence price would otherwise surface only as a
     // chain-wide commit outage after the 48h timelock. Reading the real
     // Pyth price against the proposed config turns it into an instant
-    // instantiate/propose/apply-time error. (A propose-time transient
-    // staleness is possible if the keeper lapsed; re-propose once fresh.)
-    crate::usd_price::probe_native_usd_rate(deps, env, config).map_err(|e| {
-        ContractError::Std(StdError::generic_err(format!(
-            "pricing config failed live Pyth probe (contract {}, feed {}): {}",
-            config.pyth_contract_addr, config.pyth_native_usd_feed_id, e
-        )))
-    })?;
+    // instantiate/propose/apply-time error.
+    //
+    // The probe is skipped ONLY when this is a config UPDATE (`current` is
+    // Some) whose changes are confined to probe-independent operational
+    // fields. That decouples a lapsed price keeper from unrelated admin
+    // actions: e.g. rotating a compromised `bluechip_wallet_address` must not
+    // require a fresh feed. Any change touching the probe's inputs or the
+    // pricing/fee-route fields still probes, and instantiate (`current` None)
+    // always probes. All the cheap validations above/below run regardless.
+    let must_probe = match current {
+        None => true,
+        Some(cur) => !only_probe_independent_fields_changed(cur, config),
+    };
+    if must_probe {
+        crate::usd_price::probe_native_usd_rate(deps, env, config).map_err(|e| {
+            ContractError::Std(StdError::generic_err(format!(
+                "pricing config failed live Pyth probe (contract {}, feed {}): {}",
+                config.pyth_contract_addr, config.pyth_native_usd_feed_id, e
+            )))
+        })?;
+    }
 
     // Threshold-payout splits are stored on FactoryInstantiate so they
     // ride the standard 48h propose/apply flow rather than requiring a
@@ -158,12 +220,12 @@ pub(crate) fn validate_factory_config(
         ))));
     }
 
-    // H-01 — the GAMM pool-creation-fee config. Two payable shapes exist:
+    // The GAMM pool-creation-fee config. Two payable shapes exist:
     // - denom == bluechip_denom (osmo-test-5: 1 OSMO): the pool retains
     //   this much bluechip from the 1% commit fee and the gamm module
     //   charges it straight from the pool's native balance;
     // - denom == usd_quote_denom (osmosis-1: 20 Noble USDC): the pool
-    //   still retains NATIVE from the 1% fee (sized at the live TWAP
+    //   still retains NATIVE from the 1% fee (sized at the live Pyth
     //   rate) and swaps it into the fee coin through the pricing pool at
     //   crossing — the pricing pool trades native/usd_quote by
     //   definition, so the route always exists.
@@ -202,10 +264,12 @@ pub fn execute_update_factory_config(
 
     // Re-validate at apply time. Between propose (48h ago) and apply,
     // on-chain state can have moved (the pricing pool could have been
-    // drained or pruned); re-running the validation — including the
-    // live TWAP probe — catches stale-proposal hazards before the
-    // state lands.
-    validate_factory_config(deps.as_ref(), &env, &pending.new_config)?;
+    // drained or pruned, or the Pyth config could no longer read); re-running
+    // the validation — including the live Pyth probe when the proposal touches
+    // pricing — catches stale-proposal hazards before the state lands. The
+    // still-stored config is the "current" baseline for the skip decision.
+    let current = FACTORYINSTANTIATEINFO.load(deps.storage)?;
+    validate_factory_config(deps.as_ref(), &env, &pending.new_config, Some(&current))?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &pending.new_config)?;
     PENDING_CONFIG.remove(deps.storage);
@@ -238,8 +302,10 @@ pub fn execute_propose_factory_config_update(
     // Validate at propose time so any mistake surfaces 48h earlier than it
     // otherwise would (the existing config keeps flowing until the timelock
     // elapses and the admin calls UpdateConfig, but a malformed proposal
-    // should fail loudly now, not then).
-    validate_factory_config(deps.as_ref(), &env, &config)?;
+    // should fail loudly now, not then). The stored config is the baseline
+    // for deciding whether the live probe is needed.
+    let current = FACTORYINSTANTIATEINFO.load(deps.storage)?;
+    validate_factory_config(deps.as_ref(), &env, &config, Some(&current))?;
 
     let pending = PendingConfig {
         new_config: config,

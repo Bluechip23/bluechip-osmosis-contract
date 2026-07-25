@@ -17,9 +17,9 @@
 //!
 //! and that the creator earmark equals the true over-cap excess
 //! (`raised_net - max_lock`), never reduced by the creation-fee shortfall
-//! the protocol absorbs. These are the same relations traced by hand in the
-//! audit; the property test pins them across a wide random input space so a
-//! future refactor of the seed/reserve math can't silently break them.
+//! the protocol absorbs. The property test pins these relations across a
+//! wide random input space so a future refactor of the seed/reserve math
+//! can't silently break them.
 //!
 //! The mock querier answers the `x/poolmanager` params query with "not
 //! found", so `query_pool_creation_fee` falls back to the configured value
@@ -204,7 +204,7 @@ proptest! {
 /// Edge case: when the creation fee meets or exceeds the raised seed, the
 /// crossing surfaces the explicit, actionable `InvalidThresholdParams` error
 /// (threshold mis-sized vs the chain fee) rather than an opaque gamm failure
-/// or a zero-amount pool side. Mirrors the H-01 guard.
+/// or a zero-amount pool side. Mirrors the zero-seed guard.
 #[test]
 fn crossing_rejects_when_fee_meets_or_exceeds_seed() {
     // raise = 1000, max_lock huge (non-over-cap so base_seed = raise), fee = 1000.

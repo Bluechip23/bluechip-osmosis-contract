@@ -92,7 +92,7 @@ pub const CREATOR_EXCESS_POSITION: Item<CreatorExcessLiquidity> = Item::new("cre
 /// Timestamp of the most recent threshold-crossing attempt; used by stuck-state recovery.
 pub const LAST_THRESHOLD_ATTEMPT: Item<Timestamp> = Item::new("last_threshold_attempt");
 
-/// FIX E — target uosmo amount of the native GAMM pool-creation fee that
+/// Target uosmo amount of the native GAMM pool-creation fee that
 /// the `x/gamm` module auto-charges when `MsgCreateBalancerPool` runs at
 /// threshold-crossing. Threaded in from the factory config's
 /// `gamm_pool_creation_fee.amount` via `PoolInstantiateMsg` and pinned at
@@ -103,7 +103,7 @@ pub const LAST_THRESHOLD_ATTEMPT: Item<Timestamp> = Item::new("last_threshold_at
 /// gamm fee is waived (e.g. test environments) and no bluechip is retained.
 pub const CREATION_FEE_RESERVE_TARGET: Item<Uint128> = Item::new("creation_fee_reserve_target");
 
-/// FIX E — running total of bluechip (uosmo) retained IN THE POOL out of
+/// Running total of bluechip (uosmo) retained IN THE POOL out of
 /// the protocol's 1% commit fee toward [`CREATION_FEE_RESERVE_TARGET`].
 /// Initialised to zero at instantiate. On every commit the 1% bluechip fee
 /// is split: the portion needed to reach the target is added here and STAYS
@@ -144,7 +144,7 @@ pub const PENDING_FACTORY_NOTIFY: Item<bool> = Item::new("pending_factory_notify
 /// slot in without renumbering.
 pub const REPLY_ID_FACTORY_NOTIFY_INITIAL: u64 = 1;
 pub const REPLY_ID_FACTORY_NOTIFY_RETRY: u64 = 2;
-/// Reply id for the `MsgSetDenomMetadata` dispatched at instantiate (M-01).
+/// Reply id for the `MsgSetDenomMetadata` dispatched at instantiate.
 /// Wired as `reply_on_error` and swallowed in the reply handler: denom
 /// metadata is cosmetic (explorer/wallet display), so a failure to register
 /// it must NEVER revert pool creation. 5 slots in below the swap/create
@@ -281,7 +281,7 @@ pub struct DistributionState {
     pub total_committed_usd: Uint128,
     /// Cursor into COMMIT_LEDGER; next batch starts strictly after this key.
     pub last_processed_key: Option<Addr>,
-    /// Informational counter of remaining committers (ground truth is the ledger).
+    /// Advisory counter of remaining committers (ground truth is the ledger).
     pub distributions_remaining: u32,
     /// Adaptive estimate of gas consumed per distribution entry.
     pub estimated_gas_per_distribution: u64,
@@ -400,7 +400,7 @@ pub struct CommitLimitInfo {
     /// USD threshold target (6 decimals); once total committed USD value
     /// reaches this, the pool seeds. Commits are made in the chain's
     /// native asset and valued via the factory's ConvertNativeToUsd
-    /// (Osmosis x/twap-backed) query.
+    /// (Pyth-backed) query.
     pub commit_amount_for_threshold_usd: Uint128,
     /// Max native bluechip locked into pool reserves; remainder becomes creator excess.
     pub max_bluechip_lock_per_pool: Uint128,
@@ -421,7 +421,7 @@ pub struct CommitLimitInfo {
 }
 
 /// Time-locked creator entitlement to the RAW excess coins parked in the
-/// contract at threshold crossing (FIX C — restores the original model).
+/// contract at threshold crossing.
 ///
 /// When the raised bluechip exceeds `max_bluechip_lock_per_pool`, the pool
 /// is seeded with only `max_bluechip_lock` OSMO + the non-earmarked

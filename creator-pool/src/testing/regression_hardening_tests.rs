@@ -1,9 +1,9 @@
-//! Independent adversarial-audit regression tests.
+//! Regression hardening tests.
 //!
 //! Each test here is written to FAIL if a specific bug were present and to
 //! PASS on the current (believed-correct) code, closing a coverage gap the
 //! existing suite left open. They are named after the attack / invariant
-//! they defend so a reviewer reading the file understands what is being
+//! they defend so anyone reading the file understands what is being
 //! constrained, not merely which function is exercised.
 //!
 //! Harness note: like the rest of the creator-pool suite these are unit
@@ -11,8 +11,7 @@
 //! poolmanager / tokenfactory / twap) mocked. They therefore assert on the
 //! MESSAGES / STATE the contract produces, not on live chain execution or
 //! CosmWasm's real revert-on-`Err` (MockStorage does not roll back). The
-//! places where that boundary matters are called out inline and in the
-//! findings report.
+//! places where that boundary matters are called out inline.
 
 use std::collections::BTreeMap;
 
@@ -527,16 +526,15 @@ fn create_pool_reply_without_response_errors_rather_than_leaving_pool_id_unset()
 }
 
 // ===========================================================================
-// F-1 (fixed): direct SimpleSwap now REQUIRES belief_price; only the
-//              registered router (which enforces end-to-end minimum_receive)
-//              is exempt.
+// Direct SimpleSwap REQUIRES belief_price; only the registered router
+// (which enforces end-to-end minimum_receive) is exempt.
 // ===========================================================================
 //
 // Attack defended: a direct SimpleSwap caller who omits belief_price is
 // protected only by the on-chain estimate floor, which is computed at
-// already-front-run pool state and is NOT sandwich-resistant. The fix forces
-// a direct caller to supply a belief_price (matching the commit path, H-3),
-// while exempting the registered multi-hop router by address — the router
+// already-front-run pool state and is NOT sandwich-resistant. A direct
+// caller must therefore supply a belief_price (matching the commit path),
+// while the registered multi-hop router is exempted by address — the router
 // bounds the whole route with minimum_receive, so its per-hop null-belief
 // calls are safe.
 #[test]
@@ -641,7 +639,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
         "swap"
     );
 
-    // (D) The commit swap still requires belief_price too (unchanged, H-3).
+    // (D) The commit swap still requires belief_price too (unchanged).
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
     deps.querier
@@ -670,7 +668,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
 }
 
 // ===========================================================================
-// F-3: pool-side sanity CEILING on the factory-delegated oracle rate.
+// Pool-side sanity CEILING on the factory-delegated oracle rate.
 // ===========================================================================
 //
 // The pool delegates its entire USD valuation to the factory. A factory bug,

@@ -53,16 +53,29 @@ const PriceConfigSchema = z.object({
   // that verifies against a testnet guardian set.
   HERMES_ENDPOINT: nonEmpty.default("https://hermes.pyth.network"),
 
-  // Push cadence. Keep it comfortably UNDER the factory's
-  // `max_pyth_staleness_seconds` (default 300) — e.g. 60s push vs 300s gate
-  // leaves 4 missed pushes of slack. Milliseconds.
+  // Push cadence, in milliseconds. It must sit inside TWO bounds set by the
+  // factory's on-chain gates:
+  //   - UPPER: comfortably under `max_pyth_staleness_seconds` (default 300s)
+  //     so a couple of missed pushes don't start failing commits closed —
+  //     e.g. 60s push vs 300s gate leaves 4 pushes of slack.
+  //   - LOWER: comfortably OVER the factory's `MIN_PYTH_AGE_SECONDS` (10s,
+  //     the anti-same-block-MEV gate). Pyth returns the LATEST price, so if
+  //     the keeper refreshes faster than that floor the stored price never
+  //     ages past 10s and EVERY commit reverts "too fresh" — a silent
+  //     protocol-wide liveness brick. The 15_000ms floor keeps ≥1 valid
+  //     block of separation with margin over the 10s gate.
   PYTH_PUSH_INTERVAL_MS: z
     .string()
     .default("60000")
     .transform((s, ctx) => {
       const n = Number.parseInt(s, 10);
-      if (!Number.isInteger(n) || n < 1000) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "must be an integer >= 1000 (ms)" });
+      if (!Number.isInteger(n) || n < 15000) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "must be an integer >= 15000 (ms): below the factory's 10s MIN_PYTH_AGE gate " +
+            "(plus margin) the stored price never ages past 'too fresh' and all commits brick",
+        });
         return z.NEVER;
       }
       return n;

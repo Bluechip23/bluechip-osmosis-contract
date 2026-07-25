@@ -19,7 +19,7 @@
 //!   creator entitlement to the RAW excess coins — the over-cap bluechip
 //!   and the proportional creator tokens (`CREATOR_EXCESS_POSITION`),
 //!   which REMAIN in the contract's bank balance and are claimed later
-//!   via `ClaimCreatorExcessLiquidity` (FIX C).
+//!   via `ClaimCreatorExcessLiquidity`.
 //! - Flips `IS_THRESHOLD_HIT` (the load-bearing no-double-mint gate) and
 //!   snapshots `THRESHOLD_CROSSED_AT`.
 //!
@@ -48,9 +48,9 @@ use pool_core::osmosis_msgs::{
 };
 
 /// Safety margin (basis points) on the native amount budgeted for the
-/// cross-denom fee swap: the TWAP-rate-derived input is inflated by this
-/// much to absorb spot-vs-TWAP drift, the pricing pool's swap fee, and
-/// the chain taker fee between commit entry and execution. `MsgSwapExactAmountOut`
+/// cross-denom fee swap: the oracle-rate-derived input is inflated by this
+/// much to absorb oracle-rate-vs-pool-spot drift, the pricing pool's swap
+/// fee, and the chain taker fee between commit entry and execution. `MsgSwapExactAmountOut`
 /// spends only what the swap actually needs — the margin bounds the
 /// worst case, it is not a cost. If the pricing pool moves more than
 /// this within the tx, the swap (and the whole crossing) reverts and
@@ -122,7 +122,7 @@ pub struct ThresholdPayoutMsgs {
     pub factory_notify: SubMsg,
     pub create_pool: SubMsg,
     pub other_msgs: Vec<CosmosMsg>,
-    /// FIX E — bank-send of any creation-fee reserve LEFTOVER
+    /// Bank-send of any creation-fee reserve LEFTOVER
     /// (`reserved - creation_fee`) back to the bluechip wallet. `Some` only
     /// when the retained reserve exceeded the actual gamm creation fee (the
     /// common case, since the reserve fills to the target during funding).
@@ -149,7 +149,7 @@ pub fn trigger_threshold_payout(
     storage: &mut dyn Storage,
     // Live chain querier — used to read the ACTUAL x/poolmanager
     // pool-creation fee at crossing so the seed reservation is
-    // self-correcting (H-01). Kept as a separate borrow from `storage`
+    // self-correcting. Kept as a separate borrow from `storage`
     // (distinct `DepsMut` fields) the same way the swap path passes
     // `deps.storage` + `&deps.querier` to the liquidity breaker.
     querier: &QuerierWrapper,
@@ -237,7 +237,7 @@ pub fn trigger_threshold_payout(
 
     // Post-threshold committer distribution setup (unchanged — independent
     // of the pool venue). Distinct-committer count is read O(1) from the
-    // incrementally-maintained `COMMITTER_COUNT` (FIX B) rather than the
+    // incrementally-maintained `COMMITTER_COUNT` rather than the
     // old unbounded `COMMIT_LEDGER.keys(..).count()` scan. At crossing the
     // ledger is full (nothing distributed yet), so the counter equals the
     // ledger size exactly — the crossing handler recorded the crosser
@@ -265,7 +265,7 @@ pub fn trigger_threshold_payout(
     // NATIVE_RAISED_FROM_COMMIT is stored net-of-fees; read directly.
     let pools_bluechip_seed = crate::state::NATIVE_RAISED_FROM_COMMIT.load(storage)?;
 
-    // FIX E — creation-fee reserve context. The pool's ACTUAL OSMO bank
+    // Creation-fee reserve context. The pool's ACTUAL OSMO bank
     // balance at this point is `pools_bluechip_seed + reserved` (net commits
     // plus the bluechip fee retained toward the gamm creation fee). When
     // `MsgCreateBalancerPool` runs, the `x/gamm` module auto-charges
@@ -275,7 +275,7 @@ pub fn trigger_threshold_payout(
     let reserved = crate::state::BLUECHIP_FEE_RESERVED
         .may_load(storage)?
         .unwrap_or_default();
-    // H-01 — resolve the creation fee to charge against from the CHAIN'S
+    // Resolve the creation fee to charge against from the CHAIN'S
     // LIVE `x/poolmanager` pool-creation fee, not the factory-configured
     // guess. The `x/gamm` module deducts this exact COIN when
     // `MsgCreateBalancerPool` runs, so pinning the seed reservation to the
@@ -318,7 +318,7 @@ pub fn trigger_threshold_payout(
     //   factory's pricing pool (which trades native/usd_quote by
     //   definition) converts retained native into EXACTLY the fee coin
     //   before the create executes. The native budget is the fee's value
-    //   at the commit-entry TWAP rate plus `FEE_SWAP_MARGIN_BPS`;
+    //   at the commit-entry oracle rate plus `FEE_SWAP_MARGIN_BPS`;
     //   exact-out spends only what the swap needs, so the margin is a
     //   bound, not a cost. Funding source is unchanged: the 1% commit-fee
     //   retention (protocol revenue) — the creator never pays.
@@ -361,8 +361,8 @@ pub fn trigger_threshold_payout(
     // proportionally so the seeded ratio matches the retired internal-AMM
     // reserve seeding.
     //
-    // FIX C: on over-cap the excess is time-locked to the creator as RAW
-    // coins (the original model), NOT as a slice of the pool's LP shares.
+    // On over-cap the excess is time-locked to the creator as RAW
+    // coins, NOT as a slice of the pool's LP shares.
     // The pool is seeded with `max_bluechip_lock` OSMO +
     // `(pool_seed_amount - excess_creator_tokens)` creator tokens; the
     // earmarked excess coins REMAIN in the contract's bank balance:
@@ -410,7 +410,7 @@ pub fn trigger_threshold_payout(
         (pools_bluechip_seed, payout.pool_seed_amount)
     };
 
-    // FIX E — the SEED always yields the uncovered creation-fee shortfall,
+    // The SEED always yields the uncovered creation-fee shortfall,
     // so both the brick invariant and the creator earmark stay consistent.
     // The pool holds `pools_bluechip_seed + reserved` OSMO and the gamm
     // module auto-charges `creation_fee` ON TOP of the seeded coins. Whatever
@@ -429,7 +429,7 @@ pub fn trigger_threshold_payout(
     let shortfall = creation_fee.saturating_sub(reserved);
     let seed_osmo = base_seed_osmo.saturating_sub(shortfall);
 
-    // H-01 guard — if the creation fee consumes the entire OSMO seed, the
+    // If the creation fee consumes the entire OSMO seed, the
     // pool would try to create a balancer pool with a zero-amount side,
     // which the gamm module rejects (reverting the whole crossing). This
     // is only reachable when the net raise is smaller than the chain's
@@ -448,7 +448,7 @@ pub fn trigger_threshold_payout(
         });
     }
 
-    // FIX G — snapshot the per-side liquidity ACTUALLY seeded (post the FIX-E
+    // Snapshot the per-side liquidity ACTUALLY seeded (post the shortfall
     // adjustment above) as the breaker's reference point. A later swap trips
     // the breaker if either live side falls below BREAKER_FLOOR_PERCENT% of
     // the amount recorded here.
@@ -475,7 +475,7 @@ pub fn trigger_threshold_payout(
         REPLY_ID_CREATE_POOL,
     );
 
-    // FIX E — remit any creation-fee reserve LEFTOVER back to the bluechip
+    // Remit any creation-fee reserve LEFTOVER back to the bluechip
     // wallet. After the gamm module charges `creation_fee`, the retained
     // `reserved` has `reserved - creation_fee` to spare (zero in the
     // shortfall edge); that surplus is the protocol's fee income and is
@@ -494,7 +494,7 @@ pub fn trigger_threshold_payout(
         }))
     };
 
-    // FIX E — mark the reserve complete. The creation fee has now been
+    // Mark the reserve complete. The creation fee has now been
     // handled (covered at creation + any surplus remitted), so post-threshold
     // commits must NOT keep retaining bluechip toward the target. Pinning
     // `BLUECHIP_FEE_RESERVED` at the target makes `room == 0` in

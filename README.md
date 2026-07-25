@@ -104,7 +104,7 @@ show the creator's chosen name/symbol (not a raw micro-denom):
 let creator_denom = pool_core::osmosis_msgs::full_denom(&env.contract.address, &msg.subdenom);
 // factory/{pool_addr}/{subdenom}
 let create_denom = pool_core::osmosis_msgs::create_denom_msg(&env.contract.address, &msg.subdenom);
-// M-01: register name/symbol/6-dec display — dispatched reply_on_error so a
+// register name/symbol/6-dec display — dispatched reply_on_error so a
 // metadata edge case can never revert pool creation (it's display-only).
 let set_metadata = SubMsg::reply_on_error(
     pool_core::osmosis_msgs::set_denom_metadata_msg(/* name, symbol, decimals */),
@@ -289,7 +289,7 @@ param** (not a stale config guess), so a governance change or a mis-set
 config can't brick the crossing:
 
 ```rust
-// creator-pool/src/commit/threshold_payout.rs — H-01 + cross-denom
+// creator-pool/src/commit/threshold_payout.rs — cross-denom fee resolution
 let fee_coin = query_pool_creation_fee_coin(querier)   // authoritative x/poolmanager param
     .or_else(|| fee_cfg.cloned())                      // live factory config (CommitContext)
     .or_else(|| legacy_native_target());               // instantiate-time fallback
@@ -620,7 +620,6 @@ fuzz/                # cargo-fuzz math targets (excluded)
 keepers/             # distribution keeper (the one off-chain bot)
 frontend/            # reference UI
 docs/                # OSMOSIS_DEPLOY.md, MULTISIG.md, FRONTEND_MIGRATION.md
-AUDIT_REPORT.md      # security audit + remediation status
 deploy_osmosis.sh    # store + instantiate + verify (testnet & mainnet)
 ```
 

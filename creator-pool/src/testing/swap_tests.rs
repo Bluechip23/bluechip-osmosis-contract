@@ -327,7 +327,7 @@ fn test_commit_post_threshold_swap() {
             amount: commit_amount,
         },
         transaction_deadline: None,
-        // H-3 — post-threshold commits require an explicit belief_price (the
+        // Post-threshold commits require an explicit belief_price (the
         // only manipulation-resistant slippage bound on the swap leg).
         belief_price: Some(Decimal::one()),
         max_spread: None,
@@ -1558,7 +1558,7 @@ fn test_swap_cw20_with_custom_recipient() {
 }
 
 // ---------------------------------------------------------------------------
-// FIX A — slippage floor = max(on-chain-estimate floor, belief-price floor)
+// Slippage floor = max(on-chain-estimate floor, belief-price floor)
 // ---------------------------------------------------------------------------
 
 fn token_out_min_attr(res: &Response) -> String {
@@ -1649,7 +1649,7 @@ fn test_simple_swap_estimate_floor_sets_nonzero_token_out_min() {
 
     let env = mock_env();
     let swap_amount = Uint128::new(100_000_000);
-    // F-1 — the null-belief SimpleSwap path is now reachable only by the
+    // The null-belief SimpleSwap path is reachable only by the
     // registered router (which the mock querier reports as "registered_router").
     // The estimate floor is load-bearing on exactly that path.
     let info = message_info(
@@ -1681,12 +1681,12 @@ fn test_simple_swap_estimate_floor_sets_nonzero_token_out_min() {
 }
 
 /// Post-threshold commit swap site derives the same non-zero estimate
-/// floor (FIX A applied at BOTH swap sites via the shared helper). The
+/// floor (applied at BOTH swap sites via the shared helper). The
 /// commit's post-fee swap leg of a $100 commit (1% + 5% fees) is
 /// 94_000_000 bluechip; at a 1:1 estimate and default 0.5% spread the
 /// floor is 94_000_000 * 0.995 = 93_530_000.
 ///
-/// H-3 — post-threshold commits now REQUIRE a belief_price. Here it is set
+/// Post-threshold commits REQUIRE a belief_price. Here it is set
 /// deliberately loose (2.0, i.e. belief_floor = 94_000_000/2 * 0.995 =
 /// 46_765_000) so the on-chain ESTIMATE floor (93_530_000) is the binding
 /// `max(estimate_floor, belief_floor)` term, preserving this test's intent
@@ -1734,7 +1734,7 @@ fn test_post_threshold_commit_estimate_floor_nonzero_token_out_min() {
     assert!(res.messages.iter().any(|m| m.id == REPLY_ID_SWAP_FORWARD));
 }
 
-/// H-3 — a post-threshold commit with no belief_price is rejected. The
+/// A post-threshold commit with no belief_price is rejected. The
 /// on-chain estimate floor is not sandwich-resistant, so the commit swap
 /// leg must carry an explicit off-chain-derived belief_price.
 #[test]
@@ -1778,15 +1778,15 @@ fn test_post_threshold_commit_requires_belief_price() {
     );
 }
 
-/// H-2 — once the pool has crossed its threshold, a commit must forward its
+/// Once the pool has crossed its threshold, a commit must forward its
 /// FULL 1% bluechip fee to the wallet and never top up the creation-fee
 /// reserve again, even when the configured reserve target still leaves
-/// "room" above what was actually retained. Pre-fix, `reserve_bluechip_fee`
-/// used `CREATION_FEE_RESERVE_TARGET` as the ceiling, so a live gamm fee
-/// below the target left `room > 0` and post-threshold commits kept
+/// "room" above what was actually retained. Otherwise, with `reserve_bluechip_fee`
+/// using `CREATION_FEE_RESERVE_TARGET` as the ceiling, a live gamm fee
+/// below the target would leave `room > 0` and post-threshold commits would keep
 /// siphoning bluechip into the (now-unspendable) pool reserve.
 #[test]
-fn test_h2_post_threshold_commit_forwards_full_bluechip_fee() {
+fn test_post_threshold_commit_forwards_full_bluechip_fee() {
     use crate::mock_querier::mock_deps_estimate;
     use crate::state::{BLUECHIP_FEE_RESERVED, CREATION_FEE_RESERVE_TARGET};
 
@@ -1853,7 +1853,7 @@ fn test_h2_post_threshold_commit_forwards_full_bluechip_fee() {
 }
 
 // ---------------------------------------------------------------------------
-// FIX B — COMMITTER_COUNT is O(1) and EXACT across repeat committers
+// COMMITTER_COUNT is O(1) and EXACT across repeat committers
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1939,7 +1939,7 @@ fn test_swap_zero_floor_rejected() {
     // A zero estimate (`set_estimate_ratio(0, 1)`) AND no belief_price ⇒ the
     // derived `token_out_min_amount` floor collapses to zero.
     // `compute_token_out_min` rejects that rather than dispatching an
-    // unprotected `MsgSwapExactAmountIn`. F-1 — the null-belief path is
+    // unprotected `MsgSwapExactAmountIn`. The null-belief path is
     // reachable only by the registered router, so this exercises it as that
     // caller (the mock querier answers RegisteredRouter = "registered_router").
     use crate::mock_querier::mock_deps_estimate;
@@ -1980,11 +1980,11 @@ fn test_swap_zero_floor_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// FIX E — the 1% bluechip commit fee funds the gamm creation-fee reserve.
+// The 1% bluechip commit fee funds the gamm creation-fee reserve.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_fix_e_bluechip_fee_reserve_split_and_spillover() {
+fn test_bluechip_fee_reserve_split_and_spillover() {
     // Target BELOW the per-commit bluechip fee, so ONE commit both fills the
     // reserve to the target and spills the remainder to the wallet.
     let mut deps = mock_dependencies_with_balance(&[Coin {
@@ -2055,7 +2055,7 @@ fn test_fix_e_bluechip_fee_reserve_split_and_spillover() {
 }
 
 #[test]
-fn test_fix_e_bluechip_fee_fully_retained_below_target() {
+fn test_bluechip_fee_fully_retained_below_target() {
     // Target ABOVE the per-commit bluechip fee: the entire 1% is retained in
     // the pool and NOTHING is bank-sent to the bluechip wallet this commit.
     let mut deps = mock_dependencies_with_balance(&[Coin {
@@ -2112,7 +2112,7 @@ fn test_fix_e_bluechip_fee_fully_retained_below_target() {
 }
 
 #[test]
-fn test_fix_e_crossing_seed_math_normal_and_shortfall() {
+fn test_crossing_seed_math_normal_and_shortfall() {
     use crate::state::{
         BLUECHIP_FEE_RESERVED, CREATION_FEE_RESERVE_TARGET, NATIVE_RAISED_FROM_COMMIT,
         SEED_LIQUIDITY,
@@ -2152,7 +2152,7 @@ fn test_fix_e_crossing_seed_math_normal_and_shortfall() {
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
             // Legacy fee context: no live fee coin — exercises the
-            // CREATION_FEE_RESERVE_TARGET fallback these FIX-E cases pin.
+            // CREATION_FEE_RESERVE_TARGET fallback these reserve cases pin.
             Uint128::new(1_000_000),
             None,
             0,
@@ -2234,11 +2234,11 @@ fn test_fix_e_crossing_seed_math_normal_and_shortfall() {
 }
 
 // ---------------------------------------------------------------------------
-// FIX G — native relative circuit breaker (pause below 25% of seeded).
+// Native relative circuit breaker (pause below 25% of seeded).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_fix_g_breaker_pauses_below_floor() {
+fn test_native_breaker_pauses_below_floor() {
     use crate::mock_querier::mock_deps_estimate;
     let mut deps = mock_deps_estimate(&[Coin {
         denom: "ubluechip".to_string(),
@@ -2286,7 +2286,7 @@ fn test_fix_g_breaker_pauses_below_floor() {
         to: None,
         transaction_deadline: None,
     };
-    // H-1 — a tripped breaker returns `Ok` (so the latched pause persists;
+    // A tripped breaker returns `Ok` (so the latched pause persists;
     // an `Err` would have rolled the pause writes back on-chain) and refunds
     // the attached offer coin. No swap SubMsg is dispatched.
     let res = execute(deps.as_mut(), env.clone(), info.clone(), msg.clone()).unwrap();
@@ -2334,7 +2334,7 @@ fn test_fix_g_breaker_pauses_below_floor() {
 }
 
 #[test]
-fn test_fix_g_breaker_allows_healthy_pool() {
+fn test_native_breaker_allows_healthy_pool() {
     use crate::mock_querier::mock_deps_estimate;
     let mut deps = mock_deps_estimate(&[Coin {
         denom: "ubluechip".to_string(),

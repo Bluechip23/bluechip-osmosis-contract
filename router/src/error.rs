@@ -104,7 +104,7 @@ pub enum RouterError {
     ConfigUpdateAlreadyPending,
 
     /// A nested `ExecuteMultiHop` was attempted while a route is already in
-    /// progress — the reentrancy guard (F-5). Reachable only if a pool called
+    /// progress — the reentrancy guard. Reachable only if a pool called
     /// mid-hop tries to re-enter the router with a fresh route.
     #[error("A multi-hop route is already in progress; nested routes are not permitted")]
     Reentrancy,

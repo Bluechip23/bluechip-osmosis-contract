@@ -55,7 +55,7 @@ pub(super) fn process_post_threshold_commit(
         .may_load(deps.storage)?
         .ok_or(ContractError::ShortOfThreshold {})?;
 
-    // H-3 — a post-threshold commit is a market BUY of the creator token
+    // A post-threshold commit is a market BUY of the creator token
     // (the net bluechip is swapped through the native pool). The
     // `token_out_min_amount` floor derived below from the on-chain estimate
     // is computed at CURRENT pool state, so it does NOT defend against a
@@ -77,13 +77,13 @@ pub(super) fn process_post_threshold_commit(
     let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
     let creator_denom = pool_info.token_denom.clone();
 
-    // FIX G — trip the native relative circuit breaker BEFORE dispatching
+    // Trip the native relative circuit breaker BEFORE dispatching
     // the swap leg, matching the `SimpleSwap` site (both share the helper).
     // If either side of the live pool has fallen below BREAKER_FLOOR_PERCENT%
     // of its seeded liquidity, this auto-pauses the pool and rejects the
     // commit. Pre-threshold commits never reach here (no pool yet).
     //
-    // H-1: on a trip the breaker has latched the pause; return `Ok`
+    // On a trip the breaker has latched the pause; return `Ok`
     // (refunding the committer's GROSS attached bluechip — no fees taken,
     // no swap) so the pause persists. Returning `Err` would roll it back.
     match enforce_liquidity_breaker(

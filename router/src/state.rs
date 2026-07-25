@@ -41,10 +41,10 @@ pub struct Config {
 
 pub const CONFIG: Item<Config> = Item::new("config");
 
-/// F-5 — transient reentrancy guard for `ExecuteMultiHop`. Set true at the
+/// Transient reentrancy guard for `ExecuteMultiHop`. Set true at the
 /// start of a route and cleared by the terminal `AssertReceived` step. A
 /// malicious pool called during a hop cannot start a nested `ExecuteMultiHop`
-/// while this is set. Defense-in-depth over the M-03 `offer_baseline` math:
+/// while this is set. Defense-in-depth over the `offer_baseline` math:
 /// the baseline already prevents an in-flight route's funds from being swept
 /// by a reentrant call, but this guard makes the safety independent of that
 /// arithmetic. On any hop failure the whole tx reverts, rolling the flag back

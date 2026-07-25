@@ -30,7 +30,7 @@ use crate::state::{
 /// denom is deterministic.
 pub const CREATOR_DENOM: &str = "factory/pool_contract/ucreator";
 
-/// F-1 — the router address the test mock queriers report from
+/// The router address the test mock queriers report from
 /// `RegisteredRouter`. A `SimpleSwap` with no `belief_price` is only
 /// accepted from this sender; tests exercising the router (null-belief)
 /// swap path send as this address.
@@ -52,7 +52,7 @@ pub fn mock_dependencies_with_balance(
 ///
 /// Generic over the querier `Q` (only `deps.storage` is touched) so both
 /// the stock `MockQuerier` and the `PoolMockQuerier` (which answers the
-/// FIX-A estimate Stargate query) can share these fixtures.
+/// estimate Stargate query) can share these fixtures.
 pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(
     deps: &mut OwnedDeps<MockStorage, MockApi, Q>,
 ) {
@@ -127,7 +127,7 @@ pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(
     NATIVE_RAISED_FROM_COMMIT
         .save(&mut deps.storage, &Uint128::zero())
         .unwrap();
-    // O(1) distinct-committer counter (FIX B) — instantiate sets this to
+    // O(1) distinct-committer counter — instantiate sets this to
     // zero; mirror it here so fixture-based tests match production state.
     crate::state::COMMITTER_COUNT
         .save(&mut deps.storage, &0u32)
@@ -186,7 +186,7 @@ pub fn with_factory_oracle(
                 Ok(WrapperProbe::PoolFactoryQuery(
                     pool_factory_interfaces::FactoryQueryMsg::RegisteredRouter {},
                 )) => {
-                    // F-1 — answer the SimpleSwap router-exemption probe. The
+                    // Answer the SimpleSwap router-exemption probe. The
                     // fixture registers a well-known router address so tests
                     // that exercise the null-belief (router) path can send as
                     // `MOCK_REGISTERED_ROUTER`.

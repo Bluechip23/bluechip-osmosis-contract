@@ -24,7 +24,7 @@ use pool_factory_interfaces::PoolStateResponseForFactory;
 
 pub const FACTORYINSTANTIATEINFO: Item<FactoryInstantiate> = Item::new("config");
 
-/// F-1 — the registered multi-hop router address. Pools query it (via
+/// The registered multi-hop router address. Pools query it (via
 /// `FactoryQueryMsg::RegisteredRouter`) to decide whether to waive the
 /// `belief_price` requirement on a `SimpleSwap`: the router enforces an
 /// end-to-end `minimum_receive`, so it is the one caller allowed to swap
@@ -40,7 +40,7 @@ pub const ROUTER_ADDRESS: Item<Addr> = Item::new("router_address");
 pub const PENDING_CONFIG: Item<PendingConfig> = Item::new("pending_config");
 pub const POOL_COUNTER: Item<u64> = Item::new("pool_counter");
 
-/// M-05 — one-time gate for the legacy registry back-fill in `migrate`.
+/// One-time gate for the legacy registry back-fill in `migrate`.
 /// Fresh deployments set this `true` at instantiate (they maintain PAIRS /
 /// POOL_ID_BY_ADDRESS through `register_pool` from day one, so no back-fill
 /// is ever needed), which makes `migrate` skip the O(N) registry walk
@@ -141,8 +141,8 @@ pub struct FactoryInstantiate {
     /// Commit threshold each creator pool must raise before it seeds its
     /// AMM and opens for swaps. USD-denominated, 6 decimals
     /// (`25_000_000_000` = $25,000). Commits are made in `bluechip_denom`
-    /// and valued against this target via the chain's x/twap price of the
-    /// configured `pricing_pool_id` (see `crate::usd_price`).
+    /// and valued against this target via the Pyth native/USD price
+    /// (see `crate::usd_price`).
     pub commit_threshold_limit_usd: Uint128,
     pub cw20_token_contract_id: u64,
     pub cw721_nft_contract_id: u64,
@@ -177,10 +177,22 @@ pub struct FactoryInstantiate {
     /// Address of the Pyth CW contract to read the native/USD price from.
     /// The USD valuation of every commit is `price(pyth) × amount`. Read
     /// live at instantiate/propose/apply so a typo surfaces immediately.
+    ///
+    /// `#[serde(default)]` (empty string) lets a factory upgraded in place
+    /// from a pre-Pyth serialized config still deserialize instead of
+    /// bricking every config load. An empty value fails CLOSED at the read
+    /// site (`usd_price::probe_pyth_usd_rate` rejects it), so a migrated
+    /// factory cannot value commits until the admin proposes a config update
+    /// that sets the real contract; a fresh `instantiate` always supplies
+    /// and validates a non-empty value.
+    #[serde(default)]
     pub pyth_contract_addr: String,
     /// The Pyth price-feed id (64-hex, no `0x`) for `bluechip_denom`/USD
     /// (e.g. the OSMO/USD feed). The read verifies the returned feed id
-    /// matches this before trusting the price.
+    /// matches this before trusting the price. `#[serde(default)]` for the
+    /// same migration reason as `pyth_contract_addr` above, and empty fails
+    /// closed at the read site.
+    #[serde(default)]
     pub pyth_native_usd_feed_id: String,
     /// Maximum acceptable age (seconds) of the Pyth price vs block time —
     /// the staleness gate. A price older than this fails closed, so a
@@ -286,6 +298,19 @@ pub fn effective_pyth_conf_bps(config: &FactoryInstantiate) -> u16 {
     )
 }
 
+/// The effective staleness gate (seconds), clamped to the allowed range at
+/// read time. Mirrors [`effective_pyth_conf_bps`]: config validation also
+/// range-checks this at propose/instantiate, but a direct state write or a
+/// bad migration must not be able to widen the staleness window past
+/// `MAX_PYTH_STALENESS_MAX_SECONDS` (or shrink it below the minimum). Read
+/// by the live Pyth valuation.
+pub fn effective_max_staleness(config: &FactoryInstantiate) -> u64 {
+    config.max_pyth_staleness_seconds.clamp(
+        crate::usd_price::MAX_PYTH_STALENESS_MIN_SECONDS,
+        crate::usd_price::MAX_PYTH_STALENESS_MAX_SECONDS,
+    )
+}
+
 /// Default (zero) GAMM pool-creation fee — collection disabled.
 pub fn default_gamm_pool_creation_fee() -> Coin {
     Coin {
@@ -300,7 +325,7 @@ pub struct PendingConfig {
     pub effective_after: Timestamp,
 }
 
-/// F-1 / R2-C — pending (48h-timelocked) router-address change awaiting
+/// Pending (48h-timelocked) router-address change awaiting
 /// `effective_after`. Cleared by `ApplyRouter` (apply) or `CancelRouter`.
 pub const PENDING_ROUTER: Item<PendingRouter> = Item::new("pending_router");
 
@@ -414,7 +439,7 @@ pub fn register_pool(
     pool_address: &Addr,
     pool_details: &PoolDetails,
 ) -> StdResult<()> {
-    // L-01 — the four registry maps must agree, so guard EVERY key against
+    // The four registry maps must agree, so guard EVERY key against
     // pre-existence, not just `PAIRS`. Today `pool_id` comes from a monotonic
     // counter and `pool_address` is deterministic, so these can't collide in
     // the current create flow — but a `save` is a blind overwrite, and a

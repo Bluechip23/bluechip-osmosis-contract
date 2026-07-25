@@ -97,10 +97,11 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     cw2::set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    config::validate_factory_config(deps.as_ref(), &env, &msg)?;
+    // No prior config at instantiate, so the live Pyth probe always runs.
+    config::validate_factory_config(deps.as_ref(), &env, &msg, None)?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &msg)?;
-    // M-05 — a fresh deployment maintains PAIRS / POOL_ID_BY_ADDRESS through
+    // A fresh deployment maintains PAIRS / POOL_ID_BY_ADDRESS through
     // `register_pool` from the first pool onward, so the legacy registry
     // back-fill in `migrate` is never needed. Mark it done up front so
     // `migrate` skips the O(N) walk entirely for this deployment.
@@ -278,7 +279,7 @@ pub fn pool_creation_reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Respon
     }
 }
 
-/// F-1 / R2-C — propose a router-address change (admin-only), starting the
+/// Propose a router-address change (admin-only), starting the
 /// standard 48h timelock. Rejects when a proposal is already pending so a
 /// watcher polling `PENDING_ROUTER` always sees an explicit `CancelRouter`
 /// before a replacement lands (mirrors the factory-config propose flow).

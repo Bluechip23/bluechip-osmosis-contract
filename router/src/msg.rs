@@ -45,7 +45,7 @@ pub struct InstantiateMsg {
 pub enum ExecuteMsg {
     /// Run a multi-hop swap whose first hop offers the native bluechip
     /// denom. The caller attaches the offer amount via `info.funds`.
-    /// The router does not perform on-chain pathfinding -- the caller
+    /// The router does not perform on-chain route discovery -- the caller
     /// supplies the entire route.
     ExecuteMultiHop {
         operations: Vec<SwapOperation>,
@@ -81,7 +81,7 @@ pub enum ExecuteMsg {
     /// first-hop offer amount for the input denom). This ensures each hop
     /// swaps only the funds THIS route produced — the attached input on
     /// hop 0 and the prior hop's output on later hops — never a pre-existing
-    /// or donated balance the router happened to hold (M-03).
+    /// or donated balance the router happened to hold.
     ExecuteSwapOperation {
         operation: SwapOperation,
         hop_index: u32,

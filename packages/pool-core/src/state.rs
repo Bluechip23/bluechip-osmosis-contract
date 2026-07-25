@@ -210,8 +210,8 @@ pub const IS_THRESHOLD_HIT: Item<bool> = Item::new("threshold_hit");
 /// Per-side liquidity actually seeded into the native GAMM pool at
 /// threshold-crossing, snapshotted as `(seed_osmo, seed_creator)` — the
 /// exact `(bluechip, creator)` amounts passed to `MsgCreateBalancerPool`
-/// AFTER the FIX-E creation-fee adjustment. This is the reference point
-/// for the FIX-G relative circuit breaker: a swap is halted if EITHER
+/// AFTER the creation-fee adjustment. This is the reference point
+/// for the relative circuit breaker: a swap is halted if EITHER
 /// side of the live native pool has fallen below
 /// `BREAKER_FLOOR_PERCENT`% of its seeded amount here. Unset until the
 /// pool crosses its threshold (no native pool exists before then).
@@ -274,7 +274,7 @@ pub const MIN_LP_FEE: Decimal = Decimal::permille(1);
 /// `pool_kind` attribute value emitted in `instantiate` responses.
 pub const POOL_KIND_COMMIT: &str = "commit";
 
-/// FIX-G relative circuit-breaker floor, as a whole-number percent of the
+/// Relative circuit-breaker floor, as a whole-number percent of the
 /// seeded per-side liquidity ([`SEED_LIQUIDITY`]). If EITHER side of the
 /// live native pool drops below this percentage of what was seeded, the
 /// next routed swap trips the breaker: it sets `POOL_PAUSED` +

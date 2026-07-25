@@ -1,4 +1,4 @@
-//! F-5 — reentrancy-guard unit tests for `ExecuteMultiHop`.
+//! Reentrancy-guard unit tests for `ExecuteMultiHop`.
 //!
 //! The full success path (guard set at route start, cleared by the terminal
 //! `AssertReceived`) is already exercised end-to-end by every route in

@@ -11,7 +11,7 @@ use crate::{CONTRACT_NAME, CONTRACT_VERSION};
 pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, ContractError> {
     let stored_version = get_contract_version(deps.storage)?;
 
-    // M-04 — refuse to migrate onto a DIFFERENT contract's storage. Without
+    // Refuse to migrate onto a DIFFERENT contract's storage. Without
     // this cw2 contract-name check, migrating this code id over another
     // contract instance whose stored version merely parses as an
     // `<=`-current semver would pass the downgrade gate below, overwrite the
@@ -56,7 +56,7 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
     // `range(..)` already iterates in ascending pool_id order, so the
     // first-seen pool wins naturally without a sort.
     //
-    // M-05 — one-time gate. The back-fill exists only to index pools that
+    // One-time gate. The back-fill exists only to index pools that
     // predate the uniqueness/reverse-index maps. Once it has run (or on any
     // fresh deployment, which sets the flag at instantiate), skip the O(N)
     // registry walk entirely so a growing registry can never make `migrate`
@@ -104,7 +104,7 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, Contra
         }
         }
         // Mark the one-time back-fill complete so future migrations skip
-        // the registry walk (M-05).
+        // the registry walk.
         crate::state::REGISTRY_BACKFILL_DONE.save(deps.storage, &true)?;
     }
 

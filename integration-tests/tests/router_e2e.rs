@@ -1,11 +1,11 @@
-//! Router + F-1 belief-price gate, END TO END on a real chain:
+//! Router + belief-price gate, END TO END on a real chain:
 //!
 //!   1. a direct null-belief `SimpleSwap` is refused while no router is
 //!      registered (fail-closed),
 //!   2. a belief-priced direct swap works, a TIGHT belief price makes the
 //!      REAL poolmanager swap revert on its `token_out_min_amount` floor
 //!      (whole tx, funds returned),
-//!   3. a post-threshold `Commit` without belief_price is refused (H-3),
+//!   3. a post-threshold `Commit` without belief_price is refused,
 //!   4. `ProposeRouter` is admin-only; a PENDING router has no effect on
 //!      pools; `ApplyRouter` before the 48h window is refused; after
 //!      `increase_time(48h)` it lands and `RegisteredRouter` reflects it,
@@ -15,7 +15,7 @@
 //!   6. an impossible `minimum_receive` reverts the WHOLE route (real
 //!      multi-message atomicity — hop swaps already executed roll back and
 //!      the input comes back), and
-//!   7. the very next route succeeds — the F-5 `ROUTE_IN_PROGRESS` guard
+//!   7. the very next route succeeds — the `ROUTE_IN_PROGRESS` guard
 //!      does not wedge after a real on-chain revert.
 //!
 //! This is run on the PRODUCTION factory bytes (real 172,800s timelock);
@@ -151,7 +151,7 @@ fn router_timelock_belief_gate_and_no_wedge_end_to_end() {
     );
     app.increase_time(30);
 
-    // --- (1) F-1 fail-closed: no router registered ⇒ a direct null-belief
+    // --- (1) fail-closed: no router registered ⇒ a direct null-belief
     // SimpleSwap is refused by the live pool. ---
     let err = wasm
         .execute(
@@ -209,7 +209,7 @@ fn router_timelock_belief_gate_and_no_wedge_end_to_end() {
     );
     app.increase_time(30);
 
-    // --- (3) Post-threshold Commit requires belief_price (H-3), live. ---
+    // --- (3) Post-threshold Commit requires belief_price, live. ---
     let err = wasm
         .execute(
             &pool_a,
@@ -413,7 +413,7 @@ fn router_timelock_belief_gate_and_no_wedge_end_to_end() {
     );
     app.increase_time(30);
 
-    // --- (7) F-5 no-wedge: the guard set by the failed route rolled back
+    // --- (7) no-wedge: the guard set by the failed route rolled back
     // with the revert; the immediately following route succeeds. ---
     let b_before = balance(&bank, &crosser_a.address(), &denom_b);
     wasm.execute(

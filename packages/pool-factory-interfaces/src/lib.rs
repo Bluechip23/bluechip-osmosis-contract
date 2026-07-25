@@ -45,12 +45,13 @@ pub struct RegisteredPoolResponse {
 #[derive(QueryResponses)]
 pub enum FactoryQueryMsg {
     /// Values `amount` (base units of the chain's native asset, e.g.
-    /// uosmo) in USD micro-units (6 decimals). Backed by Osmosis's
-    /// x/twap module over the factory-configured native/USD-stable pool
-    /// — chain-native pricing, no keeper or external oracle. Pools call
+    /// uosmo) in USD micro-units (6 decimals). Backed by the Pyth
+    /// native/USD price feed read from the factory-configured Pyth
+    /// contract, gated for staleness/confidence/expo and fail-closed. A
+    /// standing price keeper must keep that feed fresh on-chain. Pools call
     /// this once per commit to value the deposit against the
     /// USD-denominated threshold. Fails (and therefore the commit fails
-    /// closed) if the TWAP query errors.
+    /// closed) if the price query errors or a gate rejects the price.
     #[returns(ConversionResponse)]
     ConvertNativeToUsd { amount: Uint128 },
 
@@ -88,8 +89,8 @@ pub enum FactoryQueryMsg {
     #[returns(CommitContextResponse)]
     CommitContext { amount: Uint128 },
 
-    /// Returns the factory's registered multi-hop router address, if any
-    /// (F-1). Pools query this on a `SimpleSwap` that omits `belief_price`:
+    /// Returns the factory's registered multi-hop router address, if any.
+    /// Pools query this on a `SimpleSwap` that omits `belief_price`:
     /// direct callers must supply a `belief_price` (the on-chain estimate
     /// floor is not sandwich-resistant), but the registered router is
     /// exempt because it enforces an end-to-end `minimum_receive` across the
@@ -131,7 +132,7 @@ pub struct BluechipWalletResponse {
     pub address: Addr,
 }
 
-/// Response to `RegisteredRouter` (F-1). `router` is `None` when no router
+/// Response to `RegisteredRouter`. `router` is `None` when no router
 /// has been registered on the factory yet.
 #[cw_serde]
 pub struct RegisteredRouterResponse {
@@ -166,8 +167,9 @@ pub struct CommitContextResponse {
     /// `None` ⇒ factory predates the field or fee collection disabled.
     #[serde(default)]
     pub gamm_pool_creation_fee: Option<Coin>,
-    /// Factory's TWAP pricing pool (trades the native denom against
-    /// `usd_quote_denom`). `0` ⇒ unknown (pre-upgrade factory).
+    /// Factory's cross-denom fee-swap pool (trades the native denom against
+    /// `usd_quote_denom` to acquire the gamm creation fee at crossing; not a
+    /// price source). `0` ⇒ unknown (pre-upgrade factory).
     #[serde(default)]
     pub pricing_pool_id: u64,
     /// The USD-stable quote denom on the pricing pool. Empty ⇒ unknown.
@@ -180,7 +182,7 @@ pub struct CommitContextResponse {
 /// $1.00 per native token), so callers can convert back
 /// (`native = usd * 1_000_000 / rate_used`) at EXACTLY the rate the
 /// valuation used — no mid-tx drift. `timestamp` is the block time the
-/// TWAP was computed at (always the current block for x/twap-to-now).
+/// valuation was performed at (the current block).
 #[cw_serde]
 pub struct ConversionResponse {
     pub amount: Uint128,

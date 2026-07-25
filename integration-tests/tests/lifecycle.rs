@@ -474,10 +474,9 @@ fn full_lifecycle_create_commit_cross_swap() {
     app.increase_time(30);
     let committer_before = tt::balance(&bank, &committer.address(), &creator_denom);
 
-    // F-1 (audit remediation): a DIRECT SimpleSwap must now carry an
-    // explicit `belief_price`; with no router registered, a null-belief
-    // swap is refused fail-closed by the live pool. Pin that here so the
-    // API change stays deliberate.
+    // A DIRECT SimpleSwap must carry an explicit `belief_price`; with no
+    // router registered, a null-belief swap is refused fail-closed by the
+    // live pool. Pin that here so the API contract stays deliberate.
     let null_belief = PoolExecuteMsg::SimpleSwap {
         offer_asset: TokenInfo {
             info: TokenType::Native {
@@ -501,7 +500,7 @@ fn full_lifecycle_create_commit_cross_swap() {
         .unwrap_err();
     assert!(
         err.to_string().contains("belief_price is required"),
-        "F-1: direct null-belief SimpleSwap must be refused, got: {err}"
+        "direct null-belief SimpleSwap must be refused, got: {err}"
     );
 
     // The belief-priced swap goes through. `Decimal::one()` is a loose

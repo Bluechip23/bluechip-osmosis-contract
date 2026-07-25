@@ -190,17 +190,18 @@ fn propose_rejects_dead_pricing_route() {
     let mut deps = mock_dependencies_2(&[]);
     setup_factory_custom(&mut deps);
 
-    // Route breaks (or was typo'd in the proposal) after instantiate.
+    // The proposal REPOINTS the pricing route (here to an unreachable oracle),
+    // which forces the live probe; the dead route is refused at propose time.
     deps.querier.set_pyth_error("pool not found");
+    let mut proposed = default_factory_instantiate_msg();
+    proposed.pyth_contract_addr = "dead_pyth_oracle".to_string();
 
     let admin_info = message_info(&admin_addr(), &[]);
     let err = execute(
         deps.as_mut(),
         mock_env(),
         admin_info,
-        ExecuteMsg::ProposeConfigUpdate {
-            config: default_factory_instantiate_msg(),
-        },
+        ExecuteMsg::ProposeConfigUpdate { config: proposed },
     )
     .unwrap_err();
     assert!(
@@ -218,17 +219,19 @@ fn apply_reprobes_pricing_route() {
 
     let admin_info = message_info(&admin_addr(), &[]);
     let env = mock_env();
+    // Propose a config that TOUCHES pricing (bump the confidence gate) so the
+    // apply-time re-probe will run; the propose-time probe passes (feed healthy).
+    let mut proposed = default_factory_instantiate_msg();
+    proposed.pyth_conf_threshold_bps = 250;
     execute(
         deps.as_mut(),
         env.clone(),
         admin_info.clone(),
-        ExecuteMsg::ProposeConfigUpdate {
-            config: default_factory_instantiate_msg(),
-        },
+        ExecuteMsg::ProposeConfigUpdate { config: proposed },
     )
     .unwrap();
 
-    // The pricing pool dies during the 48h window; apply must re-probe
+    // The pricing route dies during the 48h window; apply must re-probe
     // and refuse rather than land a config that bricks every commit.
     deps.querier.set_pyth_error("pool drained and pruned");
 
@@ -254,28 +257,81 @@ fn propose_rejects_wrong_decimals_quote_rate() {
     let mut deps = mock_dependencies_2(&[]);
     setup_factory_custom(&mut deps);
 
-    // An 18-decimal quote denom inflates a ~$1 real price by ~1e12.
-    // The probe parses the rate through the same sanity gates the
-    // commit path uses, so the misconfig dies at propose time.
+    // A wrong-decimals / wrong-asset feed inflates the rate far past the
+    // OSMO plausibility ceiling. The probe parses the rate through the same
+    // sanity band the commit path uses, so the misconfig dies at propose time.
     deps.querier
         .set_pyth_price(10_001_000_000, -6, 0);
+
+    // The proposal must TOUCH a pricing field for the live probe to run
+    // (a purely non-pricing change is intentionally allowed to skip it — see
+    // `propose_nonpricing_change_skips_probe_during_feed_outage`). Changing the
+    // confidence gate is a probe-input change, so the probe fires and the
+    // over-ceiling rate is rejected.
+    let mut proposed = default_factory_instantiate_msg();
+    proposed.pyth_conf_threshold_bps = 250;
 
     let admin_info = message_info(&admin_addr(), &[]);
     let err = execute(
         deps.as_mut(),
         mock_env(),
         admin_info,
-        ExecuteMsg::ProposeConfigUpdate {
-            config: default_factory_instantiate_msg(),
-        },
+        ExecuteMsg::ProposeConfigUpdate { config: proposed },
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("sanity ceiling"),
+        err.to_string().contains("plausibility ceiling"),
         "unexpected error: {}",
         err
     );
     assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_none());
+}
+
+#[test]
+fn propose_nonpricing_change_skips_probe_during_feed_outage() {
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps); // instantiate probes with the healthy default price
+
+    // Simulate a lapsed price keeper: every feed read now fails.
+    deps.querier.set_pyth_error("keeper lapsed: feed unreadable");
+
+    // A NON-pricing change (rotate the protocol wallet after a key compromise)
+    // must still go through — the live probe is skipped because no pricing
+    // field changed, so a feed outage cannot block the recovery action.
+    let mut proposed = default_factory_instantiate_msg();
+    proposed.bluechip_wallet_address = make_addr("rotated_wallet");
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::ProposeConfigUpdate { config: proposed },
+    )
+    .expect("non-pricing change must not be blocked by a feed outage");
+    assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_some());
+
+    // Sanity: a PRICING change during the same outage IS still rejected (the
+    // probe runs). Cancel the pending proposal first, as the handler requires.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::CancelConfigUpdate {},
+    )
+    .unwrap();
+    let mut pricing = default_factory_instantiate_msg();
+    pricing.pyth_conf_threshold_bps = 250;
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::ProposeConfigUpdate { config: pricing },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("live Pyth probe"),
+        "pricing change during outage must still be probed: {err}"
+    );
 }
 
 #[test]

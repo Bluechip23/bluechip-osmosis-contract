@@ -8,10 +8,9 @@
 //! that the whole system already speaks (`rate_used`).
 //!
 //! Why Pyth and not an on-chain pool TWAP: the Osmosis OSMO/USD pool
-//! substrate has collapsed to a few thousand dollars per venue, making a
-//! pool-TWAP oracle manipulable for ~$1–3k (see MAINNET_LIQUIDITY_RECON.md
-//! / ORACLE_PYTH_TRANSITION.md). Pyth aggregates many CEX/DEX venues, so
-//! moving its price is orders of magnitude costlier.
+//! substrate is thin (a few thousand dollars of depth per venue), which
+//! makes a pool-TWAP oracle manipulable for ~$1–3k. Pyth aggregates many
+//! CEX/DEX venues, so moving its price is orders of magnitude costlier.
 //!
 //! Fail-closed: any query error, a stale/too-fresh/future price, a wide
 //! confidence interval, or a failed sanity gate surfaces as `Err`, so a
@@ -25,18 +24,31 @@ use cosmwasm_std::{Deps, Env, StdError, StdResult, Uint128};
 use pool_factory_interfaces::ConversionResponse;
 
 use crate::pyth_types::{PriceFeedResponse, PythQueryMsg};
-use crate::state::{effective_pyth_conf_bps, FactoryInstantiate, FACTORYINSTANTIATEINFO};
+use crate::state::{
+    effective_max_staleness, effective_pyth_conf_bps, FactoryInstantiate, FACTORYINSTANTIATEINFO,
+};
 
 /// Fixed-point scale for `ConversionResponse.rate_used`: micro-USD per
 /// micro-native. `1_000_000` == $1.00 per native token (both sides carry
 /// 6 decimals, so the per-base-unit and per-token rates coincide).
 pub const RATE_PRECISION: u128 = 1_000_000;
 
-/// Sanity ceiling on the parsed rate: $10,000 per native token. No
-/// plausible host-chain native asset trades anywhere near this, so a rate
-/// above it means the feed/expo is misconfigured or the price is being
-/// spoofed. Fail closed.
-pub const RATE_MAX: u128 = 10_000 * RATE_PRECISION;
+/// Plausibility band on the parsed native→USD rate, sized to this chain's
+/// native asset (OSMO). A rate outside `[RATE_MIN, RATE_MAX]` means the
+/// feed/expo is misconfigured, the configured feed id points at the WRONG
+/// asset, or the price is being spoofed — fail closed.
+///
+/// The ceiling is deliberately tight. OSMO's all-time high is ~$11, so a
+/// $100 ceiling leaves ~9x headroom yet still rejects a feed id typo'd to
+/// a higher-priced asset — ETH (~$3k), SOL (~$150), BNB (~$600), BTC —
+/// each of which is otherwise a perfectly valid, fresh, tight-confidence
+/// Pyth feed that the hex-format / staleness / confidence gates cannot
+/// tell apart from OSMO/USD. Without a tight band, mis-pointing the feed at
+/// a ~$3k asset would value 1 uosmo at ~$3k and let an attacker cross a
+/// large USD threshold for cents. The floor rejects a feed pointing at a
+/// near-zero-priced asset.
+pub const RATE_MAX: u128 = 100 * RATE_PRECISION;
+pub const RATE_MIN: u128 = RATE_PRECISION / 10_000; // $0.0001 per native token
 
 /// Maximum acceptable age (seconds) of the Pyth price relative to the
 /// chain's block time — the staleness gate. A price older than this fails
@@ -46,11 +58,19 @@ pub const DEFAULT_MAX_PYTH_STALENESS_SECONDS: u64 = 300;
 pub const MAX_PYTH_STALENESS_MIN_SECONDS: u64 = 30;
 pub const MAX_PYTH_STALENESS_MAX_SECONDS: u64 = 600;
 
-/// Minimum age (seconds) the Pyth price must have before it can be
-/// consumed. Forces the `UpdatePriceFeeds` push and the consuming commit
-/// into DIFFERENT blocks, removing the same-block bundled-update MEV where
-/// a bot submits `tx1: UpdatePriceFeeds(favorable)` + `tx2: Commit` in one
-/// block. On 5–7s blocks a 10s floor guarantees ≥1 block of separation.
+/// Minimum age (seconds), by Pyth publish_time, that a price must have
+/// before it can be consumed. `publish_time` is Pyth's OFF-CHAIN signing
+/// timestamp, not the on-chain block at which `UpdatePriceFeeds` stored the
+/// price, so this gate does NOT prove the update and the commit landed in
+/// different blocks. What it does guarantee is that the consumed price was
+/// signed at least this long ago: a commit can therefore only ever be
+/// valued against a price aged in `[MIN_PYTH_AGE_SECONDS, staleness]`, never
+/// the just-signed tip. That bounds the price an adversary can select to
+/// the range Pyth published over that window (further narrowed by the
+/// confidence gate), so it removes the sharpest same-instant "push a
+/// favorable tip and immediately consume it" edge without pretending to be
+/// full cross-block separation. Unforgeability of Pyth signatures is what
+/// actually defeats injecting a fake favorable price.
 pub const MIN_PYTH_AGE_SECONDS: u64 = 10;
 
 /// Clock-skew tolerance for a publish_time slightly ahead of block time.
@@ -100,13 +120,27 @@ pub fn probe_native_usd_rate(
 /// 7. Reject a confidence interval wider than the configured bps gate.
 /// 8. Reject an out-of-range exponent.
 /// 9. Normalize `price × 10^expo` to the 6-decimal `RATE_PRECISION` scale.
-/// 10. Apply the shared zero / dust / `RATE_MAX` sanity gate.
+/// 10. Apply the shared `[RATE_MIN, RATE_MAX]` plausibility band.
 pub fn probe_pyth_usd_rate(
     deps: Deps,
     env: &Env,
     config: &FactoryInstantiate,
 ) -> StdResult<Uint128> {
     let feed_id = config.pyth_native_usd_feed_id.as_str();
+
+    // 0. Refuse an unconfigured pricing route. A fresh instantiate always
+    // supplies both fields (validated non-empty), but a factory upgraded in
+    // place from a pre-Pyth serialized config deserializes these as the
+    // serde default (empty string); fail closed with a clear message rather
+    // than emit a confusing "contract not found" from the empty-address
+    // query below. The admin recovers by proposing a config update that
+    // sets the real Pyth contract/feed.
+    if config.pyth_contract_addr.trim().is_empty() || feed_id.trim().is_empty() {
+        return Err(StdError::generic_err(
+            "Pyth pricing is not configured (empty contract address or feed id); \
+             set it via a factory config update",
+        ));
+    }
 
     // 1. Query the Pyth contract.
     let response: PriceFeedResponse = deps.querier.query_wasm_smart(
@@ -128,8 +162,16 @@ pub fn probe_pyth_usd_rate(
             )));
         }
         feed.price
-    } else if let Some(price) = response.price {
-        price
+    } else if response.price.is_some() {
+        // A bare `price` with no `price_feed` wrapper carries no feed id, so
+        // the feed-id-match gate above cannot run. The canonical Pyth CW
+        // contract always answers `PriceFeed` with the `price_feed` variant;
+        // a response using only the bare field is non-canonical / mis-routing.
+        // Fail closed rather than trust a price we cannot attribute to the
+        // requested feed.
+        return Err(StdError::generic_err(
+            "Pyth response carried a bare price with no feed id to verify; refusing it",
+        ));
     } else {
         return Err(StdError::generic_err(
             "invalid Pyth response: missing price data",
@@ -151,7 +193,10 @@ pub fn probe_pyth_usd_rate(
 
     // 4-5. Staleness + minimum-age gates.
     let age_seconds = current_time.saturating_sub(publish_time_u64);
-    let max_staleness = config.max_pyth_staleness_seconds;
+    // Clamp at read time (defense-in-depth), mirroring `effective_pyth_conf_bps`
+    // — config validation already range-checks this, but a direct state
+    // write / bad migration must not be able to widen the staleness window.
+    let max_staleness = effective_max_staleness(config);
     if age_seconds > max_staleness {
         return Err(StdError::generic_err(format!(
             "Pyth price is stale: age {}s exceeds max {}s",
@@ -246,17 +291,24 @@ pub fn normalize_pyth_price_to_rate(price: u128, expo: i32) -> StdResult<Uint128
     Ok(Uint128::from(rate))
 }
 
-/// Apply the shared zero / sub-dust / `RATE_MAX` sanity gates to a
-/// normalized rate. Returns `Err` (⇒ fail closed) on any violation.
+/// Apply the shared `[RATE_MIN, RATE_MAX]` plausibility band to a
+/// normalized rate. Returns `Err` (⇒ fail closed) on any violation — a
+/// zero/dust rate, a rate below the floor, or one above the OSMO ceiling
+/// (which also catches a feed id pointing at a higher-priced asset).
 pub fn apply_rate_sanity(rate: Uint128, ctx: &str) -> StdResult<Uint128> {
-    if rate.is_zero() {
+    if rate < Uint128::new(RATE_MIN) {
         return Err(StdError::generic_err(format!(
-            "{ctx}: price too small for {RATE_PRECISION}-precision rate"
+            "{ctx}: normalized rate {} (6-dec micro-USD/native) is below the plausibility \
+             floor of {} (~$0.0001 per native; price too small, or the feed points at a \
+             near-zero-priced asset)",
+            rate, RATE_MIN,
         )));
     }
     if rate > Uint128::new(RATE_MAX) {
         return Err(StdError::generic_err(format!(
-            "{ctx}: price exceeds the ${} per native sanity ceiling",
+            "{ctx}: normalized rate {} exceeds the ${} per native plausibility ceiling \
+             (feed/expo misconfigured, or the feed points at a higher-priced asset)",
+            rate,
             RATE_MAX / RATE_PRECISION
         )));
     }
@@ -317,13 +369,35 @@ mod tests {
     }
 
     #[test]
-    fn sanity_rejects_zero_and_ceiling() {
+    fn sanity_rejects_zero_floor_and_ceiling() {
+        // Zero and anything below the floor fail.
         assert!(apply_rate_sanity(Uint128::zero(), "x").is_err());
+        assert!(apply_rate_sanity(Uint128::new(RATE_MIN - 1), "x").is_err());
+        // The floor and ceiling themselves are accepted (inclusive band).
+        assert_eq!(
+            apply_rate_sanity(Uint128::new(RATE_MIN), "x").unwrap(),
+            Uint128::new(RATE_MIN)
+        );
         assert_eq!(
             apply_rate_sanity(Uint128::new(RATE_MAX), "x").unwrap(),
             Uint128::new(RATE_MAX)
         );
         assert!(apply_rate_sanity(Uint128::new(RATE_MAX + 1), "x").is_err());
+    }
+
+    #[test]
+    fn wrong_asset_feed_rejected_by_ceiling() {
+        // A feed id typo'd to ETH/USD (~$3,000) is a valid, fresh Pyth feed
+        // but normalizes to a rate ~30x above the $100 OSMO ceiling, so the
+        // plausibility band rejects it rather than valuing 1 uosmo at $3k.
+        let eth = normalize_pyth_price_to_rate(3_000_000_000, -6).unwrap(); // $3,000
+        assert!(apply_rate_sanity(eth, "eth").is_err());
+        // SOL (~$150) is also above the $100 ceiling and rejected.
+        let sol = normalize_pyth_price_to_rate(150_000_000, -6).unwrap();
+        assert!(apply_rate_sanity(sol, "sol").is_err());
+        // A realistic OSMO price ($0.03) sits comfortably inside the band.
+        let osmo = normalize_pyth_price_to_rate(30_000, -6).unwrap(); // $0.03
+        assert!(apply_rate_sanity(osmo, "osmo").is_ok());
     }
 
     #[test]

@@ -196,8 +196,8 @@ fn execute_commit_logic(
     // Value the GROSS (pre-fee) commit in USD once at entry and thread
     // the same rate through every conversion in this handler. The rate
     // comes from the factory's CommitContext query, backed by the
-    // chain-native x/twap of the configured native/USD-stable pool —
-    // one query per commit, no keeper, and no mid-tx drift because the
+    // configured Pyth native/USD feed (staleness/confidence/expo gated,
+    // fail-closed) — one query per commit, and no mid-tx drift because the
     // threshold split below reuses `usd_rate` rather than re-querying.
     //
     // The same response carries the factory's LIVE bluechip
@@ -227,11 +227,12 @@ fn execute_commit_logic(
     if usd_rate.is_zero() || commit_value.is_zero() {
         return Err(ContractError::InvalidOraclePrice {});
     }
-    // F-3 — defense-in-depth ceiling on the factory-delegated rate. The
-    // factory already gates this, so it never fires in normal operation; it
-    // firewalls a factory bug / mis-set pricing pool / wrong-decimals quote
-    // denom from pushing an absurd valuation into this pool's threshold and
-    // distribution math. See `swap_helper::POOL_RATE_MAX`.
+    // Defense-in-depth ceiling on the factory-delegated rate. The
+    // factory already gates this against a tighter plausibility band, so it
+    // never fires in normal operation; it firewalls a factory bug / a
+    // mis-configured Pyth feed / a wrong-decimals value from pushing an
+    // absurd valuation into this pool's threshold and distribution math.
+    // See `swap_helper::POOL_RATE_MAX`.
     if usd_rate > Uint128::new(crate::swap_helper::POOL_RATE_MAX) {
         return Err(ContractError::InvalidOraclePrice {});
     }
@@ -297,7 +298,7 @@ fn execute_commit_logic(
                 return Err(ContractError::InvalidFee {});
             }
 
-            // FIX E — the creator 5% fee is bank-sent immediately as before.
+            // The creator 5% fee is bank-sent immediately as before.
             // The bluechip 1% fee is SPLIT: the portion still needed to reach
             // the gamm creation-fee reserve target STAYS in the pool (added to
             // BLUECHIP_FEE_RESERVED, never bank-sent), and only the remainder
@@ -306,7 +307,7 @@ fn execute_commit_logic(
             // reserve only redirects where the bluechip fee lands (pool vs
             // wallet).
             //
-            // H-2 — the reserve is ONLY topped up while the pool is still
+            // The reserve is ONLY topped up while the pool is still
             // pre-threshold. The gamm creation fee is charged (and any reserve
             // surplus remitted) exactly once, inside the threshold-crossing
             // handler; after that the reserve is spent and must never grow
@@ -510,7 +511,7 @@ fn execute_commit_logic(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// FIX E — split the 1% bluechip commit fee between the in-pool
+/// Split the 1% bluechip commit fee between the in-pool
 /// creation-fee reserve and the live bluechip wallet.
 ///
 /// Resolves the retention `target` (in the NATIVE denom) from the live
@@ -525,7 +526,7 @@ fn execute_commit_logic(
 /// - live fee coin in the NATIVE denom (osmo-test-5: 1 OSMO) — the coin's
 ///   amount, exactly the pre-cross-denom behavior;
 /// - live fee coin in another denom (osmosis-1: 20 USDC) — the fee's
-///   native value at the commit's captured TWAP rate plus the same
+///   native value at the commit's captured oracle rate plus the same
 ///   `FEE_SWAP_MARGIN_BPS` the crossing budgets for its exact-out fee
 ///   swap, so the retained native always covers that swap's worst case.
 ///   The target drifts with the rate across commits; `reserved` only

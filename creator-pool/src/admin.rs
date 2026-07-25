@@ -8,8 +8,8 @@
 //! The creator-pool crate keeps:
 //! - `execute_emergency_withdraw` — a wrapper around pool-core's
 //! two-phase initiate/core_drain that adds the commit-only
-//! pre-threshold rejection, CREATOR_EXCESS_POSITION earmark preservation
-//! (FIX D), and DISTRIBUTION_STATE halt.
+//! pre-threshold rejection, CREATOR_EXCESS_POSITION earmark preservation,
+//! and DISTRIBUTION_STATE halt.
 //! - `execute_recover_stuck_states` + private recovery helpers —
 //! all three failure modes (stuck threshold, stalled distribution,
 //! jammed reentrancy guard) only ever occur inside the commit
@@ -43,7 +43,7 @@ use cosmwasm_std::{
 /// bookkeeping:
 /// - Pre-threshold rejection (committed funds are untracked in
 /// reserves; draining would strand them).
-/// - CREATOR_EXCESS_POSITION earmark PRESERVATION on Phase 2 (FIX D) —
+/// - CREATOR_EXCESS_POSITION earmark PRESERVATION on Phase 2 —
 /// its raw `bluechip_amount` / `token_amount` are passed to the core
 /// drain as sweep EXCLUSIONS so the time-locked excess stays in the
 /// contract for the creator; the record itself is left intact so the
@@ -95,7 +95,7 @@ pub fn execute_emergency_withdraw(
     // the tx if anything inside the dispatcher errors, so half-drained
     // state is structurally unreachable.
     //
-    // FIX D: the creator-excess entitlement is now RAW time-locked coins
+    // The creator-excess entitlement is now RAW time-locked coins
     // parked in the contract's bank balance. The core drain must EXCLUDE
     // them (they belong to the creator, not the bluechip wallet), so we
     // pass the earmarked `bluechip_amount` / `token_amount` down as the
@@ -334,7 +334,7 @@ pub fn execute_self_recover_distribution(
 ) -> Result<Response, ContractError> {
     ensure_not_drained(deps.storage)?;
 
-    // FIX F audit — this handler emits NO mints: it only resets the
+    // This handler emits NO mints: it only resets the
     // DISTRIBUTION_STATE cursor (or removes it). The actual minting happens
     // in `execute_continue_distribution`, which already honors POOL_PAUSED,
     // so a paused pool that is self-recovered still cannot mint until it is
@@ -434,7 +434,7 @@ pub fn execute_claim_failed_distribution(
 ) -> Result<Response, ContractError> {
     ensure_not_drained(deps.storage)?;
 
-    // FIX F — pause gate. This is a distribution-recovery MINT path: it
+    // Pause gate. This is a distribution-recovery MINT path: it
     // dispatches a creator-token mint through the same
     // `build_distribution_mint_submsg` harness as the bulk distribution
     // loop. A `POOL_PAUSED` admin (or auto-low-liquidity) pause must halt it

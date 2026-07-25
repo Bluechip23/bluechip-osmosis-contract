@@ -142,7 +142,7 @@ fn test_pause_unpause() {
 
 #[test]
 fn test_claim_failed_distribution_rejected_when_paused() {
-    // FIX F — a paused pool must reject the distribution-recovery mint path
+    // A paused pool must reject the distribution-recovery mint path
     // (`ClaimFailedDistribution`), matching the pause gate that
     // `ContinueDistribution` already enforces.
     let mut deps = mock_dependencies();

@@ -83,8 +83,17 @@ query_json() {
 }
 
 submit_tx() {
-    local raw
-    if ! raw="$(osmosisd tx "$@" "${__TX_FLAGS[@]}" 2>&1)"; then
+    local raw __a
+    # Retry on transient network errors — the public testnet RPCs blip.
+    raw=""
+    for __a in 1 2 3 4 5 6; do
+        raw="$(osmosisd tx "$@" "${__TX_FLAGS[@]}" 2>&1)" || true
+        if printf '%s\n' "$raw" | grep -qiE "post failed|EOF|connection re|timeout|context deadline|error trying to connect"; then
+            echo "submit_tx: network blip (attempt $__a), retrying in 8s" >&2; sleep 8; continue
+        fi
+        break
+    done
+    if [ -z "$raw" ] || printf '%s\n' "$raw" | grep -qiE "post failed|EOF|connection re|error trying to connect"; then
         echo "error: tx submit (mempool admission) failed for: $*" >&2
         echo "--- osmosisd output ---" >&2
         echo "$raw" >&2

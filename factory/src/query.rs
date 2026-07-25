@@ -234,7 +234,7 @@ pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) ->
         FactoryQueryMsg::CommitContext { amount } => {
             // Single round-trip for the pool commit path: the USD
             // valuation plus the live bluechip wallet in one response.
-            // One config load supplies both the TWAP pricing route and
+            // One config load supplies both the Pyth pricing route and
             // the wallet (`probe_native_usd_rate` is the explicit-config
             // variant of the rate query, so the config isn't read twice).
             let cfg = FACTORYINSTANTIATEINFO.load(deps.storage)?;
@@ -258,7 +258,7 @@ pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) ->
             })
         }
         FactoryQueryMsg::RegisteredRouter {} => {
-            // F-1 — pools call this on a null-belief SimpleSwap to check
+            // Pools call this on a null-belief SimpleSwap to check
             // whether the caller is the exempt router. `None` when unset.
             to_json_binary(&pool_factory_interfaces::RegisteredRouterResponse {
                 router: crate::state::ROUTER_ADDRESS.may_load(deps.storage)?,

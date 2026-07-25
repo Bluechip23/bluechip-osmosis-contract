@@ -133,7 +133,7 @@ fn test_threshold_with_excess_creates_position() {
         USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap()
     );
 
-    // FIX C: the over-cap bluechip is recorded as a time-locked creator
+    // The over-cap bluechip is recorded as a time-locked creator
     // entitlement to the RAW excess coins (bluechip + creator tokens),
     // which remain parked in the contract's bank balance.
     match CREATOR_EXCESS_POSITION.load(&deps.storage) {
@@ -208,7 +208,7 @@ fn test_claim_excess_after_unlock_succeeds() {
 
     let unlock_time = env.block.time.minus_seconds(100);
 
-    // FIX C: the creator claims the RAW earmarked coins — `bluechip_amount`
+    // The creator claims the RAW earmarked coins — `bluechip_amount`
     // (bluechip denom) + `token_amount` (creator denom) — that were parked
     // in the contract at crossing. No LP-share proportion / query anymore.
     let bluechip_amount = Uint128::new(50_000_000_000);
@@ -690,7 +690,7 @@ fn test_concurrent_threshold_crossing_attempts() {
     // at the recovery path, instead of silently downgrading the
     // user-intended threshold-crossing commit into pre/post-threshold.
     // The error message references the StuckThreshold recovery so the
-    // operator/keeper has a clear remediation step.
+    // operator/keeper has a clear recovery step.
     let msg = err.to_string();
     assert!(
         msg.contains("THRESHOLD_PROCESSING") && msg.contains("StuckThreshold"),
@@ -951,7 +951,7 @@ fn test_accumulated_bluechips_respected() {
 
     execute(deps.as_mut(), env.clone(), info, msg).unwrap();
 
-    // FIX C: the over-cap accumulated bluechip is recorded as a RAW
+    // The over-cap accumulated bluechip is recorded as a RAW
     // creator-excess entitlement. The earmark math is:
     //   bluechip_amount = NATIVE_RAISED_AT_CROSS - max_bluechip_lock_per_pool
     //   token_amount    = pool_seed_amount * bluechip_amount / NATIVE_RAISED
@@ -1342,7 +1342,7 @@ fn test_commit_rejects_below_post_threshold_floor() {
 }
 
 // ===========================================================================
-// FIX D — emergency drain PRESERVES the creator-excess earmark, and the
+// Emergency drain PRESERVES the creator-excess earmark, and the
 // creator can still claim the raw excess AFTER a drain.
 // ===========================================================================
 #[test]
@@ -1481,7 +1481,7 @@ fn test_emergency_drain_preserves_creator_excess_and_claim_survives_drain() {
 
     // The creator can still claim the raw earmark AFTER the drain (unlock
     // has passed by now). The claim is not gated by the drained/paused
-    // state (FIX D).
+    // state.
     let claim_res = execute(
         deps.as_mut(),
         env,
@@ -2137,7 +2137,7 @@ mod crossed_at_snapshot_tests {
 // through the factory's pricing pool (which trades native/usd_quote by
 // definition). These tests pin:
 //   * the exact-out swap message (route, budget = TWAP value + margin),
-//   * the FIX-E seed/shortfall/leftover math under the native budget,
+//   * the seed/shortfall/leftover math under the native budget,
 //   * rejection of an unroutable fee denom,
 //   * that a native-denominated fee still takes the legacy no-swap path,
 //   * the dynamic native retention target in reserve_bluechip_fee.
@@ -2321,7 +2321,7 @@ mod cross_denom_fee_tests {
         let msgs = run_trigger(&mut deps, Some(fee.clone()), USDC).unwrap();
         assert!(msgs.fee_swap.is_none(), "native fee needs no swap");
         // Zero reserve retained ⇒ the whole native fee is a shortfall
-        // charged against the seed (existing FIX-E semantics).
+        // charged against the seed (existing seed/shortfall semantics).
         let (seed_osmo, _) = SEED_LIQUIDITY.load(&deps.storage).unwrap();
         assert_eq!(seed_osmo, raised - fee.amount);
     }
