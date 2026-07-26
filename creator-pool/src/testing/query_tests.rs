@@ -11,7 +11,7 @@ use crate::msg::{
 };
 use crate::query::query;
 use crate::state::{
-    Committing, CreatorExcessLiquidity, COMMIT_INFO, CREATOR_EXCESS_POSITION, THRESHOLD_CROSSED_AT,
+    Committing, CreatorExcessLiquidity, COMMIT_INFO, 23CREATOR_EXCESS_POSITION, THRESHOLD_CROSSED_AT,
     USD_RAISED_FROM_COMMIT,
 };
 use crate::testing::fixtures::{setup_pool_post_threshold, setup_pool_storage};

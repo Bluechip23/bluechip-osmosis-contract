@@ -253,8 +253,8 @@ pub struct FactoryInstantiate {
     /// snapshot taken at instantiate time.
     ///
     /// Default `86_400` (24h). Range-validated in `validate_factory_config`:
-    /// minimum `EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS` (60s), maximum
-    /// `EMERGENCY_WITHDRAW_DELAY_MAX_SECONDS` (7 days).
+    /// minimum `EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS` (6h prod / 60s on the
+    /// integration build), maximum `EMERGENCY_WITHDRAW_DELAY_MAX_SECONDS` (7 days).
     ///
     /// Tunable via the standard 48h `ProposeConfigUpdate` flow. Changing
     /// this affects in-flight emergency-withdraws? No — the
@@ -270,6 +270,15 @@ pub struct FactoryInstantiate {
     pub emergency_withdraw_delay_seconds: u64,
 }
 
+// Floor on the emergency-withdraw delay: the window between Phase-1 initiate
+// (pause + arm) and Phase-2 drain, during which the community/governance can
+// react to (or cancel) a drain. 60s is far too short to observe a hostile
+// drain, so production enforces a 6h floor. `integration_short_timing`
+// shortens it to 60s so testnet rehearsals don't wait 6h — mirrors the
+// ADMIN_TIMELOCK_SECONDS / COMMIT_POOL_CREATE_RATE_LIMIT_SECONDS gating.
+#[cfg(not(feature = "integration_short_timing"))]
+pub const EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS: u64 = 21_600; // 6h
+#[cfg(feature = "integration_short_timing")]
 pub const EMERGENCY_WITHDRAW_DELAY_MIN_SECONDS: u64 = 60;
 pub const EMERGENCY_WITHDRAW_DELAY_MAX_SECONDS: u64 = 86_400 * 7;
 

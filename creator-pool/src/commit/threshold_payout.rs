@@ -52,10 +52,19 @@ use pool_core::osmosis_msgs::{
 /// much to absorb oracle-rate-vs-pool-spot drift, the pricing pool's swap
 /// fee, and the chain taker fee between commit entry and execution. `MsgSwapExactAmountOut`
 /// spends only what the swap actually needs — the margin bounds the
-/// worst case, it is not a cost. If the pricing pool moves more than
-/// this within the tx, the swap (and the whole crossing) reverts and
-/// the crosser simply retries — funds are never at risk.
-pub(crate) const FEE_SWAP_MARGIN_BPS: u128 = 500;
+/// worst case, it is not a cost, and any unused reservation is remitted back
+/// to the bluechip wallet — so a generous margin is nearly free.
+///
+/// Set to 20%: the pool-creation fee is small (~$20), and the binding risk is
+/// LIVENESS — if the pricing-pool spot legitimately sits more than the margin
+/// off the Pyth mid (volatility or a shallow pool), the exact-out swap reverts
+/// and blocks EVERY crossing on that chain until the pool is arbed back. A tight
+/// 5% margin made that self-inflicted stall (and cheap griefing of it) easy; 20%
+/// tolerates realistic deviation while still capping worst-case spend (drawn
+/// from the 1% fee reserve, not the seed). Funds are never at risk either way:
+/// a swap that would exceed the budget reverts the whole crossing and the
+/// crosser retries.
+pub(crate) const FEE_SWAP_MARGIN_BPS: u128 = 2_000;
 
 /// Validate that the four threshold-payout components match the canonical
 /// per-pool split (325B + 25B + 350B + 500B = 1.2T base units).

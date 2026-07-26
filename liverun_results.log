@@ -231,3 +231,19 @@ SAFETY CHECKS COMPLETE                   03:25
 ===== SAFETY REDO (bob funded) =====
 REJECTED (audit-fix RATE band): $200 commit plausibility ceiling (feed/expo misconfigured, or the feed points at a higher-priced asset): query wasm contract failed: execute wasm contract failed [CosmWasm/wasmd@v0.53.3/x/wasm/keeper/keeper.go:436] with gas used: '317294': unknown request
 REJECTED (paused latch): commit to emergency-withdrawn LPFIV paused due to low liquidity, please supply liquidity before swapping: execute wasm contract failed [CosmWasm/wasmd@v0.53.3/x/wasm/keeper/keeper.go:436] with gas used: '157281': unknown request
+
+===== MULTISIG REHEARSAL (2-of-3 SDK msig=osmo1s7t3u8zvd4ku55059jggsgd4y68n92eas5dgpv) 16:18 =====
+fund msig 3 OSMO                         3C0804286ED126F4C34526715C803C09001C84DEF654B585F18654451E0963C7
+set-contract-admin factory -> msig       3DA444F3B5BC32A89768D958B881D6F023D504704157CE08DFE8A3E968863B3B
+set-contract-admin router -> msig        74672C22EB8439CCCEDC7A6A4C22F2723A2E2BF9F89567A69170BB92A15D3464
+
+===== cw3-flex multisig setup (3-of-4, 48h) 01:01 =====
+cw4_group code                           13288 (tx 19857AA72F99884ACE480CD6C9BB05962D18DBC183E96F769FB4CA306FDA5248)
+cw3_flex code                            13289 (tx B2C6FCFD35BD31F04D678A331762A746350D1B48F5737E0922F25FFCB295B1AD)
+cw4_group addr                           osmo1nrqqqhwxv55l58vmpgvp9tz0qksqgyxrx0s6z738j3z6dz7mqjassmwgnx
+cw3_flex multisig addr                   osmo19hu4nhna9yk9ma4nz5wnsj99sgn687ccyk7l04p2w0d6f3se4w7qjfmw79
+cw4 admin -> cw3                         C5BCE0F21644B08B233069CBFBD33DDCDBF4D36E91B2AF3C5FC53EED32585D68
+router admin -> cw3-flex                 D660E0DA730616E6906A4B9DA10CA1BF33C7BE96A242334EA8C188BDFEA6E356
+cw3-flex multisig (3of4,48h)             osmo19hu4nhna9yk9ma4nz5wnsj99sgn687ccyk7l04p2w0d6f3se4w7qjfmw79
+cw4-group (members)                      osmo1nrqqqhwxv55l58vmpgvp9tz0qksqgyxrx0s6z738j3z6dz7mqjassmwgnx
+factory+router migrate admin             -> cw3-flex (rehearsed)

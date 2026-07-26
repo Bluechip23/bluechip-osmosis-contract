@@ -90,9 +90,13 @@ pub(crate) fn validate_factory_config(
         .commit_fee_bluechip
         .checked_add(config.commit_fee_creator)
         .map_err(|_| ContractError::Std(StdError::generic_err("commit fee sum overflow")))?;
-    if fee_sum > cosmwasm_std::Decimal::one() {
+    // Reject a 100%+ total fee: at fee_sum == 1.0 every commit is consumed
+    // entirely by fees, leaving nothing toward the threshold, and the pool's
+    // own instantiate rejects it as `InvalidFee` — bricking new pool creation
+    // for a full 48h timelock cycle. Require strictly < 1.0.
+    if fee_sum >= cosmwasm_std::Decimal::one() {
         return Err(ContractError::Std(StdError::generic_err(format!(
-            "commit_fee_bluechip + commit_fee_creator must be <= 1.0; got {}",
+            "commit_fee_bluechip + commit_fee_creator must be < 1.0; got {}",
             fee_sum
         ))));
     }

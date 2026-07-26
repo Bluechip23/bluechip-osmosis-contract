@@ -461,6 +461,16 @@ fn parse_created_pool_id(result: &SubMsgResult) -> StdResult<u64> {
         })?;
     let decoded = MsgCreateBalancerPoolResponse::decode(bytes.as_slice())
         .map_err(|e| StdError::generic_err(format!("create-pool reply: decode failed: {}", e)))?;
+    // A real gamm create always returns a nonzero pool id. Reject a
+    // present-but-empty / field-absent response that proto3-decodes to 0:
+    // latching POOL_ID = 0 would silently brick every later swap. Because the
+    // create-pool SubMsg is reply_on_success, erroring here reverts the whole
+    // crossing atomically, so the crosser can simply retry.
+    if decoded.pool_id == 0 {
+        return Err(StdError::generic_err(
+            "create-pool reply: decoded pool_id is 0 (empty/invalid MsgCreateBalancerPoolResponse)",
+        ));
+    }
     Ok(decoded.pool_id)
 }
 

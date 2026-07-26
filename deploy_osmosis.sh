@@ -63,6 +63,13 @@ if [ "$CHAIN_ID" = "osmosis-1" ]; then
         echo "       set it in $ENV_FILE (this should be the protocol multisig)" >&2
         exit 1
     fi
+    if [ -z "${ADMIN_MULTISIG:-}" ]; then
+        echo "error: refusing a mainnet deploy without ADMIN_MULTISIG" >&2
+        echo "       a single-EOA migrate admin bypasses every in-contract timelock" >&2
+        echo "       (a compromised key can migrate to malicious code and drain)." >&2
+        echo "       Set ADMIN_MULTISIG to your cw3/multisig (or gov) address in $ENV_FILE." >&2
+        exit 1
+    fi
     if [ -z "${PRICING_POOL_ID:-}" ]; then
         echo "error: PRICING_POOL_ID is empty — point it at the deepest OSMO/USDC pool" >&2
         exit 1
@@ -74,6 +81,18 @@ if [ "$CHAIN_ID" = "osmosis-1" ]; then
     fi
 fi
 PROTOCOL_WALLET="${PROTOCOL_WALLET:-$ADDR}"
+
+# ---- Admin / migrate authority --------------------------------------
+# ADMIN_MULTISIG becomes BOTH the contracts' wasmd migrate admin AND the
+# in-contract admin (factory_admin_address / router admin). Mainnet requires
+# it (checked above); testnet falls back to the deployer EOA with a warning.
+ADMIN_ADDR_TO_USE="${ADMIN_MULTISIG:-$ADDR}"
+if [ "$ADMIN_ADDR_TO_USE" = "$ADDR" ]; then
+    echo "WARNING: admin + migrate authority is the deployer EOA ($ADDR)." >&2
+    echo "         A single key can migrate the factory to malicious code and drain," >&2
+    echo "         bypassing every in-contract timelock. Set ADMIN_MULTISIG to a" >&2
+    echo "         multisig/gov address before this holds real funds." >&2
+fi
 
 # ---- Balance check --------------------------------------------------
 if ! BAL_JSON="$(query_json bank balances "$ADDR")"; then
@@ -95,6 +114,7 @@ echo "gas balance:   $GAS_BAL $NATIVE_DENOM (>= $MIN_GAS_BALANCE required)"
 echo "chain:         $CHAIN_ID via $NODE"
 echo "store mode:    $STORE_MODE"
 echo "fee wallet:    $PROTOCOL_WALLET"
+echo "admin auth:    $ADMIN_ADDR_TO_USE$([ "$ADMIN_ADDR_TO_USE" = "$ADDR" ] && echo '  (deployer EOA — set ADMIN_MULTISIG!)')"
 echo ""
 
 # ---- Resume from a previous partial run -----------------------------
@@ -252,7 +272,7 @@ else
         --arg pyth_feed        "$PYTH_NATIVE_USD_FEED_ID" \
         --arg pyth_staleness   "$PYTH_MAX_STALENESS_SECONDS" \
         --arg pyth_conf_bps    "$PYTH_CONF_THRESHOLD_BPS" \
-        --arg admin            "$ADDR" \
+        --arg admin            "$ADMIN_ADDR_TO_USE" \
         --arg wallet           "$PROTOCOL_WALLET" \
         --arg native_denom     "$NATIVE_DENOM" \
         --arg usd_quote        "$USD_QUOTE_DENOM" \
@@ -297,10 +317,10 @@ else
     echo "$FACTORY_INIT" | jq .
     echo ""
 
-    # --admin: keep a migration authority so audited wasm fixes can ship.
-    # Post-deploy checklist: rotate it to the protocol multisig.
+    # --admin (wasmd migrate authority) = ADMIN_ADDR_TO_USE: the multisig on
+    # mainnet (enforced above), the deployer EOA on testnet (with a warning).
     FACTORY_RESULT="$(submit_tx wasm instantiate "$FACTORY_CODE_ID" "$FACTORY_INIT" \
-        --label "bluechip_factory" --admin "$ADDR")"
+        --label "bluechip_factory" --admin "$ADMIN_ADDR_TO_USE")"
     FACTORY_ADDR="$(extract_attr "$FACTORY_RESULT" instantiate _contract_address)"
     if [ -z "$FACTORY_ADDR" ]; then
         echo "error: could not extract factory address from instantiate tx" >&2
@@ -320,11 +340,11 @@ else
     ROUTER_INIT="$(jq -nc \
         --arg factory "$FACTORY_ADDR" \
         --arg denom   "$NATIVE_DENOM" \
-        --arg admin   "$ADDR" \
+        --arg admin   "$ADMIN_ADDR_TO_USE" \
         '{factory_addr: $factory, bluechip_denom: $denom, admin: $admin}')"
 
     ROUTER_RESULT="$(submit_tx wasm instantiate "$ROUTER_CODE_ID" "$ROUTER_INIT" \
-        --label "bluechip_router" --admin "$ADDR")"
+        --label "bluechip_router" --admin "$ADMIN_ADDR_TO_USE")"
     ROUTER_ADDR="$(extract_attr "$ROUTER_RESULT" instantiate _contract_address)"
     if [ -z "$ROUTER_ADDR" ]; then
         echo "error: could not extract router address from instantiate tx" >&2
