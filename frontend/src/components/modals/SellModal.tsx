@@ -15,6 +15,7 @@ import {
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CloseIcon from '@mui/icons-material/Close';
 import { TokenModalProps, hasBalance, toMicroUnits, formatTokenAmount } from '../../types/FrontendTypes';
+import { explainContractError } from '../../lib/contractErrors';
 
 const SellModal: React.FC<TokenModalProps> = ({
     open,
@@ -108,7 +109,7 @@ const SellModal: React.FC<TokenModalProps> = ({
             setStatus('Success! Transaction confirmed.');
         } catch (err) {
             console.error('Sell error:', err);
-            setStatus('Error: ' + (err as Error).message);
+            setStatus('Error: ' + explainContractError(err).message);
             setTxHash('');
         } finally {
             setLoading(false);

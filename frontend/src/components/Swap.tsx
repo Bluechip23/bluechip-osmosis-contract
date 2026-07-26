@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardContent, Typography, TextField, Button, Box, Alert } from '@mui/material';
 import { coins } from '@cosmjs/stargate';
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
+import { explainContractError } from '../lib/contractErrors';
 
 interface SwapProps {
     client: SigningCosmWasmClient | null;
@@ -100,7 +101,7 @@ const Swap = ({ client, address, contractAddress }: SwapProps) => {
             setStatus(`Success! Tx Hash: ${result.transactionHash}`);
         } catch (err) {
             console.error(err);
-            setStatus('Error: ' + (err as Error).message);
+            setStatus('Error: ' + explainContractError(err).message);
         }
     };
 

@@ -148,7 +148,7 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
                         <Typography variant="body2">- Commit fee splits (protocol / creator)</Typography>
                         <Typography variant="body2">- Threshold-payout amounts (creator / protocol / pool seed / committers)</Typography>
                         <Typography variant="body2">- Max OSMO lock per pool & creator excess lock days</Typography>
-                        <Typography variant="body2">- USD pricing (x/twap pool id, quote denom, window)</Typography>
+                        <Typography variant="body2">- USD pricing (Pyth contract + OSMO/USD feed id, staleness &amp; confidence gates)</Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
                             The frontend no longer forwards these — the factory consults its own stored config. Per-address create cooldown: 1h; a flat OSMO creation fee is attached automatically.
                         </Typography>

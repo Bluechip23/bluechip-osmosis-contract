@@ -4,6 +4,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CommitTracker from './CommitTracker';
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
 import { DEFAULT_CHAIN_CONFIG, getBluechipDenom } from '../types/FrontendTypes';
+import { explainContractError } from '../lib/contractErrors';
 
 interface CommitProps {
     client: SigningCosmWasmClient | null;
@@ -119,7 +120,11 @@ const Commit = ({ client, address }: CommitProps) => {
             setStatus('Success! Transaction confirmed.');
         } catch (err) {
             console.error('Full error:', err);
-            setStatus('Error: ' + (err as Error).message);
+            // Commits fail closed when the Pyth-backed USD valuation can't be
+            // trusted (stale / too fresh / low-confidence price). Nothing is
+            // transferred in that case, so explain it rather than surfacing the
+            // raw contract string.
+            setStatus('Error: ' + explainContractError(err).message);
             setTxHash('');
         }
     };

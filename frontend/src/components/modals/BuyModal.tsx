@@ -16,6 +16,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CloseIcon from '@mui/icons-material/Close';
 import { coins } from '@cosmjs/stargate';
 import { DEFAULT_CHAIN_CONFIG, TokenModalProps, toMicroUnits, getBluechipDenom } from '../../types/FrontendTypes';
+import { explainContractError } from '../../lib/contractErrors';
 
 const BuyModal: React.FC<TokenModalProps> = ({
     open,
@@ -104,7 +105,7 @@ const BuyModal: React.FC<TokenModalProps> = ({
             setStatus('Success! Transaction confirmed.');
         } catch (err) {
             console.error('Buy error:', err);
-            setStatus('Error: ' + (err as Error).message);
+            setStatus('Error: ' + explainContractError(err).message);
             setTxHash('');
         } finally {
             setLoading(false);

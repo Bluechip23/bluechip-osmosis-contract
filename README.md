@@ -16,7 +16,7 @@ were removed and replaced by chain-native modules:
 | AMM venue | internal constant-product reserves | **GAMM** balancer pool (`gamm/pool/{id}`) |
 | Swaps | internal `compute_swap` | **poolmanager** `MsgSwapExactAmountIn` |
 | LP positions | position-NFT + reserve math | pool holds the GAMM LP shares directly |
-| USD price | bespoke oracle | **x/twap** of a configured OSMO/USDC pool |
+| USD price | bespoke oracle | **Pyth** OSMO/USD feed (gated, fail-closed) |
 
 > Reviewing the code? Start with `packages/pool-core/src/osmosis_msgs.rs`
 > (every native message the system builds lives there), then
@@ -29,7 +29,7 @@ were removed and replaced by chain-native modules:
 
 ```
 factory/          Creates & registers every pool. Owns global config
-                  (48h timelock). Serves USD pricing from x/twap.
+                  (48h timelock). Serves USD pricing from the Pyth oracle.
 creator-pool/     One instance per creator. Commit ledger → threshold
                   crossing → post-threshold trading. Denom admin of its
                   own TokenFactory token; holds its GAMM LP shares.
@@ -63,7 +63,8 @@ config and enforced on every pool (`validate_pool_token_info`). OSMO is:
 - the reserve the creator's over-cap excess is paid out in.
 
 The commit *threshold* is USD-denominated ($25k default) but paid in OSMO, so
-every commit is valued through x/twap at entry (see [USD pricing](#usd-pricing-xtwap)).
+every commit is valued through the Pyth oracle at entry (see
+[USD pricing](#usd-pricing-pyth)).
 
 ---
 
@@ -133,8 +134,8 @@ recorded in a ledger. The net OSMO accrues toward the threshold.
 ```
 
 ```rust
-// creator-pool/src/commit.rs — one x/twap round-trip; the rate is captured
-// once and threaded through the whole tx (no mid-tx drift).
+// creator-pool/src/commit.rs — one factory round-trip (which reads Pyth); the
+// rate is captured once and threaded through the whole tx (no mid-tx drift).
 let commit_ctx = get_commit_context(deps.as_ref(), &pool_info.factory_addr, asset.amount)?;
 let commit_value = commit_ctx.amount;          // USD (6-dec)
 let usd_rate     = commit_ctx.rate_used;
@@ -301,7 +302,7 @@ the pool's OSMO balance. On **osmosis-1 the fee is 20 Noble USDC** — the pool
 holds no USDC, so the crossing first emits a `MsgSwapExactAmountOut` through
 the factory's pricing pool (which trades OSMO/USDC by definition), converting
 the retained OSMO reserve into *exactly* the fee coin; the budget is the
-fee's value at the commit-entry TWAP rate plus a 5% margin, and exact-out
+fee's value at the commit-entry oracle rate plus a 20% margin, and exact-out
 leaves zero USDC dust. Any other fee denom fails with an actionable config
 error instead of an opaque gamm revert. Either way the funding source is the
 same: **the 1% commit-fee retention — protocol revenue, never the creator.**
@@ -442,10 +443,11 @@ match enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creat
 
 ## Other protections
 
-- **Fail-closed USD pricing** — a query error, zero/dust TWAP, or a rate above
-  the **$10k/OSMO** sanity ceiling reverts the commit; every proposed pricing
-  config is **live-probed** at instantiate/propose/apply. See
-  [USD pricing](#usd-pricing-xtwap).
+- **Fail-closed USD pricing** — a query error, a stale / too-fresh /
+  low-confidence price, a bad exponent, or a rate outside the
+  **$0.0001–$100/OSMO** plausibility band reverts the commit; a proposed
+  *pricing* config is **live-probed** at instantiate/propose/apply. See
+  [USD pricing](#usd-pricing-pyth).
 - **Reentrancy** — one shared `REENTRANCY_LOCK` wraps commit and swap;
   checked/`Uint256` arithmetic throughout; `overflow-checks = true` in release.
 - **Strict fund handling** — `must_pay` on every commit/swap rejects
@@ -475,21 +477,47 @@ match enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creat
 
 ---
 
-## USD pricing (x/twap)
+## USD pricing (Pyth)
 
 ```rust
-// factory/src/usd_price.rs
-let resp = TwapQuerier::new(&deps.querier).arithmetic_twap_to_now(
-    config.pricing_pool_id, config.bluechip_denom, config.usd_quote_denom, Some(start_time))?;
-// → micro-USD per micro-OSMO, with zero/dust rejection and a $10k/OSMO ceiling.
+// factory/src/usd_price.rs — read the Pyth OSMO/USD feed, gate it, normalize.
+let response: PriceFeedResponse = deps.querier.query_wasm_smart(
+    config.pyth_contract_addr.as_str(),
+    &PythQueryMsg::PriceFeed { id: feed_id.to_string() },
+)?;
+// → micro-USD per micro-OSMO (`rate_used`), after the gates below.
 ```
 
-- **No keeper, nothing to go stale** — the chain computes the average at query
-  time from real trades. Manipulation cost = moving the pricing pool for the
-  whole `twap_window_seconds` (default 600s, bounds 300–3600s); point
-  `pricing_pool_id` at the deepest OSMO/USDC pool.
-- **Operator duty:** x/twap never reports "stale"; monitor the pricing pool's
-  depth (a draining pool silently lowers manipulation cost — see `RUNBOOK.md`).
+Every gate **fails closed** — a commit that cannot be safely valued reverts
+rather than being mispriced:
+
+| Gate | Rule |
+|---|---|
+| Feed id | response id must match the configured feed (case-insensitive) |
+| Publish time | no negative; no future beyond a 5s skew tolerance |
+| Staleness | age ≤ `max_pyth_staleness_seconds` (default 300s, bounds 30–600) |
+| Minimum age | age ≥ 10s, so a just-pushed price can't be consumed in the same breath |
+| Price sign | must be positive |
+| Confidence | `conf/price` ≤ `pyth_conf_threshold_bps` (default 200 = 2%, bounds 50–500) |
+| Exponent | within `[-12, -4]` |
+| Plausibility | normalized rate within `[$0.0001, $100]` per OSMO |
+
+- **Why Pyth, not a pool TWAP** — the on-chain OSMO/USD pool substrate is thin
+  (a few thousand dollars of depth per venue), which makes a pool-TWAP oracle
+  manipulable for ~$1–3k. Pyth aggregates many CEX/DEX venues, so moving its
+  price is orders of magnitude costlier.
+- **A price keeper is REQUIRED** — Pyth on Osmosis is push-based and nobody
+  keeps OSMO/USD fresh there, so the protocol runs a standing keeper
+  (`keepers/`, `npm run price-keeper`) that pushes Hermes updates on-chain. If
+  it lapses, the staleness gate makes commits fail closed until it resumes:
+  a **liveness** dependency, not a fund risk. Supervise it and alert on lag
+  (see `RUNBOOK.md`).
+- **Bare-price responses are rejected** — a response carrying a price with no
+  feed id to verify is refused rather than trusted.
+
+> The factory's `pricing_pool_id` / `usd_quote_denom` are **not** a price
+> source. They survive only as the cross-denom fee-swap route used at
+> threshold crossing to acquire a USDC-denominated GAMM creation fee.
 
 Integrators read the same conversion the pools use:
 
@@ -534,7 +562,9 @@ protocol keeper (`keepers/`, `npm run distribution-keeper`) calls the
 permissionless `ContinueDistribution` until the ledger drains (≤40
 recipients/tx, gas-adaptive, 5s per-caller cooldown). There is no keeper
 bounty. Termination is driven by ledger-emptiness, so no extra cleanup call is
-ever needed.
+ever needed. (This is the *distribution* keeper — distinct from the mandatory
+*price* keeper described under [USD pricing](#usd-pricing-pyth). Two standing
+jobs total.)
 
 ```json
 { "continue_distribution": {} }
@@ -578,13 +608,71 @@ the denom + on-chain total supply.
 | Commit/swap rate limit | 13 s / wallet | `DEFAULT_SWAP_RATE_LIMIT_SECS` |
 | Max OSMO lock per pool | config (excess → creator escrow) | `max_bluechip_lock_per_pool` |
 | Creator excess lock | 7 days (config), then claim once | `CreatorExcessLiquidity.unlock_time` |
-| TWAP window | 600 s (bounds 300–3600 s) | factory config |
-| Rate sanity ceiling | $10,000 / OSMO | `RATE_MAX` |
+| Pyth staleness gate | 300 s (bounds 30–600 s) | factory config |
+| Pyth confidence gate | 200 bps (bounds 50–500) | factory config |
+| Pyth minimum age | 10 s | `MIN_PYTH_AGE_SECONDS` |
+| Rate plausibility band | $0.0001 – $100 / OSMO | `RATE_MIN` / `RATE_MAX` |
 | GAMM creation fee | live x/poolmanager param (osmosis-1: 20 Noble USDC; swapped from the OSMO reserve at crossing) | funded from the 1% reserve |
 | Admin timelock | 48 h (all propose→apply) | `ADMIN_TIMELOCK_SECONDS` |
-| Emergency-withdraw delay | 60 s – 7 d (24 h mainnet) | factory config |
+| Emergency-withdraw delay | 6 h – 7 d (24 h mainnet default) | factory config |
 | Distribution batch | ≤40 / tx; admin recover 1h / public 7d | `MAX_DISTRIBUTIONS_PER_TX` |
 | Creator token decimals | 6 (enforced) | `validate_creator_token_info` |
+
+---
+
+## What was rehearsed on testnet
+
+The full protocol lifecycle was exercised on **osmo-test-5** against a
+**mock Pyth oracle** serving a fixed $10.00/OSMO. Being precise about that
+substitution, why it was necessary, and what it does and does not prove:
+
+**Exercised on-chain (real Osmosis testnet, real TokenFactory/GAMM/poolmanager):**
+five pools with 1/2/3/4/5 committers — every distribution exact pro-rata to the
+base unit (100%; 25/75; ⅓ each; 10/30/20/40; 20% each), two crossings
+deliberately overshot and refunded the excess, creator-excess escrow claimed on
+each; third-party LP join → swap volume → exit (fees realized) on all five
+GAMM pools; and the safety paths: belief-price gate, oracle staleness
+rejection, rate plausibility-ceiling rejection, minimum-commit rejection,
+no-double-cross, router registration timelock, and the two-phase
+emergency-withdraw arc (pause latch → delay → drain → post-drain commit
+refused).
+
+**Why a mock oracle, not the live feed.** Two blockers, both measurable:
+the testnet Pyth OSMO/USD feed is not kept fresh by anyone (measured **53 hours
+stale**; the staleness gate is 300 s), so every commit would have failed closed
+before a crossing could occur; and at the real ~**$0.0317**/OSMO price even a
+reduced USD threshold needs far more OSMO than testnet faucets provide. The
+mock serves a controlled price **in the exact Pyth wire format** so the pool
+mechanics could be driven at a workable scale.
+
+**How the real Pyth path is nevertheless verified:**
+
+1. **Wire-format equivalence, checked against the live contract.** The real
+   testnet Pyth contract's `PriceFeed` response was fetched and matches
+   `factory/src/pyth_types.rs` field-for-field — including Pyth's asymmetric
+   JSON (`price`/`conf` as strings, `expo`/`publish_time` as numbers). The mock
+   emits that identical shape, so the deserialization path under test is the
+   production one.
+2. **Live probe against the real contract.** `instantiate` / `propose` /
+   `apply` run the full read-and-gate pipeline against the configured Pyth
+   contract and refuse a misconfigured or unreadable route — exercised against
+   the real testnet Pyth contract.
+3. **Every gate boundary is unit-tested** (`factory/src/testing/oracle_tests.rs`):
+   staleness 300 vs 301 s, minimum age 10 vs 9 s, future skew 5 vs 6 s,
+   confidence threshold ±1 bp, exponent range, feed-id mismatch and
+   case-insensitive match, and the plausibility band.
+4. **End-to-end on a real chain binary** (`integration-tests/`,
+   osmosis-test-tube): the factory performs genuine cross-contract queries
+   against a deployed mock-pyth **contract**, including the fail-closed stale
+   path.
+5. **The gates were tripped on-chain.** With the mock feeding out-of-band
+   values on osmo-test-5, a $200/OSMO price was rejected at the plausibility
+   ceiling and a backdated `publish_time` was rejected by the staleness gate —
+   i.e. the rejection logic ran on a real chain, not only in unit tests.
+
+**Not yet proven end-to-end:** a threshold crossing priced by the live mainnet
+Pyth feed. That requires the mainnet feed plus the running price keeper, and is
+the first thing to validate after deployment (see `RUNBOOK.md`).
 
 ---
 
@@ -617,7 +705,7 @@ factory/  creator-pool/  router/
 packages/{pool-core, pool-factory-interfaces, easy-addr}
 integration-tests/   # osmosis-test-tube e2e (excluded from workspace)
 fuzz/                # cargo-fuzz math targets (excluded)
-keepers/             # distribution keeper (the one off-chain bot)
+keepers/             # off-chain bots: price keeper (required) + distribution keeper
 frontend/            # reference UI
 docs/                # OSMOSIS_DEPLOY.md, MULTISIG.md, FRONTEND_MIGRATION.md
 deploy_osmosis.sh    # store + instantiate + verify (testnet & mainnet)
@@ -631,9 +719,13 @@ deploy_osmosis.sh    # store + instantiate + verify (testnet & mainnet)
 ```
 
 The script stores the wasms, instantiates factory + router, then verifies by
-reading config back and probing `ConvertNativeToUsd` — you see the live TWAP
-rate before calling it done. Ops (keeper, pricing canary, governance hygiene)
-are in `RUNBOOK.md`; multisig in `docs/MULTISIG.md`.
+reading config back and probing `ConvertNativeToUsd` — you see the live Pyth
+rate before calling it done. **Start the price keeper first:** instantiate
+live-probes the feed and refuses a stale one. Set `ADMIN_MULTISIG` to your
+multisig — it becomes both the wasmd migrate admin and the in-contract admin,
+and mainnet deploys refuse to run without it. Ops (both keepers, pricing
+canary, governance hygiene) are in `RUNBOOK.md`; multisig in
+`docs/MULTISIG.md`.
 
 ---
 

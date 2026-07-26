@@ -48,3 +48,6 @@ ignite.log
 .env.local
 .env.*.local
 injective/
+
+# Vite dev build cache (generated)
+frontend/.vite/

@@ -15,6 +15,7 @@ import {
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CloseIcon from '@mui/icons-material/Close';
 import { TokenModalProps, toMicroUnits, DEFAULT_CHAIN_CONFIG, getBluechipDenom } from '../../types/FrontendTypes';
+import { explainContractError } from '../../lib/contractErrors';
 
 const CommitModal: React.FC<TokenModalProps> = ({
     open,
@@ -130,7 +131,7 @@ const CommitModal: React.FC<TokenModalProps> = ({
             setStatus('Success! Transaction confirmed.');
         } catch (err) {
             console.error('Commit error:', err);
-            setStatus('Error: ' + (err as Error).message);
+            setStatus('Error: ' + explainContractError(err).message);
             setTxHash('');
         } finally {
             setLoading(false);
