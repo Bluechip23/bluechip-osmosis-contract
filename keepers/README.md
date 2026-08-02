@@ -1,12 +1,26 @@
 # Bluechip Keepers
 
 > Keeper actions pay **no bounty** — the operator absorbs gas costs as
-> part of running the protocol. There is no price-oracle keeper: USD
-> pricing is chain-native (Osmosis `x/twap`) and needs no off-chain
-> upkeep.
+> part of running the protocol.
 
-One off-chain bot keeps the Bluechip protocol tidy — the **distribution
-keeper**, which per sweep:
+USD pricing comes from the Pyth OSMO/USD feed configured on the
+factory, and the factory's read fails **closed** past its staleness
+gate (`max_pyth_staleness_seconds`, default 300s) — so a standing
+**price keeper** must push Pyth price updates to the on-chain Pyth
+contract at least that often, or every commit reverts until the feed
+recovers.
+
+The **price keeper** (`src/price-keeper.ts`, `npm run price-keeper`)
+does exactly that: each iteration it fetches the latest signed OSMO/USD
+update from Pyth's Hermes API, queries the on-chain Pyth contract's
+update fee, and submits `update_price_feeds` with the fee attached.
+Configure it via the `PYTH_*` / `HERMES_ENDPOINT` variables in
+`.env.example` and supervise it (systemd `Restart=always` / k8s) — if
+it lags past the staleness gate, commits fail closed until it catches
+up.
+
+Alongside it, an off-chain bot keeps the Bluechip protocol tidy — the
+**distribution keeper**, which per sweep:
 
 - calls each pool's `ContinueDistribution` when it has an active
   post-threshold distribution, so committers receive their creator tokens in

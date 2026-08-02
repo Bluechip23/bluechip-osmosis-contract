@@ -20,9 +20,15 @@ chain-native:
   with a slippage floor derived from the on-chain estimate and the
   caller's `belief_price`.
 - The commit threshold is **USD-denominated**: commits are made in
-  OSMO and valued via Osmosis's chain-native `x/twap` module over the
-  configured OSMO/USDC pool (`pricing_pool_id`) — no keepers, no Pyth,
-  no bespoke oracle.
+  OSMO and valued via the **Pyth OSMO/USD price feed** read from the
+  factory-configured Pyth contract (`pyth_contract_addr` +
+  `pyth_native_usd_feed_id`), gated fail-closed for staleness
+  (`max_pyth_staleness_seconds`) and confidence
+  (`pyth_conf_threshold_bps`). A standing **price keeper** must keep
+  that feed fresh on-chain — see `keepers/`. `pricing_pool_id` /
+  `usd_quote_denom` remain in the config but are only the fee-swap
+  execution route for acquiring the GAMM pool-creation fee at
+  threshold crossing; they are not a price source.
 
 One compiled artifact set works on both testnet and mainnet — only the
 instantiate config differs.
@@ -69,8 +75,9 @@ sha256sum artifacts/*.wasm   # hashes go in the gov proposal
 ### 2. Local end-to-end gate (osmosis-test-tube)
 
 Before spending anything on-chain, run the integration harness — it
-executes the real `tokenfactory` / `gamm` / `poolmanager` / `twap`
-modules in-process and covers create → cross (native pool seed) →
+executes the real `tokenfactory` / `gamm` / `poolmanager` modules
+in-process (with a mock Pyth contract supplying the USD price feed)
+and covers create → cross (native pool seed) →
 distribute → swap → third-party `MsgJoinPool`/`MsgExitPool`:
 
 ```bash
@@ -95,8 +102,9 @@ pool, and route through the router (see `scripts/README.md`). Drop
 `COMMIT_THRESHOLD_LIMIT_USD` to a few hundred dollars (or less) in
 `osmo_testnet.env` so a crossing is cheap to trigger. The testnet
 `PRICING_POOL_ID` must point at a real OSMO/USD-stable pool with
-enough TWAP history to cover the window. Reference run 2026-07-18:
-11/11 pass against factory code 13256 / pool 314 pricing.
+enough liquidity to fill the fee swap, and the price keeper must be
+running so the Pyth staleness gate stays green. Reference run
+2026-07-18: 11/11 pass against factory code 13256 / pool 314 pricing.
 
 ### 4. Governance proposal (draft)
 
@@ -110,8 +118,8 @@ address-permission route:
 > Osmosis-native modules. Creators launch a token as a TokenFactory
 > denom paired against OSMO in a two-phase pool. Supporters commit
 > OSMO; when a pool's cumulative committed value crosses its USD
-> threshold (valued via the chain's x/twap over the main OSMO/USDC
-> pool) it mints the fixed 1.2M-token supply, seeds a native GAMM
+> threshold (valued via the Pyth OSMO/USD feed, read fail-closed with
+> staleness and confidence gates) it mints the fixed 1.2M-token supply, seeds a native GAMM
 > balancer pool, and distributes tokens to committers pro-rata.
 > Post-threshold, the pool is a standard Osmosis GAMM market: swaps
 > route through x/poolmanager and liquidity is added/removed with
@@ -128,15 +136,16 @@ address-permission route:
 > cosmwasm/optimizer 0.16.0; artifact sha256 hashes: <hashes>.
 > Test suite: full unit/integration coverage plus an
 > osmosis-test-tube end-to-end harness that exercises the real
-> tokenfactory/gamm/poolmanager/twap modules; security review docs
-> in-repo.
+> tokenfactory/gamm/poolmanager modules (with a mock Pyth contract
+> for the USD price feed); security review docs in-repo.
 >
-> **What this protocol does NOT do:** no external price feeds or
-> keeper-updated oracles (USD valuation uses the chain's own x/twap
-> module over the main OSMO/USDC pool), no bridged assets, no
-> privileged mint of OSMO — pools only hold OSMO + TokenFactory
-> denoms they administer, and every admin mutation is behind a 48h
-> timelock.
+> **Pricing:** USD valuation uses the Pyth OSMO/USD feed read from
+> the chain's Pyth CW contract, gated fail-closed for staleness and
+> confidence; the protocol operates a keeper that keeps the feed
+> pushed on-chain. **What this protocol does NOT do:** no bridged
+> assets, no privileged mint of OSMO — pools only hold OSMO +
+> TokenFactory denoms they administer, and every admin mutation is
+> behind a 48h timelock.
 
 For the per-contract route instead, generate the combined gov v1
 proposal (one vote stores the three wasms, gzip-compressed, hashes and
@@ -187,8 +196,10 @@ not upload fresh copies).
 | Knob | Meaning | Testnet suggestion | Mainnet decision |
 |---|---|---|---|
 | `COMMIT_THRESHOLD_LIMIT_USD` | USD (6-dec) a pool must raise to open | $20–$200 | $25,000 = `25000000000` |
-| `PRICING_POOL_ID` / `USD_QUOTE_DENOM` | x/twap pricing pool for OSMO→USD | pool 314 (uosmo/USDC-ibc) | the deepest OSMO/USDC pool on osmosis-1 (verify id + denom) |
-| `TWAP_WINDOW_SECONDS` | TWAP lookback (manipulation-cost window) | 600 | 600 |
+| `PRICING_POOL_ID` / `USD_QUOTE_DENOM` | fee-swap execution route for the USDC gamm creation fee (NOT a price source) | pool 314 (uosmo/USDC-ibc) | an OSMO/USDC pool on osmosis-1 with enough depth for the ~$20 fee swap (verify id + denom) |
+| `PYTH_CONTRACT_ADDR` / `PYTH_NATIVE_USD_FEED_ID` | Pyth CW contract + OSMO/USD feed id (USD price source; ids differ per network) | testnet Pyth + beta feed id | mainnet Pyth + mainnet feed id (see env files) |
+| `PYTH_MAX_STALENESS_SECONDS` | fail-closed staleness gate (range 30–600); keep above keeper push cadence | 300 | 300 |
+| `PYTH_CONF_THRESHOLD_BPS` | fail-closed confidence gate (bps of price, range 50–500) | 200 | 200 |
 | `POOL_CREATION_FEE` | flat uosmo anti-spam fee on Create | 1 OSMO | 1–10 OSMO |
 | `GAMM_POOL_CREATION_FEE` (+`_DENOM`) | the fee COIN x/gamm charges at crossing, funded from the 1% commit-fee retention (never the creator); the pool settles against the LIVE fee and, when the denom is the USD quote (osmosis-1: **20 Noble USDC**), swaps its native retention into the fee coin via the pricing pool | 1 OSMO (`uosmo`) | match `osmosisd q poolmanager params` — 20 USDC as of 2026-07 |
 | `COMMIT_FEE_BLUECHIP` / `COMMIT_FEE_CREATOR` | per-commit fee split | 1% / 5% | your call |
