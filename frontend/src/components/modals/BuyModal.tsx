@@ -17,6 +17,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import { coins } from '@cosmjs/stargate';
 import { DEFAULT_CHAIN_CONFIG, TokenModalProps, toMicroUnits, getBluechipDenom } from '../../types/FrontendTypes';
 import { explainContractError } from '../../lib/contractErrors';
+import { stdFee } from '../../lib/fees';
 
 const BuyModal: React.FC<TokenModalProps> = ({
     open,
@@ -96,7 +97,7 @@ const BuyModal: React.FC<TokenModalProps> = ({
                 address,
                 token.poolAddress,
                 msg,
-                { amount: [], gas: '500000' },
+                stdFee(500000),
                 'Buy Token',
                 funds
             );

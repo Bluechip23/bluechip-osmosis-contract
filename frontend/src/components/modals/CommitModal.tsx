@@ -16,6 +16,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CloseIcon from '@mui/icons-material/Close';
 import { TokenModalProps, toMicroUnits, DEFAULT_CHAIN_CONFIG, getBluechipDenom } from '../../types/FrontendTypes';
 import { explainContractError } from '../../lib/contractErrors';
+import { stdFee } from '../../lib/fees';
 
 const CommitModal: React.FC<TokenModalProps> = ({
     open,
@@ -122,7 +123,7 @@ const CommitModal: React.FC<TokenModalProps> = ({
                 address,
                 token.poolAddress,
                 msg,
-                { amount: [], gas },
+                stdFee(gas),
                 'Commit',
                 funds
             );

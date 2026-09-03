@@ -5,6 +5,7 @@ import CommitTracker from './CommitTracker';
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
 import { DEFAULT_CHAIN_CONFIG, getBluechipDenom } from '../types/FrontendTypes';
 import { explainContractError } from '../lib/contractErrors';
+import { stdFee } from '../lib/fees';
 
 interface CommitProps {
     client: SigningCosmWasmClient | null;
@@ -108,10 +109,7 @@ const Commit = ({ client, address }: CommitProps) => {
                 address,
                 targetContractAddress,
                 msg,
-                {
-                    amount: [],
-                    gas // Explicit gas limit
-                },
+                stdFee(gas),
                 "Commit",
                 funds
             );
