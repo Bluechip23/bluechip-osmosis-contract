@@ -3,6 +3,7 @@ import { Card, CardContent, Typography, TextField, Button, Box, Alert } from '@m
 import { coins } from '@cosmjs/stargate';
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
 import { explainContractError } from '../lib/contractErrors';
+import { stdFee } from '../lib/fees';
 
 interface SwapProps {
     client: SigningCosmWasmClient | null;
@@ -90,10 +91,7 @@ const Swap = ({ client, address, contractAddress }: SwapProps) => {
                 address,
                 targetContractAddress,
                 msg,
-                {
-                    amount: [],
-                    gas: "500000"
-                },
+                stdFee(500000),
                 "Swap",
                 funds
             );
