@@ -1,7 +1,7 @@
 //! Threshold-crossing payout orchestration.
 //!
 //! Runs once per pool when a commit crosses the
-//! `commit_amount_for_threshold_usd` target. It:
+//! `commit_amount_for_threshold_native` target. It:
 //! - Mints the four creator-token splits (`creator_reward_amount` →
 //!   creator wallet, `bluechip_reward_amount` → bluechip wallet,
 //!   `pool_seed_amount` → the POOL CONTRACT, `commit_return_amount`
@@ -10,7 +10,7 @@
 //!   (DISTRIBUTION_STATE), unchanged — it is independent of the pool.
 //! - **Seeds a NATIVE Osmosis GAMM balancer pool** with the raised
 //!   bluechip (capped at `max_bluechip_lock_per_pool`) and the pool-seed
-//!   creator tokens. This replaces the old internal reserve seeding. The
+//!   creator tokens. The
 //!   `MsgCreateBalancerPool` rides back on the crossing Response as a
 //!   `SubMsg::reply_on_success(_, REPLY_ID_CREATE_POOL)`; the reply parses
 //!   the new `pool_id` and stores it. The pool holds the resulting
@@ -48,8 +48,8 @@ use pool_core::osmosis_msgs::{
 };
 
 /// Safety margin (basis points) on the native amount budgeted for the
-/// cross-denom fee swap: the oracle-rate-derived input is inflated by this
-/// much to absorb oracle-rate-vs-pool-spot drift, the pricing pool's swap
+/// cross-denom fee swap: the TWAP-derived input is inflated by this
+/// much to absorb TWAP-vs-spot drift, the pricing pool's swap
 /// fee, and the chain taker fee between commit entry and execution. `MsgSwapExactAmountOut`
 /// spends only what the swap actually needs — the margin bounds the
 /// worst case, it is not a cost, and any unused reservation is remitted back
@@ -57,9 +57,9 @@ use pool_core::osmosis_msgs::{
 ///
 /// Set to 20%: the pool-creation fee is small (~$20), and the binding risk is
 /// LIVENESS — if the pricing-pool spot legitimately sits more than the margin
-/// off the Pyth mid (volatility or a shallow pool), the exact-out swap reverts
+/// off its own trailing TWAP (volatility, a shallow pool), the exact-out swap reverts
 /// and blocks EVERY crossing on that chain until the pool is arbed back. A tight
-/// 5% margin made that self-inflicted stall (and cheap griefing of it) easy; 20%
+/// margin would make that self-inflicted stall (and cheap griefing of it) easy; 20%
 /// tolerates realistic deviation while still capping worst-case spend (drawn
 /// from the 1% fee reserve, not the seed). Funds are never at risk either way:
 /// a swap that would exceed the budget reverts the whole crossing and the
@@ -172,17 +172,17 @@ pub fn trigger_threshold_payout(
     bluechip_wallet: &Addr,
     // LP fee (`PoolSpecs.lp_fee`) reused as the native GAMM pool's swap_fee.
     lp_fee: Decimal,
-    // USD-per-native rate captured at commit entry (CommitContext) —
-    // sizes the native budget for a cross-denom fee swap at EXACTLY the
-    // rate the threshold valuation used.
-    usd_rate: Uint128,
+    // TWAP-valued native budget for a cross-denom fee swap, from the same
+    // CommitContext query (the factory prices the fee coin at the pricing
+    // pool's arithmetic TWAP). `None` when the fee is native-denominated.
+    fee_swap_budget: Option<Uint128>,
     // Live factory fee/route context, from the same CommitContext query:
     // the configured gamm creation-fee coin (fallback when the chain
     // params query is unavailable), and the pricing pool + USD quote
     // denom that define the swap route for a non-native fee denom.
     fee_cfg: Option<&Coin>,
     pricing_pool_id: u64,
-    usd_quote_denom: &str,
+    fee_quote_denom: &str,
     env: &Env,
 ) -> Result<ThresholdPayoutMsgs, ContractError> {
     // No-double-mint invariant — STRUCTURALLY enforced here. This is the
@@ -247,7 +247,7 @@ pub fn trigger_threshold_payout(
     // Post-threshold committer distribution setup (unchanged — independent
     // of the pool venue). Distinct-committer count is read O(1) from the
     // incrementally-maintained `COMMITTER_COUNT` rather than the
-    // old unbounded `COMMIT_LEDGER.keys(..).count()` scan. At crossing the
+    // unbounded `COMMIT_LEDGER.keys(..).count()` scan. At crossing the
     // ledger is full (nothing distributed yet), so the counter equals the
     // ledger size exactly — the crossing handler recorded the crosser
     // before calling this.
@@ -257,7 +257,7 @@ pub fn trigger_threshold_payout(
         let dist_state = DistributionState {
             is_distributing: true,
             total_to_distribute: payout.commit_return_amount,
-            total_committed_usd: commit_config.commit_amount_for_threshold_usd,
+            total_committed_native: commit_config.commit_amount_for_threshold_native,
             last_processed_key: None,
             distributions_remaining: committer_count,
             estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -296,8 +296,7 @@ pub fn trigger_threshold_payout(
     // params query is unavailable (a chain build without the query, or
     // test mocks): the factory's live `gamm_pool_creation_fee` config
     // (rides the CommitContext query), then the instantiate-time
-    // `CREATION_FEE_RESERVE_TARGET` interpreted as a native-denom amount
-    // (legacy pre-cross-denom semantics).
+    // `CREATION_FEE_RESERVE_TARGET` interpreted as a native-denom amount.
     let bluechip_denom_for_fee = get_native_denom(&pool_info.pool_info.asset_infos)?;
     let configured_target = crate::state::CREATION_FEE_RESERVE_TARGET
         .may_load(storage)?
@@ -324,24 +323,64 @@ pub fn trigger_threshold_payout(
     //   `native_fee_charge` is the fee amount, no swap.
     // - Fee denominated in the USD quote denom (osmosis-1: 20 USDC): the
     //   pool holds no USDC, so a `MsgSwapExactAmountOut` through the
-    //   factory's pricing pool (which trades native/usd_quote by
+    //   factory's pricing pool (which trades native/fee_quote by
     //   definition) converts retained native into EXACTLY the fee coin
-    //   before the create executes. The native budget is the fee's value
-    //   at the commit-entry oracle rate plus `FEE_SWAP_MARGIN_BPS`;
-    //   exact-out spends only what the swap needs, so the margin is a
-    //   bound, not a cost. Funding source is unchanged: the 1% commit-fee
-    //   retention (protocol revenue) — the creator never pays.
+    //   before the create executes. The native budget is the factory's
+    //   TWAP valuation of the fee plus `FEE_SWAP_MARGIN_BPS`, hard-clamped
+    //   to `BLUECHIP_FEE_RESERVED`; exact-out spends only what the swap
+    //   needs, so the margin is a bound, not a cost. Funding source: the
+    //   1% commit-fee retention (protocol revenue) ONLY — the clamp makes
+    //   committer/creator funds unreachable even under a manipulated TWAP.
+    //   (The unspent gap `max_in - actual` stays in the contract's bank
+    //   balance as unearmarked dust — bounded by the 20% margin on a ~$20
+    //   fee, accepted.)
     // - Any other fee denom is unroutable here: fail with an actionable
     //   error naming the config knob rather than letting the gamm module
     //   revert opaquely at charge time.
     let (native_fee_charge, fee_swap): (Uint128, Option<CosmosMsg>) = match &fee_coin {
         None => (Uint128::zero(), None),
         Some(fee) if fee.denom == bluechip_denom_for_fee => (fee.amount, None),
-        Some(fee) if fee.denom == usd_quote_denom && pricing_pool_id != 0 => {
-            let base_in = crate::swap_helper::usd_to_native_at_rate(fee.amount, usd_rate)?;
+        Some(fee) if fee.denom == fee_quote_denom && pricing_pool_id != 0 => {
+            // Fail closed if the factory sent a non-native fee without its
+            // TWAP budget — mis-budgeting here would either revert the
+            // create (opaque) or overdraw the reserve.
+            let base_in = fee_swap_budget.ok_or_else(|| {
+                ContractError::InvalidThresholdParams {
+                    msg: format!(
+                        "non-native pool-creation fee '{}' arrived without a fee-swap                          budget from the factory",
+                        fee.denom
+                    ),
+                }
+            })?;
+            // HARD CLAMP to the retained reserve: `MsgSwapExactAmountOut`
+            // draws from the pool contract's ENTIRE bank balance up to
+            // `token_in_max_amount`, so an unclamped budget would let a
+            // manipulated pricing-pool TWAP route committer seed funds out
+            // through the fee swap. Clamped, the swap can spend at most the
+            // 1%-retention reserve (protocol revenue); if that cannot cover
+            // the live price, the swap fails inside x/gamm and the whole
+            // crossing reverts — retryable once pre-threshold commits top
+            // the reserve back up. Seed funds are never reachable.
             let max_in = base_in
                 .multiply_ratio(10_000u128 + FEE_SWAP_MARGIN_BPS, 10_000u128)
-                .checked_add(Uint128::one())?;
+                .checked_add(Uint128::one())?
+                .min(reserved);
+            if max_in.is_zero() {
+                // NOTE the cure carefully: when the remaining gap to the
+                // threshold is below the pre-threshold minimum commit,
+                // non-crossing top-up commits are impossible — but a
+                // LARGER crossing commit still works, because its own 1%
+                // retention lands in the reserve before this code runs.
+                return Err(ContractError::InvalidThresholdParams {
+                    msg: format!(
+                        "creation-fee reserve is empty but the live pool-creation fee is \
+                         non-native ({}); the crossing cannot fund the fee swap yet — \
+                         retry with a larger commit (its 1% retention funds the reserve \
+                         in the same transaction) or after further pre-threshold commits",
+                        fee.denom
+                    ),
+                });
+            }
             let swap = swap_exact_amount_out_msg(
                 &pool_info.pool_info.contract_addr,
                 pricing_pool_id,
@@ -358,7 +397,7 @@ pub fn trigger_threshold_payout(
                      denom ('{}') nor the pricing quote denom ('{}', pricing pool {}); update \
                      the factory's gamm_pool_creation_fee / pricing config so the crossing \
                      can acquire the fee coin",
-                    fee.denom, bluechip_denom_for_fee, usd_quote_denom, pricing_pool_id
+                    fee.denom, bluechip_denom_for_fee, fee_quote_denom, pricing_pool_id
                 ),
             });
         }
@@ -367,8 +406,7 @@ pub fn trigger_threshold_payout(
 
     // Compute the coins seeding the native pool. The bluechip side is
     // capped at `max_bluechip_lock_per_pool`; the creator side is reduced
-    // proportionally so the seeded ratio matches the retired internal-AMM
-    // reserve seeding.
+    // proportionally so the seeded ratio stays 50/50 at the raise price.
     //
     // On over-cap the excess is time-locked to the creator as RAW
     // coins, NOT as a slice of the pool's LP shares.
@@ -421,6 +459,10 @@ pub fn trigger_threshold_payout(
 
     // The SEED always yields the uncovered creation-fee shortfall,
     // so both the brick invariant and the creator earmark stay consistent.
+    // NOTE: with the cross-denom arm's `max_in <= reserved` clamp above,
+    // `shortfall` is structurally zero for a swapped (non-native) fee; this
+    // path is live only for a NATIVE-denominated chain fee, where it is
+    // bounded by the actual fee amount — no TWAP amplification.
     // The pool holds `pools_bluechip_seed + reserved` OSMO and the gamm
     // module auto-charges `creation_fee` ON TOP of the seeded coins. Whatever
     // the retained `reserved` does not cover — `shortfall = creation_fee -

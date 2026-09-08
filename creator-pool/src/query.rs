@@ -3,7 +3,7 @@
 //! existing `use crate::query::X;` import resolves unchanged.
 //!
 //! `query_analytics` wraps pool-core's `query_analytics_core` by
-//! loading commit-phase state (USD_RAISED_FROM_COMMIT,
+//! loading commit-phase state (GROSS_NATIVE_COMMITTED,
 //! NATIVE_RAISED_FROM_COMMIT) and deriving `threshold_status`.
 pub use pool_core::query::*;
 
@@ -16,7 +16,7 @@ use crate::state::{
     COMMITFEEINFO, COMMIT_INFO, COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION,
     DISTRIBUTION_STALL_TIMEOUT_SECONDS, DISTRIBUTION_STATE, IS_THRESHOLD_HIT,
     NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY, POOL_COMMITS_QUERY_DEFAULT_LIMIT,
-    POOL_COMMITS_QUERY_MAX_LIMIT, THRESHOLD_CROSSED_AT, USD_RAISED_FROM_COMMIT,
+    POOL_COMMITS_QUERY_MAX_LIMIT, THRESHOLD_CROSSED_AT, GROSS_NATIVE_COMMITTED,
 };
 use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Deps, Env, Order, StdResult, Uint128,
@@ -55,27 +55,27 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                     has_committed: true,
                     last_committed: Some(committing.last_committed),
                     last_payment_bluechip: Some(committing.last_payment_bluechip),
-                    last_payment_usd: Some(committing.last_payment_usd),
+                    last_payment_native: Some(committing.last_payment_native),
                 },
                 None => LastCommittedResponse {
                     has_committed: false,
                     last_committed: None,
                     last_payment_bluechip: None,
-                    last_payment_usd: None,
+                    last_payment_native: None,
                 },
             };
             to_json_binary(&response)
         }
         QueryMsg::PoolCommits {
             pool_contract_address,
-            min_payment_usd,
+            min_payment_native,
             after_timestamp,
             start_after,
             limit,
         } => to_json_binary(&query_pool_committers(
             deps,
             pool_contract_address,
-            min_payment_usd,
+            min_payment_native,
             after_timestamp,
             start_after,
             limit,
@@ -164,13 +164,13 @@ pub fn query_distribution_state(
         is_stalled,
         consecutive_failures: state.consecutive_failures,
         total_to_distribute: state.total_to_distribute,
-        total_committed_usd: state.total_committed_usd,
+        total_committed_native: state.total_committed_native,
         distributed_so_far: state.distributed_so_far,
     }))
 }
 
 /// Public threshold-status helper that takes an already-loaded
-/// `usd_raised`. Callers that already loaded `USD_RAISED_FROM_COMMIT`
+/// `usd_raised`. Callers that already loaded `GROSS_NATIVE_COMMITTED`
 /// for their own response (e.g. `query_analytics`) call this directly
 /// to skip one redundant storage read; standalone callers go through
 /// `query_check_threshold_limit` which performs the load.
@@ -182,16 +182,16 @@ pub fn threshold_status_from(deps: Deps, usd_raised: Uint128) -> StdResult<Commi
         let commit_config = COMMIT_LIMIT_INFO.load(deps.storage)?;
         Ok(CommitStatus::InProgress {
             raised: usd_raised,
-            target: commit_config.commit_amount_for_threshold_usd,
+            target: commit_config.commit_amount_for_threshold_native,
         })
     }
 }
 
 /// Standalone wrapper around [`threshold_status_from`] that loads
-/// `USD_RAISED_FROM_COMMIT` itself. Use when you don't already have
+/// `GROSS_NATIVE_COMMITTED` itself. Use when you don't already have
 /// the raised total in scope.
 pub fn query_check_threshold_limit(deps: Deps) -> StdResult<CommitStatus> {
-    let usd_raised = USD_RAISED_FROM_COMMIT.load(deps.storage)?;
+    let usd_raised = GROSS_NATIVE_COMMITTED.load(deps.storage)?;
     threshold_status_from(deps, usd_raised)
 }
 
@@ -199,7 +199,7 @@ pub fn query_check_threshold_limit(deps: Deps) -> StdResult<CommitStatus> {
 /// phase totals and derives `threshold_status`, then delegates the
 /// shared response body construction.
 pub fn query_analytics(deps: Deps) -> StdResult<PoolAnalyticsResponse> {
-    let usd_raised = USD_RAISED_FROM_COMMIT.load(deps.storage)?;
+    let usd_raised = GROSS_NATIVE_COMMITTED.load(deps.storage)?;
     let bluechip_raised = NATIVE_RAISED_FROM_COMMIT.load(deps.storage)?;
     let threshold_status = threshold_status_from(deps, usd_raised)?;
     query_analytics_core(deps, threshold_status, usd_raised, bluechip_raised)
@@ -208,7 +208,7 @@ pub fn query_analytics(deps: Deps) -> StdResult<PoolAnalyticsResponse> {
 pub fn query_pool_committers(
     deps: Deps,
     pool_contract_address: Addr,
-    min_payment_usd: Option<Uint128>,
+    min_payment_native: Option<Uint128>,
     after_timestamp: Option<u64>,
     start_after: Option<String>,
     limit: Option<u32>,
@@ -232,8 +232,8 @@ pub fn query_pool_committers(
             if committing.pool_contract_address != pool_contract_address {
                 return None;
             }
-            if let Some(min_usd) = min_payment_usd {
-                if committing.last_payment_usd < min_usd {
+            if let Some(min_usd) = min_payment_native {
+                if committing.last_payment_native < min_usd {
                     return None;
                 }
             }
@@ -245,9 +245,9 @@ pub fn query_pool_committers(
             Some(Ok(CommitterInfo {
                 wallet: committer_addr.to_string(),
                 last_payment_bluechip: committing.last_payment_bluechip,
-                last_payment_usd: committing.last_payment_usd,
+                last_payment_native: committing.last_payment_native,
                 last_committed: committing.last_committed,
-                total_paid_usd: committing.total_paid_usd,
+                total_paid_native: committing.total_paid_native,
                 total_paid_bluechip: committing.total_paid_bluechip,
             }))
         })

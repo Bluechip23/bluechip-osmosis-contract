@@ -21,12 +21,10 @@ pub struct CreatePoolReplyMsg {
     pub threshold_payout: Option<Binary>,
     //fees to bluechip and creator
     pub commit_fee_info: CommitFeeInfo,
-    /// Commit threshold, USD-denominated (6 decimals).
-    pub commit_threshold_limit_usd: Uint128,
+    /// Commit threshold in native base units (6 decimals).
+    pub commit_threshold_limit_native: Uint128,
     /// TokenFactory subdenom for the creator token. The pool creates
     /// `factory/{pool_addr}/{subdenom}` and becomes its denom admin.
-    /// Replaces the old `token_address` (CW20 contract) and
-    /// `cw20_token_contract_id`.
     pub subdenom: String,
     /// Creator-chosen token display name / ticker / decimals, forwarded from
     /// `CreatorTokenInfo` so the pool can register bank denom `Metadata`
@@ -43,8 +41,9 @@ pub struct CreatePoolReplyMsg {
     pub token_decimals: u8,
     pub max_bluechip_lock_per_pool: Uint128,
     pub creator_excess_liquidity_lock_days: u64,
-    /// uosmo amount of the native GAMM pool-creation fee, forwarded
-    /// from the factory config's `gamm_pool_creation_fee.amount`. The pool
+    /// Amount of the factory config's `gamm_pool_creation_fee` coin
+    /// (denominated in that coin's denom — USDC on osmosis-1, NOT
+    /// necessarily uosmo), forwarded from the factory config. The pool
     /// pins it as `CREATION_FEE_RESERVE_TARGET` and funds the fee from the
     /// protocol's retained 1% commit fee rather than the seed or the creator.
     /// Must stay wire-compatible with the pool's `PoolInstantiateMsg`.

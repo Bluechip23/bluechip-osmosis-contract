@@ -11,7 +11,7 @@ interface CommitTrackerProps {
 
 interface CommitData {
     last_committed: string;
-    total_paid_usd: string;
+    total_paid_native: string;
     total_paid_bluechip: string;
 }
 
@@ -28,9 +28,10 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
     const [totalBluechips, setTotalBluechips] = useState(0);
     const [graphData, setGraphData] = useState<GraphDataPoint[]>([]);
     const [loading, setLoading] = useState(false);
-    // USD threshold, read live from the pool (factory-configured;
-    // $25,000 is the default). Falls back to the default until loaded.
-    const [threshold, setThreshold] = useState(25000);
+    // OSMO-denominated threshold, read live from the pool
+    // (factory-configured; 500,000 OSMO is the launch default). Falls
+    // back to the default until loaded.
+    const [threshold, setThreshold] = useState(500000);
 
     useEffect(() => {
         if (client && contractAddress) {
@@ -43,7 +44,7 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
 
         setLoading(true);
         try {
-            // The commit target is USD-denominated (6 decimals) and set by
+            // The commit target is OSMO-denominated (6 decimals) and set by
             // factory config — read it from the pool rather than hardcoding.
             try {
                 const status = await client.queryContractSmart(contractAddress, {
@@ -74,8 +75,8 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
                 let cumulative = 0;
                 let bluechipTotal = 0;
                 const data = sortedCommits.map((commit) => {
-                    const value = parseInt(commit.total_paid_usd) / 1_000_000;
-                    const bluechipValue = parseInt(commit.total_paid_bluechip) / 1_000_000;
+                    const value = parseInt(commit.total_paid_native);
+                    const bluechipValue = parseInt(commit.total_paid_bluechip);
                     cumulative += value;
                     bluechipTotal += bluechipValue;
 
@@ -111,8 +112,8 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
 
                 <Box sx={{ mb: 3 }}>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-                        <Typography variant="body2">Raised: ${displayTotal.toLocaleString()}</Typography>
-                        <Typography variant="body2">Goal: ${threshold.toLocaleString()}</Typography>
+                        <Typography variant="body2">Raised: {displayTotal.toLocaleString()} OSMO</Typography>
+                        <Typography variant="body2">Goal: {threshold.toLocaleString()} OSMO</Typography>
                     </Box>
                     <LinearProgress variant="determinate" value={progress} sx={{ height: 10, borderRadius: 5 }} />
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 0.5 }}>
@@ -135,7 +136,7 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
                             <Tooltip
                                 contentStyle={{ backgroundColor: '#333', border: 'none', color: '#fff' }}
                                 labelStyle={{ color: '#aaa' }}
-                                formatter={(value, name) => [`$${value}`, name === 'total' ? 'Cumulative Total' : 'Transaction Value']}
+                                formatter={(value, name) => [`${value} OSMO`, name === 'total' ? 'Cumulative Total' : 'Transaction Value']}
                             />
                             <ReferenceLine y={threshold} label="Goal" stroke="red" strokeDasharray="3 3" />
                             <Line type="monotone" dataKey="total" stroke="#8884d8" strokeWidth={2} dot={false} activeDot={{ r: 8 }} />

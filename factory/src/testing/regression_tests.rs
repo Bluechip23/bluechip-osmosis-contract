@@ -45,7 +45,7 @@ fn default_factory_config() -> FactoryInstantiate {
     FactoryInstantiate {
         cw721_nft_contract_id: 58,
         factory_admin_address: admin_addr(),
-        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        commit_threshold_limit_native: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: make_addr("ubluechip"),
@@ -55,7 +55,7 @@ fn default_factory_config() -> FactoryInstantiate {
         creator_excess_liquidity_lock_days: 14,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -63,10 +63,6 @@ fn default_factory_config() -> FactoryInstantiate {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     }
 }
 
@@ -350,11 +346,6 @@ fn test_config_update_before_timelock_fails() {
         .block
         .time
         .plus_seconds(crate::state::ADMIN_TIMELOCK_SECONDS + 1);
-    // Refresh the mock Pyth feed relative to the advanced apply-time block
-    // so the apply re-probe isn't stale (this test exercises the timelock,
-    // not oracle staleness).
-    deps.querier
-        .set_pyth_publish_time(env.block.time.seconds() - 30);
     let res = execute(deps.as_mut(), env, admin_info, update_msg).unwrap();
     assert!(res
         .attributes
@@ -459,8 +450,8 @@ fn test_update_pool_config_nonexistent_pool() {
 }
 
 /// — propose-time bounds check for the
-/// `min_commit_usd_pre_threshold` /
-/// `min_commit_usd_post_threshold` knobs.
+/// `min_commit_native_pre_threshold` /
+/// `min_commit_native_post_threshold` knobs.
 #[test]
 fn test_propose_pool_config_commit_floor_bounds() {
     let mut deps = mock_deps_with_querier(&[]);
@@ -473,7 +464,7 @@ fn test_propose_pool_config_commit_floor_bounds() {
 
     // Zero floor is rejected.
     let zero = PoolConfigUpdate {
-        min_commit_usd_pre_threshold: Some(Uint128::zero()),
+        min_commit_native_pre_threshold: Some(Uint128::zero()),
         ..Default::default()
     };
     let err = execute(
@@ -494,8 +485,8 @@ fn test_propose_pool_config_commit_floor_bounds() {
 
     // Above-cap floor is rejected.
     let too_high = PoolConfigUpdate {
-        min_commit_usd_post_threshold: Some(
-            crate::pool_struct::POOL_CONFIG_MAX_MIN_COMMIT_USD + Uint128::new(1),
+        min_commit_native_post_threshold: Some(
+            crate::pool_struct::POOL_CONFIG_MAX_MIN_COMMIT_NATIVE + Uint128::new(1),
         ),
         ..Default::default()
     };
@@ -517,8 +508,8 @@ fn test_propose_pool_config_commit_floor_bounds() {
 
     // Same valid floor against the commit pool is accepted.
     let ok = PoolConfigUpdate {
-        min_commit_usd_pre_threshold: Some(Uint128::new(10_000_000)),
-        min_commit_usd_post_threshold: Some(Uint128::new(2_000_000)),
+        min_commit_native_pre_threshold: Some(Uint128::new(10_000_000)),
+        min_commit_native_post_threshold: Some(Uint128::new(2_000_000)),
         ..Default::default()
     };
     execute(
@@ -747,7 +738,7 @@ fn test_propose_config_update_rejects_fee_sum_above_one() {
 }
 
 // ---------------------------------------------------------------------------
-// `commit_threshold_limit_usd == 0` is also rejected. A zero threshold
+// `commit_threshold_limit_native == 0` is also rejected. A zero threshold
 // makes commit pools created against this config permanently uncrossable,
 // locking them in pre-threshold state forever.
 // ---------------------------------------------------------------------------
@@ -757,7 +748,7 @@ fn test_propose_config_update_rejects_zero_threshold() {
     setup_factory(&mut deps);
 
     let mut bad = default_factory_config();
-    bad.commit_threshold_limit_usd = Uint128::zero();
+    bad.commit_threshold_limit_native = Uint128::zero();
 
     let info = message_info(&admin_addr(), &[]);
     let res = execute(
@@ -768,7 +759,7 @@ fn test_propose_config_update_rejects_zero_threshold() {
     );
     let err = res.expect_err("zero threshold must be rejected at propose time");
     assert!(
-        err.to_string().contains("commit_threshold_limit_usd"),
+        err.to_string().contains("commit_threshold_limit_native"),
         "got: {}",
         err
     );

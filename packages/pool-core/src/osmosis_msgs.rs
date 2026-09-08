@@ -8,8 +8,8 @@
 //!   contract is the denom admin, so it can mint at threshold-crossing and
 //!   distribution.
 //! - **GAMM** — at threshold-crossing the pool seeds a native balancer
-//!   pool. Equal weights give the constant-product (`x*y=k`) curve the
-//!   retired internal AMM used, so behavior is preserved.
+//!   pool. Equal weights give the standard constant-product (`x*y=k`)
+//!   curve.
 //! - **poolmanager** — post-threshold commits route their swap leg through
 //!   the native pool via `MsgSwapExactAmountIn`.
 //!
@@ -30,8 +30,7 @@ use osmosis_std::types::osmosis::tokenfactory::v1beta1::{
 use std::str::FromStr;
 
 /// Balancer pool-asset weight used for BOTH sides. Any pair of *equal*
-/// weights produces the 50/50 constant-product curve — identical behavior
-/// to the retired internal `x*y=k` AMM. The absolute value is irrelevant
+/// weights produces the 50/50 constant-product curve. The absolute value is irrelevant
 /// as long as both sides match; `1` is the minimal valid weight the gamm
 /// module accepts.
 const BALANCER_EQUAL_WEIGHT: &str = "1";

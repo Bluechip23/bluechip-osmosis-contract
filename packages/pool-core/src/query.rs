@@ -1,8 +1,7 @@
 //! Shared query handlers.
 //!
-//! Phase-2: the internal AMM is gone. Reserves, positions, price
-//! accumulators and internal fee accounting no longer exist locally.
-//! Queries that used to read that state now either:
+//! Reserves, positions, and fee accounting live on the native Osmosis
+//! pool, not locally, so queries either:
 //!  - route to the native Osmosis pool (e.g. `Simulation` via the
 //!    poolmanager `estimate_swap_exact_amount_in` query), or
 //!  - return zero/default for a retained wire field, documented inline.
@@ -46,11 +45,17 @@ fn denom_of(t: &crate::asset::TokenType) -> String {
 }
 
 /// Simulate a swap against the NATIVE Osmosis pool via the poolmanager
-/// `estimate_swap_exact_amount_in` query. `spread_amount` /
-/// `commission_amount` are not returned by that estimate, so they are
-/// reported as zero — callers wanting the full breakdown must inspect the
-/// native pool directly. Errors (pre-threshold pool with no `POOL_ID`, or
-/// an estimate query failure) propagate.
+/// `estimate_swap_exact_amount_in` query. `spread_amount` is derived by
+/// comparing the estimate against the pool's SPOT price (`ideal = offer ×
+/// spot`, `spread = ideal − estimate` when positive) so consumers — the
+/// router's `price_impact`, frontend warnings — see real depth slippage
+/// instead of a hardcoded zero. The spot read is FAIL-SOFT: if the
+/// spot-price query is unavailable (older chain, test mocks), spread
+/// falls back to zero and `return_amount` — the only field
+/// `minimum_receive` sizing depends on — is untouched. `commission_amount`
+/// remains zero (the estimate already nets out the pool fee; it is not
+/// separable here). Errors on the ESTIMATE itself (pre-threshold pool
+/// with no `POOL_ID`, or an estimate query failure) propagate.
 pub fn query_simulation(deps: Deps, offer_asset: TokenInfo) -> StdResult<SimulationResponse> {
     let pool_info = POOL_INFO.load(deps.storage)?;
     let infos = &pool_info.pool_info.asset_infos;
@@ -77,22 +82,41 @@ pub fn query_simulation(deps: Deps, offer_asset: TokenInfo) -> StdResult<Simulat
         token_in,
         vec![SwapAmountInRoute {
             pool_id,
-            token_out_denom: ask_denom,
+            token_out_denom: ask_denom.clone(),
         }],
     )?;
     let return_amount = Uint128::from_str(&resp.token_out_amount)
         .map_err(|e| StdError::generic_err(format!("invalid estimate token_out_amount: {}", e)))?;
 
+    // Fail-soft spread: ideal output at the spot price minus the actual
+    // estimate. Every step is Option-chained; any failure (query
+    // unavailable, unparseable price, overflow) degrades to zero spread
+    // rather than failing the whole simulation.
+    let spread_amount = (|| -> Option<Uint128> {
+        let spot = querier
+            .spot_price(pool_id, offer_denom.clone(), ask_denom.clone())
+            .ok()?;
+        let price: cosmwasm_std::Decimal = spot.spot_price.trim().parse().ok()?;
+        // floor(offer × price) in 256-bit space; floor slightly
+        // understates ideal (and thus spread) — conservative for a
+        // warning metric.
+        let num = price.atomics().full_mul(offer_asset.amount);
+        let ideal =
+            Uint128::try_from(num / cosmwasm_std::Uint256::from(10u128.pow(18))).ok()?;
+        Some(ideal.saturating_sub(return_amount))
+    })()
+    .unwrap_or_default();
+
     Ok(SimulationResponse {
         return_amount,
-        spread_amount: Uint128::zero(),
+        spread_amount,
         commission_amount: Uint128::zero(),
     })
 }
 
 pub fn query_config(deps: Deps) -> StdResult<ConfigResponse> {
-    // `block_time_last` was part of the retired internal price accumulator;
-    // reported as zero now.
+    // `block_time_last` is kept for response-shape stability only;
+    // always reported as zero.
     let _ = deps;
     Ok(ConfigResponse {
         block_time_last: 0,
@@ -141,8 +165,8 @@ fn native_reserves(deps: Deps) -> (Uint128, Uint128) {
 pub fn query_pool_state(deps: Deps) -> StdResult<PoolStateResponse> {
     let (reserve0, reserve1) = native_reserves(deps);
     Ok(PoolStateResponse {
-        // `nft_ownership_accepted` is retained for wire compatibility; the
-        // position-NFT integration was removed in Phase-2.
+        // `nft_ownership_accepted` is retained for wire compatibility
+        // only; always false.
         nft_ownership_accepted: false,
         reserve0,
         reserve1,

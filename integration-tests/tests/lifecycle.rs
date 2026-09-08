@@ -86,21 +86,16 @@ fn read_wasm(name: &str) -> Vec<u8> {
     })
 }
 
-/// Mock Pyth OSMO/USD feed id.
-const OSMO_USD_FEED: &str = "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6";
-
 fn factory_config(
     admin: &str,
     pricing_pool_id: u64,
     pool_code_id: u64,
-    pyth_addr: &str,
 ) -> FactoryInstantiate {
     factory_config_with_gamm_fee(
         admin,
         pricing_pool_id,
         pool_code_id,
         Coin::new(GAMM_CREATE_FEE, UOSMO),
-        pyth_addr,
     )
 }
 
@@ -109,11 +104,10 @@ fn factory_config_with_gamm_fee(
     pricing_pool_id: u64,
     pool_code_id: u64,
     gamm_pool_creation_fee: Coin,
-    pyth_addr: &str,
 ) -> FactoryInstantiate {
     FactoryInstantiate {
         factory_admin_address: cosmwasm_std::Addr::unchecked(admin),
-        commit_threshold_limit_usd: Uint128::new(THRESHOLD_USD),
+        commit_threshold_limit_native: Uint128::new(THRESHOLD_USD),
         // Phase-2 doesn't instantiate a CW20 or NFT; these code-id fields are
         // unused by `Create`, so any valid code id satisfies the config.
         cw20_token_contract_id: pool_code_id,
@@ -126,67 +120,16 @@ fn factory_config_with_gamm_fee(
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: UOSMO.to_string(),
         pricing_pool_id,
-        usd_quote_denom: UUSDC.to_string(),
+        fee_quote_denom: UUSDC.to_string(),
         // Flat create fee disabled → `Create` attaches no funds.
         pool_creation_fee: Uint128::zero(),
         gamm_pool_creation_fee,
         threshold_payout_amounts: ThresholdPayoutAmounts::default(),
         emergency_withdraw_delay_seconds: 86_400,
-        // USD pricing via (mock) Pyth OSMO/USD; the pricing pool is only the
-        // fee-swap route now.
-        pyth_contract_addr: pyth_addr.to_string(),
-        pyth_native_usd_feed_id: OSMO_USD_FEED.to_string(),
-        max_pyth_staleness_seconds: 600,
-        pyth_conf_threshold_bps: 200,
     }
 }
 
-/// Store + instantiate the mock Pyth oracle and push a fresh $1.00 OSMO/USD
-/// price (aged 15s past the MIN_PYTH_AGE floor). Returns the mock address.
-fn deploy_mock_pyth(app: &OsmosisTestApp, wasm: &Wasm<OsmosisTestApp>, admin: &SigningAccount) -> String {
-    let code_id = wasm
-        .store_code(&read_wasm("mock_pyth.wasm"), None, admin)
-        .unwrap()
-        .data
-        .code_id;
-    let addr = wasm
-        .instantiate(
-            code_id,
-            &mock_pyth::InstantiateMsg {},
-            Some(&admin.address()),
-            Some("mock-pyth"),
-            &[],
-            admin,
-        )
-        .unwrap()
-        .data
-        .address;
-    refresh_pyth(app, wasm, &addr, admin, 1_000_000);
-    addr
-}
 
-/// Push a fresh $usd_micro OSMO/USD price and age it 15s.
-fn refresh_pyth(
-    app: &OsmosisTestApp,
-    wasm: &Wasm<OsmosisTestApp>,
-    pyth_addr: &str,
-    admin: &SigningAccount,
-    usd_micro: i64,
-) {
-    wasm.execute(
-        pyth_addr,
-        &mock_pyth::ExecuteMsg::SetPrice {
-            price_id: OSMO_USD_FEED.to_string(),
-            price: usd_micro,
-            expo: -6,
-            conf: 0,
-        },
-        &[],
-        admin,
-    )
-    .unwrap();
-    app.increase_time(15);
-}
 
 // ---------------------------------------------------------------------------
 // A minimal smoke test: the factory instantiates against a live TWAP route.
@@ -218,8 +161,8 @@ fn instantiate_factory_against_live_twap() {
         .data
         .pool_id;
 
-    // Let the arithmetic TWAP accumulate past the 300s window.
-    app.increase_time(400);
+    // Let the arithmetic TWAP accumulate past the 600s probe window.
+    app.increase_time(700);
 
     let wasm = Wasm::new(&app);
     let factory_code_id = wasm
@@ -233,12 +176,17 @@ fn instantiate_factory_against_live_twap() {
         .data
         .code_id;
 
-    // The instantiate live-probes the pricing route; a bad config panics here.
-    let pyth = deploy_mock_pyth(&app, &wasm, &admin);
     let factory_addr = wasm
         .instantiate(
             factory_code_id,
-            &factory_config(&admin.address(), pricing_pool_id, pool_code_id, &pyth),
+            // Non-native gamm fee so the instantiate-time fee-route TWAP probe
+            // actually fires against the live pricing pool.
+            &factory_config_with_gamm_fee(
+                &admin.address(),
+                pricing_pool_id,
+                pool_code_id,
+                Coin::new(20_000_000u128, UUSDC),
+            ),
             Some(&admin.address()),
             Some("factory"),
             &[],
@@ -289,7 +237,7 @@ fn full_lifecycle_create_commit_cross_swap() {
         .unwrap()
         .data
         .pool_id;
-    app.increase_time(400);
+    app.increase_time(700);
 
     let wasm = Wasm::new(&app);
     let factory_code_id = wasm
@@ -303,11 +251,10 @@ fn full_lifecycle_create_commit_cross_swap() {
         .data
         .code_id;
 
-    let pyth = deploy_mock_pyth(&app, &wasm, &admin);
     let factory_addr = wasm
         .instantiate(
             factory_code_id,
-            &factory_config(&admin.address(), pricing_pool_id, pool_code_id, &pyth),
+            &factory_config(&admin.address(), pricing_pool_id, pool_code_id),
             Some(&admin.address()),
             Some("factory"),
             &[],
@@ -580,7 +527,7 @@ fn third_party_lp_join_and_exit_native_pool() {
         .unwrap()
         .data
         .pool_id;
-    app.increase_time(400);
+    app.increase_time(700);
 
     let wasm = Wasm::new(&app);
     let factory_code_id = wasm
@@ -593,11 +540,10 @@ fn third_party_lp_join_and_exit_native_pool() {
         .unwrap()
         .data
         .code_id;
-    let pyth = deploy_mock_pyth(&app, &wasm, &admin);
     let factory_addr = wasm
         .instantiate(
             factory_code_id,
-            &factory_config(&admin.address(), pricing_pool_id, pool_code_id, &pyth),
+            &factory_config(&admin.address(), pricing_pool_id, pool_code_id),
             Some(&admin.address()),
             Some("factory"),
             &[],
@@ -845,7 +791,7 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
         .unwrap()
         .data
         .pool_id;
-    app.increase_time(400);
+    app.increase_time(700);
 
     // --- Rewrite poolmanager params: fee = 20 USDC (the mainnet shape). ---
     // Read-modify-write so the taker-fee config and authorized quote denoms
@@ -884,7 +830,6 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
     // Factory config mirrors the chain: gamm fee = 20 uusdc (the USD quote
     // denom), so validate_factory_config accepts it and the CommitContext
     // response carries it to the pool.
-    let pyth = deploy_mock_pyth(&app, &wasm, &admin);
     let factory_addr = wasm
         .instantiate(
             factory_code_id,
@@ -893,7 +838,6 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
                 pricing_pool_id,
                 pool_code_id,
                 Coin::new(usdc_fee, UUSDC),
-                &pyth,
             ),
             Some(&admin.address()),
             Some("factory"),
@@ -993,12 +937,208 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
 }
 
 // ---------------------------------------------------------------------------
+// TWAP ORIENTATION: the 1:1 pricing pools every other test uses are
+// structurally blind to an inverted price (1 is its own inverse). This
+// test prices through a 25:1 uosmo/uusdc pool — the mainnet shape, where
+// 1 USDC ≈ 25 OSMO — and asserts the crossing's exact-out fee swap spends
+// ~25x the fee in native units. An inverted TWAP (uosmo priced in uusdc,
+// ≈ 0.04) would budget ~1 OSMO for a ~510-OSMO swap: token_in_max blows,
+// the swap reverts, and the assertions below fail loudly. Also pins the
+// reserve clamp end-to-end: spend must stay ≤ min(budget×1.2, reserved).
+// ---------------------------------------------------------------------------
+#[test]
+fn fee_twap_orientation_25x_pool_spends_native_not_inverse() {
+    use osmosis_test_tube::cosmrs::Any;
+    use osmosis_test_tube::osmosis_std::types::osmosis::poolmanager::v1beta1::Params as PmParams;
+    use prost::Message;
+
+    let app = OsmosisTestApp::new();
+
+    let admin = app
+        .init_account(&[
+            Coin::new(1_000_000_000_000u128, UOSMO),
+            Coin::new(1_000_000_000_000u128, UUSDC),
+        ])
+        .unwrap();
+    let creator = app
+        .init_account(&[Coin::new(1_000_000_000_000u128, UOSMO)])
+        .unwrap();
+    let committer = app
+        .init_account(&[Coin::new(1_000_000_000_000u128, UOSMO)])
+        .unwrap();
+
+    // 25,000 OSMO : 1,000 USDC ⇒ TWAP(uusdc in uosmo) = 25.
+    let gamm = Gamm::new(&app);
+    let pricing_pool_id = gamm
+        .create_basic_pool(
+            &[
+                Coin::new(25_000_000_000u128, UOSMO),
+                Coin::new(1_000_000_000u128, UUSDC),
+            ],
+            &admin,
+        )
+        .unwrap()
+        .data
+        .pool_id;
+    app.increase_time(700);
+
+    // Live chain fee: 20 USDC, the mainnet shape.
+    let usdc_fee = 20_000_000u128;
+    let mut pm_params: PmParams = app
+        .get_param_set("poolmanager", PmParams::TYPE_URL)
+        .expect("read poolmanager params");
+    pm_params.pool_creation_fee = vec![
+        osmosis_test_tube::osmosis_std::types::cosmos::base::v1beta1::Coin {
+            denom: UUSDC.to_string(),
+            amount: usdc_fee.to_string(),
+        },
+    ];
+    app.set_param_set(
+        "poolmanager",
+        Any {
+            type_url: PmParams::TYPE_URL.to_string(),
+            value: pm_params.encode_to_vec(),
+        },
+    )
+    .expect("set poolmanager params");
+
+    let wasm = Wasm::new(&app);
+    let factory_code_id = wasm
+        .store_code(&read_wasm("factory.wasm"), None, &admin)
+        .unwrap()
+        .data
+        .code_id;
+    let pool_code_id = wasm
+        .store_code(&read_wasm("pool.wasm"), None, &admin)
+        .unwrap()
+        .data
+        .code_id;
+
+    // Budget = 20e6 uusdc × 25 = 500 OSMO; ×1.2 margin ⇒ ~600 OSMO of
+    // reserve needed. The reserve fills from the 1% commit retention, so
+    // the threshold must be ≥ 60,000 OSMO for the clamp not to bind on an
+    // honest price — use 100,000 OSMO (1% ⇒ 1,000 OSMO retained).
+    let mut cfg = factory_config_with_gamm_fee(
+        &admin.address(),
+        pricing_pool_id,
+        pool_code_id,
+        Coin::new(usdc_fee, UUSDC),
+    );
+    cfg.commit_threshold_limit_native = Uint128::new(100_000_000_000);
+    let factory_addr = wasm
+        .instantiate(
+            factory_code_id,
+            &cfg,
+            Some(&admin.address()),
+            Some("factory"),
+            &[],
+            &admin,
+        )
+        .unwrap()
+        .data
+        .address;
+
+    wasm.execute(
+        &factory_addr,
+        &FactoryExecuteMsg::Create {
+            pool_msg: CreatePool {
+                pool_token_info: [
+                    TokenType::Native {
+                        denom: UOSMO.to_string(),
+                    },
+                    TokenType::CreatorToken {
+                        denom: "WILL_BE_CREATED_BY_FACTORY".to_string(),
+                    },
+                ],
+            },
+            token_info: CreatorTokenInfo {
+                name: "Orientation Probe".to_string(),
+                symbol: "ORIENT".to_string(),
+                decimal: 6,
+            },
+        },
+        &[],
+        &creator,
+    )
+    .unwrap();
+    let pools: PoolsResponse = wasm
+        .query(
+            &factory_addr,
+            &FactoryQueryMsg::Pools {
+                start_after: None,
+                limit: None,
+            },
+        )
+        .unwrap();
+    let pool_addr = pools
+        .pools
+        .first()
+        .expect("pool registered")
+        .pool_addr
+        .to_string();
+
+    // Snapshot the pricing pool's reserves, then cross in one commit.
+    let uosmo_before = tt::gamm_pool_asset(&gamm, pricing_pool_id, UOSMO);
+    let uusdc_before = tt::gamm_pool_asset(&gamm, pricing_pool_id, UUSDC);
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::Commit {
+            asset: TokenInfo {
+                info: TokenType::Native {
+                    denom: UOSMO.to_string(),
+                },
+                amount: Uint128::new(100_000_000_000),
+            },
+            transaction_deadline: None,
+            belief_price: None,
+            max_spread: None,
+        },
+        &[Coin::new(100_000_000_000u128, UOSMO)],
+        &committer,
+    )
+    .expect("crossing must budget ~500 OSMO (25x fee) and clear the fee swap");
+
+    let status: CommitStatus = wasm
+        .query(&pool_addr, &PoolQueryMsg::IsFullyCommited {})
+        .unwrap();
+    assert!(matches!(status, CommitStatus::FullyCommitted {}));
+
+    // The swap pulled EXACTLY the 20 USDC fee out of the pricing pool…
+    let uusdc_after = tt::gamm_pool_asset(&gamm, pricing_pool_id, UUSDC);
+    assert_eq!(
+        uusdc_before - uusdc_after,
+        Uint128::new(usdc_fee),
+        "exact-out must draw exactly the fee from the pricing pool"
+    );
+    // …and paid a ~25x native amount for it: ~510 OSMO at spot (500 flat
+    // + ~2% depth slippage), never more than the ~600-OSMO clamped
+    // maximum, and NOWHERE NEAR the ~1 OSMO an inverted price would pay.
+    let spent = tt::gamm_pool_asset(&gamm, pricing_pool_id, UOSMO) - uosmo_before;
+    assert!(
+        spent >= Uint128::new(450_000_000) && spent <= Uint128::new(601_000_000),
+        "fee swap spent {spent} uosmo; expected ~510 OSMO (25x orientation), \
+         within the reserve clamp"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // osmosis-test-tube runner helpers. The ONLY place that touches the
 // version-sensitive query surface — adjust here on a version bump.
 // ---------------------------------------------------------------------------
 mod tt {
     use super::*;
     use osmosis_test_tube::osmosis_std::types::cosmos::bank::v1beta1::QueryBalanceRequest;
+
+    /// Amount of `denom` held in gamm pool `pool_id`'s reserves.
+    pub fn gamm_pool_asset(gamm: &Gamm<OsmosisTestApp>, pool_id: u64, denom: &str) -> Uint128 {
+        let pool = gamm.query_pool(pool_id).expect("pricing pool exists");
+        pool.pool_assets
+            .iter()
+            .filter_map(|a| a.token.as_ref())
+            .find(|c| c.denom == denom)
+            .map(|c| Uint128::new(c.amount.parse::<u128>().unwrap_or(0)))
+            .unwrap_or_default()
+    }
 
     /// Native bank balance of `denom` held by `address`.
     pub fn balance(bank: &Bank<OsmosisTestApp>, address: &str, denom: &str) -> Uint128 {

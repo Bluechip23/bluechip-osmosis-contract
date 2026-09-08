@@ -17,11 +17,11 @@ use crate::state::{
     DistributionState, SwapForwardPayload, COMMITFEEINFO, COMMIT_INFO, COMMIT_LEDGER,
     COMMIT_LIMIT_INFO, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX,
     DISTRIBUTION_STATE, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_INFO, REENTRANCY_LOCK,
-    REPLY_ID_SWAP_FORWARD, THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    REPLY_ID_SWAP_FORWARD, THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
 };
 use crate::testing::fixtures::{
     mock_dependencies_with_balance, setup_pool_post_threshold, setup_pool_storage,
-    with_factory_oracle, CREATOR_DENOM,
+    with_factory_context, CREATOR_DENOM,
 };
 use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env, MockApi};
 use cosmwasm_std::{
@@ -90,7 +90,7 @@ fn test_commit_pre_threshold_basic() {
         amount: Uint128::new(1_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
+    with_factory_context(&mut deps); // $1 per token
 
     let env = mock_env();
     let commit_amount = Uint128::new(1_000_000_000); // 1k bluechip
@@ -123,14 +123,14 @@ fn test_commit_pre_threshold_basic() {
     let user_commit_usd = COMMIT_LEDGER.load(&deps.storage, &user_addr).unwrap();
     assert_eq!(user_commit_usd, Uint128::new(1_000_000_000)); // $1k with 6 decimals
 
-    let total_usd = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
+    let total_usd = GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap();
     assert_eq!(total_usd, Uint128::new(1_000_000_000));
 
     assert!(!IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
 
     let committing = COMMIT_INFO.load(&deps.storage, &user_addr).unwrap();
     assert_eq!(committing.total_paid_bluechip, commit_amount);
-    assert_eq!(committing.total_paid_usd, Uint128::new(1_000_000_000));
+    assert_eq!(committing.total_paid_native, Uint128::new(1_000_000_000));
 }
 
 #[test]
@@ -150,12 +150,12 @@ fn test_race_condition_commits_crossing_threshold() {
     }]);
 
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
+    with_factory_context(&mut deps); // $1 per token
     THRESHOLD_PROCESSING
         .save(&mut deps.storage, &false)
         .unwrap();
 
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_900_000_000))
         .unwrap();
 
@@ -232,13 +232,13 @@ fn test_commit_crosses_threshold() {
     }]);
 
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
+    with_factory_context(&mut deps); // $1 per token
 
     THRESHOLD_PROCESSING
         .save(&mut deps.storage, &false)
         .unwrap();
 
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_900_000_000))
         .unwrap(); // $24.9k
 
@@ -298,7 +298,7 @@ fn test_commit_crosses_threshold() {
 fn test_commit_post_threshold_swap() {
     // Estimate-answering querier so the post-threshold commit's swap leg
     // derives a non-zero slippage floor (CARRY-OVER 2). `set_factory_oracle`
-    // replaces `with_factory_oracle` for the PoolMockQuerier.
+    // replaces `with_factory_context` for the PoolMockQuerier.
     use crate::mock_querier::mock_deps_estimate;
     let mut deps = mock_deps_estimate(&[Coin {
         denom: "ubluechip".to_string(),
@@ -306,7 +306,7 @@ fn test_commit_post_threshold_swap() {
     }]);
     setup_pool_post_threshold(&mut deps);
     deps.querier
-        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury"); // $1 per token
+        .set_factory_context("bluechip_treasury"); // $1 per token
 
     let env = mock_env();
     let commit_amount = Uint128::new(100_000_000); // 100 bluechip
@@ -381,8 +381,8 @@ fn test_threshold_payout_integrity_check() {
         &fee_info,
         &fee_info.bluechip_wallet_address,
         Decimal::permille(3),
-        // Legacy fee context ($1/native rate, no live fee coin).
-        Uint128::new(1_000_000),
+        // Legacy fee context: no live fee coin, no swap budget.
+        None,
         None,
         0,
         "",
@@ -417,7 +417,7 @@ fn test_continue_distribution_is_permissionless() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000_000),
-        total_committed_usd: Uint128::new(300),
+        total_committed_native: Uint128::new(300),
         last_processed_key: None,
         distributions_remaining: 3,
         max_gas_per_tx: DEFAULT_MAX_GAS_PER_TX,
@@ -462,7 +462,7 @@ fn test_continue_distribution_processes_batch() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000_000),
-        total_committed_usd: Uint128::new(1_000_000_000),
+        total_committed_native: Uint128::new(1_000_000_000),
         last_processed_key: None,
         distributions_remaining: 5,
         max_gas_per_tx: DEFAULT_MAX_GAS_PER_TX,
@@ -515,7 +515,7 @@ fn test_continue_distribution_batches() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000),
-        total_committed_usd: Uint128::new(1_000_000),
+        total_committed_native: Uint128::new(1_000_000),
         last_processed_key: None,
         distributions_remaining: 10,
         max_gas_per_tx: 200,
@@ -616,7 +616,7 @@ fn test_adaptive_batch_sizing_with_history() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000),
-        total_committed_usd: Uint128::new(1_000_000),
+        total_committed_native: Uint128::new(1_000_000),
         last_processed_key: None,
         distributions_remaining: 20,
         max_gas_per_tx: 1000,
@@ -652,7 +652,7 @@ fn test_adaptive_batch_sizing_with_history() {
     let actually_processed = total_before - total_after;
 
     // Mints + 1 dust-settlement mint to the creator (the factory bounty
-    // message is gone). The test inputs have `total_committed_usd =
+    // message is gone). The test inputs have `total_committed_native =
     // 1_000_000` but the ledger sums to 2_000, so per-user
     // floor(100 * 1_000_000 / 1_000_000) = 100; 20 * 100 = 2_000 vs
     // total_to_distribute = 1_000_000, leaving a 998_000-base-unit
@@ -676,7 +676,7 @@ fn test_calculate_effective_batch_size() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000),
-        total_committed_usd: Uint128::new(1_000_000),
+        total_committed_native: Uint128::new(1_000_000),
         last_processed_key: None,
         distributions_remaining: 20,
         max_gas_per_tx: 1000,
@@ -698,7 +698,7 @@ fn test_calculate_effective_batch_size() {
     let dist_state_no_history = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000),
-        total_committed_usd: Uint128::new(1_000_000),
+        total_committed_native: Uint128::new(1_000_000),
         last_processed_key: None,
         distributions_remaining: 20,
         max_gas_per_tx: 1000,
@@ -736,7 +736,7 @@ fn test_batch_size_with_consecutive_failures() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000),
-        total_committed_usd: Uint128::new(1_000_000),
+        total_committed_native: Uint128::new(1_000_000),
         last_processed_key: None,
         distributions_remaining: 10,
         max_gas_per_tx: 1000,
@@ -788,7 +788,7 @@ fn test_final_batch_completes_distribution() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000),
-        total_committed_usd: Uint128::new(300),
+        total_committed_native: Uint128::new(300),
         last_processed_key: None,
         distributions_remaining: 3,
         max_gas_per_tx: 1000,
@@ -874,7 +874,7 @@ fn test_commit_rate_limiting() {
         amount: Uint128::new(1_000_000_000), // Give contract 1000 tokens
     }]);
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
+    with_factory_context(&mut deps); // $1 per token
 
     let mut env = mock_env();
     let user = Addr::unchecked("user");
@@ -1041,9 +1041,9 @@ fn test_swap_with_max_spread() {
 
 #[test]
 fn test_swap_sell_creator_token_native() {
-    // Post-migration the creator token is a native TokenFactory denom, so
+    // The creator token is a native TokenFactory denom, so
     // selling it is a plain `SimpleSwap` with the creator denom ATTACHED as
-    // funds (the old CW20 `Receive`/hook path is gone). The swap emits the
+    // funds. The swap emits the
     // native-pool SubMsg; the bluechip payout to the trader is produced when
     // the swap-forward reply is driven.
     use crate::mock_querier::mock_deps_estimate;
@@ -1187,7 +1187,7 @@ fn test_factory_impersonation_prevented() {
         },
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
-        commit_threshold_limit_usd: Uint128::new(350_000_000_000),
+        commit_threshold_limit_native: Uint128::new(350_000_000_000),
         subdenom: "ucreator".to_string(),
         token_name: "Creator Token".to_string(),
         token_symbol: "UCREATOR".to_string(),
@@ -1210,7 +1210,7 @@ fn test_usd_tracking_consistency_across_commits() {
         amount: Uint128::new(100_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per token
+    with_factory_context(&mut deps); // $1 per token
 
     let env = mock_env();
 
@@ -1252,7 +1252,7 @@ fn test_usd_tracking_consistency_across_commits() {
         let commit_value = Uint128::new(amount);
         expected_total += commit_value;
 
-        let current_total = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
+        let current_total = GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap();
         assert_eq!(
             current_total, expected_total,
             "raised-total tracking inconsistent after {} commit",
@@ -1262,7 +1262,7 @@ fn test_usd_tracking_consistency_across_commits() {
             .load(&deps.storage, &Addr::unchecked(user))
             .unwrap();
         assert_eq!(
-            user_commit.total_paid_usd, commit_value,
+            user_commit.total_paid_native, commit_value,
             "User {} commit-value tracking incorrect",
             user
         );
@@ -1702,7 +1702,7 @@ fn test_post_threshold_commit_estimate_floor_nonzero_token_out_min() {
     }]);
     setup_pool_post_threshold(&mut deps);
     deps.querier
-        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+        .set_factory_context("bluechip_treasury");
 
     let env = mock_env();
     let commit_amount = Uint128::new(100_000_000); // $100 gross
@@ -1747,7 +1747,7 @@ fn test_post_threshold_commit_requires_belief_price() {
     }]);
     setup_pool_post_threshold(&mut deps);
     deps.querier
-        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+        .set_factory_context("bluechip_treasury");
 
     let env = mock_env();
     let commit_amount = Uint128::new(100_000_000);
@@ -1796,7 +1796,7 @@ fn test_post_threshold_commit_forwards_full_bluechip_fee() {
     }]);
     setup_pool_post_threshold(&mut deps); // IS_THRESHOLD_HIT = true
     deps.querier
-        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+        .set_factory_context("bluechip_treasury");
 
     // Simulate post-crossing state where the configured target (100 OSMO)
     // still sits ABOVE what was actually retained (10 OSMO) — i.e. room > 0.
@@ -1865,7 +1865,7 @@ fn test_committer_count_exact_across_repeat_committers() {
         amount: Uint128::new(100_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1/token
+    with_factory_context(&mut deps); // $1/token
 
     assert_eq!(COMMITTER_COUNT.load(&deps.storage).unwrap(), 0);
 
@@ -1992,7 +1992,7 @@ fn test_bluechip_fee_reserve_split_and_spillover() {
         amount: Uint128::new(1_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1/token
+    with_factory_context(&mut deps); // $1/token
 
     crate::state::CREATION_FEE_RESERVE_TARGET
         .save(&mut deps.storage, &Uint128::new(30_000))
@@ -2063,7 +2063,7 @@ fn test_bluechip_fee_fully_retained_below_target() {
         amount: Uint128::new(1_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
 
     crate::state::CREATION_FEE_RESERVE_TARGET
         .save(&mut deps.storage, &Uint128::new(1_000_000))
@@ -2151,9 +2151,8 @@ fn test_crossing_seed_math_normal_and_shortfall() {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
-            // Legacy fee context: no live fee coin — exercises the
-            // CREATION_FEE_RESERVE_TARGET fallback these reserve cases pin.
-            Uint128::new(1_000_000),
+            // Legacy fee context: no live fee coin, no swap budget.
+            None,
             None,
             0,
             "",

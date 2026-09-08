@@ -1,9 +1,9 @@
 //! Pre-threshold commit handler.
 //!
 //! Runs while the pool is still accumulating USD towards its
-//! `commit_amount_for_threshold_usd` target. Each call appends to
+//! `commit_amount_for_threshold_native` target. Each call appends to
 //! `COMMIT_LEDGER` for the sender and bumps the cumulative
-//! `USD_RAISED_FROM_COMMIT` / `NATIVE_RAISED_FROM_COMMIT` totals.
+//! `GROSS_NATIVE_COMMITTED` / `NATIVE_RAISED_FROM_COMMIT` totals.
 //! Threshold-crossing commits are routed elsewhere — see
 //! `super::threshold_crossing` and `super::execute_commit_logic`.
 
@@ -12,7 +12,7 @@ use cosmwasm_std::{Addr, CosmosMsg, DepsMut, Env, Response, Uint128};
 use crate::asset::TokenInfo;
 use crate::error::ContractError;
 use crate::generic_helpers::update_commit_info;
-use crate::state::{PoolAnalytics, NATIVE_RAISED_FROM_COMMIT, USD_RAISED_FROM_COMMIT};
+use crate::state::{PoolAnalytics, NATIVE_RAISED_FROM_COMMIT, GROSS_NATIVE_COMMITTED};
 
 use super::commit_base_attributes;
 
@@ -34,7 +34,7 @@ pub(super) fn process_pre_threshold_commit(
     // has()-before-update check so repeat committers never double-count.
     super::record_committer(deps.storage, &sender, commit_value)?;
     // `new_usd_total` is the dispatcher's already-computed
-    // `USD_RAISED_FROM_COMMIT + commit_value` (overflow-checked there,
+    // `GROSS_NATIVE_COMMITTED + commit_value` (overflow-checked there,
     // and the routing into this handler depends on it), so save it
     // directly instead of re-reading the item for an identical add.
     //
@@ -47,7 +47,7 @@ pub(super) fn process_pre_threshold_commit(
     // (stranding up to ~2 units per commit in the contract forever)
     // and makes the seed math exact:
     // `pools_bluechip_seed = NATIVE_RAISED`.
-    USD_RAISED_FROM_COMMIT.save(deps.storage, &new_usd_total)?;
+    GROSS_NATIVE_COMMITTED.save(deps.storage, &new_usd_total)?;
     let total_raised = new_usd_total;
     let total_bluechip_raised = NATIVE_RAISED_FROM_COMMIT
         .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(net_bluechip)?))?;

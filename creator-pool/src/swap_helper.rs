@@ -1,4 +1,4 @@
-//! Swap-math re-exports plus the commit-phase USD-valuation client.
+//! Swap-math re-exports plus the commit-context client.
 //!
 //! The pure AMM math (`compute_swap`, `compute_offer_amount`,
 //! `assert_max_spread`, `update_price_accumulator`, `DEFAULT_SLIPPAGE`)
@@ -6,60 +6,34 @@
 //! `use crate::swap_helper::compute_swap;` resolve here.
 pub use pool_core::swap::*;
 
-use cosmwasm_std::{Addr, Deps, StdError, StdResult, Uint128};
+use cosmwasm_std::{Addr, Deps, StdResult};
 use pool_factory_interfaces::{
     CommitContextResponse, FactoryQueryEnvelope, FactoryQueryMsg, RegisteredRouterResponse,
 };
 
-/// Fixed-point scale of `CommitContextResponse.rate_used`: micro-USD per
-/// micro-native. Must match `factory::usd_price::RATE_PRECISION`.
-/// Duplicated rather than imported — the pool intentionally has no
-/// compile-time factory dependency; the two communicate only over wasm
-/// message boundaries.
-pub const RATE_PRECISION: u128 = 1_000_000;
-
-/// Pool-side sanity CEILING on the factory-supplied native→USD rate
-/// ($10,000 per native token). Mirrors `factory::usd_price::RATE_MAX`.
+/// Fetch the live factory context a commit needs, in one cross-contract
+/// round-trip: the current `bluechip_wallet_address` (protocol-fee recipient
+/// + threshold-cross reward target — live so an admin wallet rotation takes
+/// effect for every existing pool without a snapshot), the chain's GAMM
+/// creation-fee coin, and — when that fee is non-native — the TWAP-valued
+/// native budget for acquiring it at crossing.
 ///
-/// The factory already gates its Pyth price against a tighter plausibility
-/// ceiling, so under normal operation this NEVER fires. It exists as a
-/// defense-in-depth firewall at the trust boundary: the pool delegates its
-/// entire valuation to the factory, and every threshold / distribution
-/// calculation rides on `rate_used`. A factory bug, a mis-configured Pyth
-/// feed, or a wrong-decimals value that slipped past the factory would
-/// otherwise let an absurd rate value a dust commit as thousands of dollars
-/// and cross the threshold.
-/// Only the ceiling is enforced (not a floor): an inflated rate is the theft
-/// vector (dust crosses cheaply / steals distribution share), whereas a
-/// deflated rate only makes crossing HARDER, so an asymmetric bound is
-/// correct. `rate == 0` is rejected separately at the call site.
-pub const POOL_RATE_MAX: u128 = 10_000 * RATE_PRECISION;
-
-/// Values `native_amount` in USD via the factory, which reads the price
-/// from the configured Pyth native/USD feed, and returns the factory's live
-/// `bluechip_wallet_address` in the same response — the two pieces of
-/// factory state every commit needs, fetched in a single cross-contract
-/// round-trip. The caller reuses `rate_used` for the inverse conversion
-/// inside the same commit, so there is no mid-tx rate drift, and routes
-/// the protocol fee / threshold-cross reward to `bluechip_wallet`, so an
-/// admin wallet rotation takes effect for every existing pool without a
-/// separate query.
-///
-/// Fail-closed: any error (factory unreachable, Pyth query failure, or a
-/// stale / low-confidence / out-of-band price rejected by the factory's
-/// gates) propagates and reverts the commit rather than mispricing it. The
-/// factory enforces the staleness window against the Pyth publish_time, so
-/// a lagging price keeper halts commits rather than pricing them off a
-/// stale feed.
+/// There is NO price valuation here: the commit threshold is denominated in
+/// the native asset, so a commit's value toward it is simply its attached
+/// amount. Fail-closed: any error (factory unreachable, fee-route TWAP
+/// failure) propagates and reverts the commit.
 pub fn get_commit_context(
     deps: Deps,
     factory_addr: &Addr,
-    native_amount: Uint128,
+    include_fee_budget: bool,
 ) -> StdResult<CommitContextResponse> {
     deps.querier.query_wasm_smart(
         factory_addr.to_string(),
         &FactoryQueryEnvelope::PoolFactoryQuery(FactoryQueryMsg::CommitContext {
-            amount: native_amount,
+            // `false` on post-threshold commits: they never fund a fee
+            // swap, so skipping the factory's TWAP valuation keeps
+            // trading-phase commits alive through a pricing-pool outage.
+            include_fee_budget: Some(include_fee_budget),
         }),
     )
 }
@@ -78,21 +52,3 @@ pub fn query_registered_router(deps: Deps, factory_addr: &Addr) -> StdResult<Opt
     Ok(resp.router)
 }
 
-/// USD -> native using an already-captured rate. Exact inverse of the
-/// factory's `native_to_usd` math (`usd * RATE_PRECISION / rate`), so
-/// thresholding is arithmetically consistent with the valuation captured
-/// at commit entry.
-pub fn usd_to_native_at_rate(usd_amount: Uint128, rate: Uint128) -> StdResult<Uint128> {
-    if rate.is_zero() {
-        return Err(StdError::generic_err(
-            "Cannot convert USD to native: rate is zero",
-        ));
-    }
-    usd_amount
-        .checked_mul(Uint128::from(RATE_PRECISION))
-        .map_err(|e| StdError::generic_err(format!("Overflow converting USD to native: {}", e)))?
-        .checked_div(rate)
-        .map_err(|e| {
-            StdError::generic_err(format!("Division error converting USD to native: {}", e))
-        })
-}

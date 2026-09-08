@@ -38,10 +38,10 @@ use cw_storage_plus::{Item, Map};
 
 // -- Commit-phase-only storage -------------------------------------------
 
-/// Running total of GROSS (pre-fee) USD value (6 decimals) committed to
+/// Running total of GROSS (pre-fee) native base units committed to
 /// the pool pre-threshold. This is the accumulator the threshold check
 /// runs against.
-pub const USD_RAISED_FROM_COMMIT: Item<Uint128> = Item::new("usd_raised");
+pub const GROSS_NATIVE_COMMITTED: Item<Uint128> = Item::new("gross_native_committed");
 /// Per-committer cumulative deposit/payment record.
 pub const COMMIT_INFO: Map<&Addr, Committing> = Map::new("sub_info");
 /// Running total of NET-of-fees bluechip that has actually entered the
@@ -59,9 +59,10 @@ pub const COMMIT_INFO: Map<&Addr, Committing> = Map::new("sub_info");
 ///
 /// Storage key is `"bluechip_raised"` for cross-version compatibility.
 pub const NATIVE_RAISED_FROM_COMMIT: Item<Uint128> = Item::new("bluechip_raised");
-/// Per-committer USD ledger; drained during post-threshold distribution.
+/// Per-committer NATIVE (gross, pre-fee) ledger; drained during
+/// post-threshold distribution.
 pub const COMMIT_LEDGER: cw_storage_plus::Map<&Addr, Uint128> =
-    cw_storage_plus::Map::new("commit_usd");
+    cw_storage_plus::Map::new("commit_native");
 /// Incrementally-maintained count of DISTINCT committers ever recorded in
 /// `COMMIT_LEDGER` toward the threshold. Bumped by exactly one the first
 /// time each address appears in the ledger (pre-threshold funding commits
@@ -277,8 +278,8 @@ pub struct DistributionState {
     pub is_distributing: bool,
     /// Total creator-token amount to be distributed across all committers.
     pub total_to_distribute: Uint128,
-    /// Snapshot of total committed USD at threshold-cross; denominator for share math.
-    pub total_committed_usd: Uint128,
+    /// Snapshot of total committed native at threshold-cross; denominator for share math.
+    pub total_committed_native: Uint128,
     /// Cursor into COMMIT_LEDGER; next batch starts strictly after this key.
     pub last_processed_key: Option<Addr>,
     /// Advisory counter of remaining committers (ground truth is the ledger).
@@ -323,8 +324,10 @@ pub struct Committing {
     pub pool_contract_address: Addr,
     /// Address that owns this committing record.
     pub committer: Addr,
-    /// Cumulative USD value committed by this address.
-    pub total_paid_usd: Uint128,
+    /// Cumulative native value committed by this address (gross,
+    /// pre-fee — byte-identical to `total_paid_bluechip`, kept for
+    /// response-shape stability).
+    pub total_paid_native: Uint128,
     /// Cumulative GROSS-of-fees native bluechip committed by this
     /// address — i.e. the `asset.amount` from each commit before the
     /// commit-fee bluechip + creator splits are taken out. This is the
@@ -354,8 +357,8 @@ pub struct Committing {
     /// GROSS, matching `total_paid_bluechip` — see that field's doc for
     /// the gross-vs-net distinction.
     pub last_payment_bluechip: Uint128,
-    /// USD value on the most recent commit.
-    pub last_payment_usd: Uint128,
+    /// Native value of the most recent commit.
+    pub last_payment_native: Uint128,
 }
 
 #[cw_serde]
@@ -370,54 +373,55 @@ pub struct ThresholdPayoutAmounts {
     pub commit_return_amount: Uint128,
 }
 
-/// Default minimum pre-threshold commit value (USD, 6 decimals). $5.
-/// Used at pool instantiate; admin-tunable per-pool via the standard
-/// 48h `ProposeConfigUpdate` flow on the factory.
-pub const DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD: Uint128 = Uint128::new(5_000_000);
-/// Default minimum post-threshold commit value (USD, 6 decimals). $1.
-/// Looser than pre-threshold because post-threshold commits
-/// are AMM swaps that don't add to `COMMIT_LEDGER` and therefore can't
-/// bloat the distribution queue; the lower floor preserves UX for small
-/// trades.
-pub const DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD: Uint128 = Uint128::new(1_000_000);
-/// Inclusive upper bound on either commit-floor knob ($1000, 6 decimals).
-/// Sized to be far above any plausible legitimate floor
-/// while preventing an admin (or compromised admin key) from setting the
-/// floor so high that the pool effectively rejects all commits. The
-/// factory's `PoolConfigUpdate::validate()` and the pool's apply path
-/// both enforce this.
-pub const MAX_MIN_COMMIT_USD: Uint128 = Uint128::new(1_000_000_000);
+/// Default minimum pre-threshold commit: 115 OSMO (base units, 6 decimals —
+/// ~$4–5 at 2026 prices). An anti-dust floor: pre-threshold commits create
+/// `COMMIT_LEDGER` entries that the post-crossing distribution must walk, so
+/// the floor bounds how cheaply an attacker can bloat that queue. Used at
+/// pool instantiate; admin-tunable per-pool via the standard 48h
+/// `ProposeConfigUpdate` flow on the factory.
+pub const DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD: Uint128 = Uint128::new(115_000_000);
+/// Default minimum post-threshold commit: 25 OSMO (base units). Looser than
+/// pre-threshold because post-threshold commits are AMM swaps that don't add
+/// to `COMMIT_LEDGER` and therefore can't bloat the distribution queue; the
+/// lower floor preserves UX for small trades.
+pub const DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD: Uint128 = Uint128::new(25_000_000);
+/// Inclusive upper bound on either commit-floor knob: 25,000 OSMO (base
+/// units). Sized to be far above any plausible legitimate floor while
+/// preventing an admin (or compromised admin key) from setting the floor so
+/// high that the pool effectively rejects all commits. The factory's
+/// `PoolConfigUpdate::validate()` and the pool's apply path both enforce this.
+pub const MAX_MIN_COMMIT_NATIVE: Uint128 = Uint128::new(25_000_000_000);
 
-fn default_min_commit_usd_pre_threshold() -> Uint128 {
-    DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD
+fn default_min_commit_native_pre_threshold() -> Uint128 {
+    DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD
 }
-fn default_min_commit_usd_post_threshold() -> Uint128 {
-    DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD
+fn default_min_commit_native_post_threshold() -> Uint128 {
+    DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD
 }
 
 #[cw_serde]
 pub struct CommitLimitInfo {
-    /// USD threshold target (6 decimals); once total committed USD value
-    /// reaches this, the pool seeds. Commits are made in the chain's
-    /// native asset and valued via the factory's ConvertNativeToUsd
-    /// (Pyth-backed) query.
-    pub commit_amount_for_threshold_usd: Uint128,
+    /// Native-denominated threshold target (base units of the chain's
+    /// native asset, 6 decimals): once total GROSS native committed reaches
+    /// this, the pool seeds. No oracle — a commit's value toward the
+    /// threshold is its attached amount.
+    pub commit_amount_for_threshold_native: Uint128,
     /// Max native bluechip locked into pool reserves; remainder becomes creator excess.
     pub max_bluechip_lock_per_pool: Uint128,
     /// Lock duration (days) on the creator-excess liquidity position.
     pub creator_excess_liquidity_lock_days: u64,
-    /// Per-pool minimum pre-threshold commit value in USD (6 decimals).
-    /// Initialised to `DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD` at
-    /// instantiate; tunable through `PoolConfigUpdate.min_commit_usd_pre_threshold`.
+    /// Per-pool minimum pre-threshold commit in native base units.
+    /// Initialised to `DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD` at
+    /// instantiate; tunable through `PoolConfigUpdate.min_commit_native_pre_threshold`.
     /// `#[serde(default = ...)]` lets a stored record that lacks this
     /// field deserialize as the launch default — purely defensive,
     /// since v1 chain state always includes it.
-    #[serde(default = "default_min_commit_usd_pre_threshold")]
-    pub min_commit_usd_pre_threshold: Uint128,
-    /// Per-pool minimum post-threshold commit value in USD (6 decimals).
-    /// Same shape as `min_commit_usd_pre_threshold`.
-    #[serde(default = "default_min_commit_usd_post_threshold")]
-    pub min_commit_usd_post_threshold: Uint128,
+    #[serde(default = "default_min_commit_native_pre_threshold")]
+    pub min_commit_native_pre_threshold: Uint128,
+    /// Per-pool minimum post-threshold commit in native base units.
+    /// Same shape as `min_commit_native_pre_threshold`.
+    #[serde(default = "default_min_commit_native_post_threshold")]
+    pub min_commit_native_post_threshold: Uint128,
 }
 
 /// Time-locked creator entitlement to the RAW excess coins parked in the

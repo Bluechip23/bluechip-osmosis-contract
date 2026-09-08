@@ -14,7 +14,7 @@ use crate::state::{
     EMERGENCY_DRAINED, EXPECTED_FACTORY, POOL_SPECS, REENTRANCY_LOCK, THRESHOLD_PROCESSING,
 };
 use crate::testing::fixtures::{
-    setup_pool_post_threshold, setup_pool_storage, with_factory_oracle, CREATOR_DENOM,
+    setup_pool_post_threshold, setup_pool_storage, with_factory_context, CREATOR_DENOM,
 };
 
 #[test]
@@ -190,7 +190,7 @@ fn test_distribution_bounty_does_not_touch_pool_funds() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(500_000_000_000),
-        total_committed_usd: Uint128::new(25_000_000_000),
+        total_committed_native: Uint128::new(25_000_000_000),
         last_processed_key: None,
         distributions_remaining: 1,
         estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -252,7 +252,7 @@ fn test_continue_distribution_skips_bounty_on_empty_batch() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(500_000_000_000),
-        total_committed_usd: Uint128::new(25_000_000_000),
+        total_committed_native: Uint128::new(25_000_000_000),
         last_processed_key: None,
         distributions_remaining: 1,
         estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -341,7 +341,7 @@ fn test_continue_distribution_completes_in_one_tx_when_final() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(500_000_000_000),
-        total_committed_usd: Uint128::new(5_000_000_000),
+        total_committed_native: Uint128::new(5_000_000_000),
         last_processed_key: None,
         distributions_remaining: 1,
         estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -539,7 +539,7 @@ fn test_emergency_withdraw_clears_distribution() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(500_000_000_000),
-        total_committed_usd: Uint128::new(25_000_000_000),
+        total_committed_native: Uint128::new(25_000_000_000),
         last_processed_key: None,
         distributions_remaining: 50,
         estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -628,7 +628,7 @@ fn test_commit_rejects_multi_denom_funds() {
 
     let mut deps = mock_dependencies();
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
 
     COMMITFEEINFO
         .save(
@@ -645,11 +645,11 @@ fn test_commit_rejects_multi_denom_funds() {
         .save(
             &mut deps.storage,
             &CommitLimitInfo {
-                commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
+                commit_amount_for_threshold_native: Uint128::new(25_000_000_000),
                 max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
                 creator_excess_liquidity_lock_days: 14,
-                min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-                min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+                min_commit_native_pre_threshold: Uint128::new(1_000_000), // test floor
+                min_commit_native_post_threshold: Uint128::new(1_000_000), // test floor
             },
         )
         .unwrap();
@@ -789,7 +789,7 @@ fn test_continue_distribution_rate_limit_per_address() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(500_000_000_000),
-        total_committed_usd: Uint128::new(25_000_000_000),
+        total_committed_native: Uint128::new(25_000_000_000),
         last_processed_key: None,
         distributions_remaining: 1,
         estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -847,7 +847,7 @@ fn test_continue_distribution_rate_limit_per_address() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(500_000_000_000),
-        total_committed_usd: Uint128::new(25_000_000_000),
+        total_committed_native: Uint128::new(25_000_000_000),
         last_processed_key: None,
         distributions_remaining: 1,
         estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -1200,7 +1200,7 @@ mod distribution_liveness_tests {
         let dist = DistributionState {
             is_distributing: true,
             total_to_distribute: Uint128::new(1),
-            total_committed_usd: Uint128::new(1),
+            total_committed_native: Uint128::new(1),
             last_processed_key: None,
             distributions_remaining: 1,
             estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -1255,7 +1255,7 @@ mod distribution_liveness_tests {
         let dist = DistributionState {
             is_distributing: false, // pretend it stalled
             total_to_distribute: Uint128::new(1_000_000_000),
-            total_committed_usd: Uint128::new(10_000_000_000),
+            total_committed_native: Uint128::new(10_000_000_000),
             last_processed_key: Some(Addr::unchecked("checkpoint")),
             distributions_remaining: 7,
             estimated_gas_per_distribution: 999,
@@ -1518,17 +1518,24 @@ mod distribution_liveness_tests {
         );
     }
 
-    /// Drained pool: every liveness primitive must reject so the
-    /// post-drain invariant ("the pool no longer pays out from this
-    /// contract") is uniform across all entry points.
+    /// Drained pool: bank-paying liveness primitives must reject ("the
+    /// pool no longer pays out from this contract"), but the
+    /// ledger-bounded MINT entitlement claim survives — a drain is
+    /// terminal and permanently pause-latched, so gating the claim on it
+    /// would confiscate committers' airdrops forever. FAILED_MINTS
+    /// amounts were fixed by the ledger before any incident and never
+    /// touch the swept bank balance.
     #[test]
-    fn liveness_primitives_reject_on_drained_pool() {
+    fn drained_pool_rejects_recovery_but_preserves_failed_mint_claims() {
         let mut deps = mock_dependencies();
         setup_pool_storage(&mut deps);
         install_factory(&mut deps);
         EMERGENCY_DRAINED.save(&mut deps.storage, &true).unwrap();
+        // Drains latch the pause; the claim must get past BOTH gates.
+        crate::state::POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
 
-        // Self-recover
+        // Self-recover (restarts bank-relevant distribution machinery):
+        // still rejected post-drain.
         let info = message_info(&Addr::unchecked("anyone"), &[]);
         let err = execute(
             deps.as_mut(),
@@ -1541,7 +1548,9 @@ mod distribution_liveness_tests {
             format!("{:?}", err).contains("Drained") || format!("{:?}", err).contains("drained")
         );
 
-        // Claim
+        // ClaimFailedDistribution: reaches the ledger lookup (no drain /
+        // pause rejection). With no FAILED_MINTS entry it fails with the
+        // entry-specific error, proving the gates were passed…
         let info = message_info(&Addr::unchecked("anyone"), &[]);
         let err = execute(
             deps.as_mut(),
@@ -1550,8 +1559,28 @@ mod distribution_liveness_tests {
             ExecuteMsg::ClaimFailedDistribution { recipient: None },
         )
         .unwrap_err();
+        let msg = format!("{:?}", err);
         assert!(
-            format!("{:?}", err).contains("Drained") || format!("{:?}", err).contains("drained")
+            msg.contains("NoFailedMintEntry") || msg.contains("no failed"),
+            "post-drain claim must reach the ledger, got: {msg}"
+        );
+
+        // …and with an owed entry, the claim MINTS despite drain + pause.
+        let user = Addr::unchecked("owed_user");
+        crate::state::FAILED_MINTS
+            .save(&mut deps.storage, &user, &Uint128::new(7))
+            .unwrap();
+        let info = message_info(&user, &[]);
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::ClaimFailedDistribution { recipient: None },
+        )
+        .expect("drained+paused pool must still honor the mint entitlement");
+        assert!(
+            !res.messages.is_empty(),
+            "claim must dispatch the recovery mint"
         );
     }
 

@@ -1,7 +1,7 @@
 //! Commit-phase-only claim handlers.
 //!
-//! Phase-2: the internal LP system and the creator fee-pot are gone. The
-//! only claim that survives is the time-locked creator-excess release.
+//! The single claim here is the time-locked creator-excess release
+//! (third-party LP lives on the native pool, not in this contract).
 //!
 //! The release transfers the RAW earmarked coins — `bluechip_amount`
 //! (bluechip denom) + `token_amount` (creator denom) — that were parked in

@@ -74,7 +74,7 @@ fn mock_instantiate_msg() -> PoolInstantiateMsg {
             commit_fee_bluechip: Decimal::percent(1),
             commit_fee_creator: Decimal::percent(1),
         },
-        commit_threshold_limit_usd: Uint128::new(1000),
+        commit_threshold_limit_native: Uint128::new(1000),
         subdenom: "ucreator".to_string(),
         token_name: "Creator Token".to_string(),
         token_symbol: "UCREATOR".to_string(),
@@ -408,10 +408,10 @@ fn test_unauthorized_admin_actions() {
 
 #[test]
 fn instantiate_rejects_doubling_assets() {
-    // Both legs set to the bluechip Native side. Post-migration the pool
+    // Both legs set to the bluechip Native side. The pool
     // OVERWRITES index 1 with the CreatorToken denom it derives from
-    // `subdenom`, so the old `DoublingAssets` (index0 == index1) path is
-    // now structurally unreachable — a Native at index 1 is instead
+    // `subdenom`, so a `DoublingAssets` (index0 == index1) shape is
+    // structurally unreachable — a Native at index 1 is instead
     // rejected earlier by the pair-shape guard. Either way the malformed
     // pair is refused.
     let mut msg = mock_instantiate_msg();

@@ -131,7 +131,7 @@ pub enum QueryMsg {
     #[returns(PoolCommitResponse)]
     PoolCommits {
         pool_contract_address: Addr,
-        min_payment_usd: Option<Uint128>,
+        min_payment_native: Option<Uint128>,
         after_timestamp: Option<u64>,
         start_after: Option<String>,
         limit: Option<u32>,
@@ -244,7 +244,7 @@ pub struct DistributionStateResponse {
     pub is_stalled: bool,
     pub consecutive_failures: u32,
     pub total_to_distribute: Uint128,
-    pub total_committed_usd: Uint128,
+    pub total_committed_native: Uint128,
     /// Running sum of creator-token rewards already minted across
     /// processed batches. Lets dashboards compute the residual dust
     /// (`total_to_distribute - distributed_so_far`) that will be
@@ -274,8 +274,8 @@ pub struct PoolInstantiateMsg {
     pub used_factory_addr: Addr,
     pub threshold_payout: Option<Binary>,
     pub commit_fee_info: CommitFeeInfo,
-    /// Commit threshold, USD-denominated (6 decimals).
-    pub commit_threshold_limit_usd: Uint128,
+    /// Commit threshold, denominated in native base units (6 decimals).
+    pub commit_threshold_limit_native: Uint128,
     /// TokenFactory subdenom for the creator token. The pool creates
     /// `factory/{pool_contract_addr}/{subdenom}` at instantiate and
     /// becomes its denom admin. Replaces the old `token_address: Addr`
@@ -309,7 +309,7 @@ pub struct PoolInstantiateMsg {
 #[cw_serde]
 pub struct PoolCommitResponse {
     /// Number of `committers` entries in THIS page after filtering by
-    /// `pool_contract_address` / `min_payment_usd` / `after_timestamp`
+    /// `pool_contract_address` / `min_payment_native` / `after_timestamp`
     /// and capping at `limit`. NOT a pre-filter total — paginating
     /// callers should treat `committers.len() < limit` as the
     /// end-of-data signal rather than relying on this field.
@@ -321,9 +321,9 @@ pub struct PoolCommitResponse {
 pub struct CommitterInfo {
     pub wallet: String,
     pub last_payment_bluechip: Uint128,
-    pub last_payment_usd: Uint128,
+    pub last_payment_native: Uint128,
     pub last_committed: Timestamp,
-    pub total_paid_usd: Uint128,
+    pub total_paid_native: Uint128,
     pub total_paid_bluechip: Uint128,
 }
 
@@ -332,5 +332,5 @@ pub struct LastCommittedResponse {
     pub has_committed: bool,
     pub last_committed: Option<Timestamp>,
     pub last_payment_bluechip: Option<Uint128>,
-    pub last_payment_usd: Option<Uint128>,
+    pub last_payment_native: Option<Uint128>,
 }

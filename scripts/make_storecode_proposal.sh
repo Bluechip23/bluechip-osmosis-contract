@@ -6,13 +6,18 @@
 # usage: scripts/make_storecode_proposal.sh [deposit_uosmo]
 #
 #   deposit_uosmo   Initial deposit attached at submission, in uosmo.
-#                   Defaults to 6_000_000_000 (6,000 OSMO), the osmosis-1
-#                   v1 min_deposit as of 2026-07. Re-check before
-#                   submitting:
+#                   Defaults to 30_000_000_000 (30,000 OSMO) — the osmosis-1
+#                   min_deposit as of 2026-08. THIS IS GOVERNANCE-TUNABLE AND
+#                   HAS CHANGED BEFORE (it was 6,000 OSMO in 2026-07). ALWAYS
+#                   re-check immediately before submitting:
 #                     osmosisd query gov params --node <mainnet> -o json \
 #                       | jq '.params.min_deposit'
-#                   A smaller deposit is legal — the proposal then sits
-#                   in the deposit period until the community tops it up.
+#                   Note `min_initial_deposit_ratio` (currently 0.25): a
+#                   submission attaching less than that fraction of
+#                   min_deposit is REJECTED on-chain. Attaching at least the
+#                   ratio but less than min_deposit is legal — the proposal
+#                   then sits in the deposit period awaiting top-up, and dies
+#                   (deposit at risk) if it never reaches min_deposit.
 #
 # Produces gov/storecode_proposal.json: ONE gov v1 proposal carrying
 # three /cosmwasm.wasm.v1.MsgStoreCode messages (factory, creator_pool,
@@ -59,7 +64,7 @@ OUT_FILE="$OUT_DIR/storecode_proposal.json"
 #   osmosisd query auth module-account gov --node <mainnet> -o json
 GOV_AUTHORITY="osmo10d07y265gmmuvt4z0w9aw880jnsr700jjeq4qp"
 
-DEPOSIT_UOSMO="${1:-6000000000}"
+DEPOSIT_UOSMO="${1:-30000000000}"  # live min_deposit as of 2026-08; VERIFY before use (governance-tunable)
 
 for cmd in jq gzip base64 sha256sum git; do
     command -v "$cmd" >/dev/null || { echo "error: $cmd not on PATH" >&2; exit 1; }
@@ -103,7 +108,7 @@ done
 TITLE="Store Bluechip protocol CosmWasm contracts (factory, creator-pool, router)"
 SUMMARY="This proposal stores the three CosmWasm contracts of the Bluechip creator-token launchpad on Osmosis.
 
-Bluechip lets a creator launch a token paired against OSMO with no upfront liquidity, built entirely on Osmosis-native modules: the creator token is a TokenFactory denom (factory/{pool}/{symbol}; the pool contract is its denom admin), supporters commit OSMO, and when a pool's cumulative committed value crosses its USD threshold (valued via the Pyth price oracle — the OSMO/USD feed read from the Pyth CW contract on Osmosis, gated for staleness, confidence and a minimum age, and failing closed if the price is unavailable) the pool mints the fixed 1.2M-token supply, seeds a native GAMM balancer pool from the committed OSMO, and distributes tokens to committers pro-rata. Pricing uses Pyth (not an on-chain pool TWAP) because the on-chain OSMO/USD pool depth is too thin to price a USD threshold safely; because Pyth on Osmosis is push-based, the protocol runs a standing off-chain price keeper that keeps the OSMO/USD price fresh on-chain. If that keeper lapses, the staleness gate makes commits fail closed (no mispricing, funds safe) until it resumes — a liveness dependency, not a fund risk. Post-threshold the pool is a standard Osmosis GAMM market: swaps route through x/poolmanager and third-party liquidity uses ordinary MsgJoinPool/MsgExitPool on the native pool. The chain's GAMM pool-creation fee (denominated in Noble USDC on osmosis-1) is funded from the protocol's own 1% commit fee — never by the creator. Every admin mutation (config, per-pool config, pool code upgrades) sits behind a 48-hour timelock enforced on-chain by the factory, and the admin/migrate authority is a multisig.
+Bluechip lets a creator launch a token paired against OSMO with no upfront liquidity, built entirely on Osmosis-native modules: the creator token is a TokenFactory denom (factory/{pool}/{symbol}; the pool contract is its denom admin), supporters commit OSMO, and when a pool's cumulative committed OSMO crosses its OSMO-denominated threshold the pool mints the fixed 1.2M-token supply, seeds a native GAMM balancer pool from the committed OSMO, and distributes tokens to committers pro-rata. There is no price oracle anywhere in the protocol: the threshold and both minimum-commit floors are denominated in OSMO itself, so no external price feed, keeper, or thin-liquidity TWAP can influence when a pool crosses. The only price read is a chain-native x/twap query used solely to budget the ~20 USDC pool-creation fee swap at crossing, and that swap's spend is hard-clamped to the protocol's own fee retention (never committer funds), failing closed on any anomaly. Post-threshold the pool is a standard Osmosis GAMM market: swaps route through x/poolmanager and third-party liquidity uses ordinary MsgJoinPool/MsgExitPool on the native pool. The chain's GAMM pool-creation fee (denominated in alloyed USDC on osmosis-1) is funded from the protocol's own 1% commit fee — never by the creator. Every admin mutation (config, per-pool config, pool code upgrades) sits behind a 48-hour timelock enforced on-chain by the factory, and the admin/migrate authority is a multisig.
 
 Artifacts (reproducible via cosmwasm/optimizer 0.16.0 from commit ${COMMIT}):
 ${HASH_LINES}
@@ -131,7 +136,7 @@ store_msg() {
             sender: $sender,
             wasm_byte_code: ($code | rtrimstr("\n")),
             instantiate_permission: {
-                permission: "ACCESS_TYPE_EVERYBODY",
+                permission: "Everybody",
                 addresses: []
             }
         }'

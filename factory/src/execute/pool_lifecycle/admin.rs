@@ -148,8 +148,8 @@ pub fn execute_recover_pool_stuck_states(
 /// back repeatedly).
 ///
 /// `crossed_at` is the pool's `env.block.time` at the moment the
-/// threshold flipped. The mint formula uses this timestamp so the amount
-/// reflects when the pool actually crossed, not when a (possibly
+/// threshold flipped. It is recorded as an event attribute so indexers
+/// see when the pool actually crossed, not when a (possibly
 /// retried-after-failure) notify finally lands. `None` falls back to
 /// `env.block.time` here for wire-format backward compatibility.
 pub fn execute_notify_threshold_crossed(

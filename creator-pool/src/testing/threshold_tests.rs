@@ -5,10 +5,10 @@ use crate::state::{
     CommitLimitInfo, CreatorExcessLiquidity, DistributionState, ExpectedFactory, RecoveryType,
     COMMITFEEINFO, COMMIT_INFO, COMMIT_LEDGER, COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION,
     DISTRIBUTION_STATE, EXPECTED_FACTORY, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT, POOL_PAUSED,
-    THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
 };
 use crate::contract::execute;
-use crate::testing::fixtures::{setup_pool_post_threshold, setup_pool_storage, with_factory_oracle};
+use crate::testing::fixtures::{setup_pool_post_threshold, setup_pool_storage, with_factory_context};
 use cosmwasm_std::testing::{mock_dependencies_with_balance, MockApi, MockQuerier, MockStorage};
 use cosmwasm_std::{
     coin, BankMsg, Binary, Coin, Decimal, OwnedDeps, SystemError, Timestamp, WasmQuery,
@@ -23,11 +23,11 @@ pub fn setup_pool_with_excess_config(deps: &mut OwnedDeps<MockStorage, MockApi, 
     setup_pool_storage(deps);
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000),
+        commit_amount_for_threshold_native: Uint128::new(25_000_000_000),
         max_bluechip_lock_per_pool: Uint128::new(100_000),
         creator_excess_liquidity_lock_days: 14,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+        min_commit_native_pre_threshold: Uint128::new(1_000_000), // test floor
+        min_commit_native_post_threshold: Uint128::new(1_000_000), // test floor
     };
 
     COMMIT_LIMIT_INFO
@@ -62,7 +62,7 @@ fn test_threshold_with_excess_creates_position() {
         .save(&mut deps.storage, &commit_config)
         .unwrap();
 
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_900_000_000))
         .unwrap();
     COMMIT_LEDGER
@@ -84,18 +84,17 @@ fn test_threshold_with_excess_creates_position() {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { .. },
             )) = from_json(msg)
             {
                 let resp = pool_factory_interfaces::CommitContextResponse {
-                    amount,
-                    rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
                     bluechip_wallet: Addr::unchecked("ubluechip"),
                     // Legacy factory shape — no live fee context.
                     gamm_pool_creation_fee: None,
+                    fee_swap_budget_native: None,
                     pricing_pool_id: 0,
-                    usd_quote_denom: String::new(),
+                    fee_quote_denom: String::new(),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -130,7 +129,7 @@ fn test_threshold_with_excess_creates_position() {
     let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
     println!(
         "USD raised after commit: {}",
-        USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap()
+        GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap()
     );
 
     // The over-cap bluechip is recorded as a time-locked creator
@@ -299,7 +298,7 @@ fn test_no_excess_when_under_cap() {
         .save(&mut deps.storage, &commit_config)
         .unwrap();
 
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_900_000_000))
         .unwrap();
     COMMIT_LEDGER
@@ -321,18 +320,17 @@ fn test_no_excess_when_under_cap() {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { .. },
             )) = from_json(msg)
             {
                 let resp = pool_factory_interfaces::CommitContextResponse {
-                    amount,
-                    rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
                     bluechip_wallet: Addr::unchecked("ubluechip"),
                     // Legacy factory shape — no live fee context.
                     gamm_pool_creation_fee: None,
+                    fee_swap_budget_native: None,
                     pricing_pool_id: 0,
-                    usd_quote_denom: String::new(),
+                    fee_quote_denom: String::new(),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -402,13 +400,13 @@ fn test_commit_threshold_overshoot_split() {
         .save(&mut deps.storage, &false)
         .unwrap();
 
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_999_000_000))
         .unwrap(); // $24,999
 
     let env = mock_env();
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
 
     let commit_amount = Uint128::new(5_000_000);
 
@@ -464,7 +462,7 @@ fn test_commit_threshold_overshoot_split() {
 
     assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
     assert_eq!(
-        USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(),
+        GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap(),
         Uint128::new(25_000_000_000)
     );
     assert!(
@@ -523,7 +521,7 @@ fn test_commit_threshold_overshoot_split() {
     // = 1_000_000 ubluechip; value_to_threshold = 1_000_000 USD micros.
     assert!(sub.total_paid_bluechip <= commit_amount);
     assert!(sub.total_paid_bluechip > Uint128::zero());
-    assert_eq!(sub.total_paid_usd, Uint128::new(1_000_000));
+    assert_eq!(sub.total_paid_native, Uint128::new(1_000_000));
 }
 
 #[test]
@@ -540,7 +538,7 @@ fn test_commit_exact_threshold() {
     // Pre-test USD_RAISED is $5 below the $25k threshold so that a
     // minimum-size ($5, MIN_COMMIT_USD_PRE_THRESHOLD) commit lands
     // exactly at $25k.
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_995_000_000))
         .unwrap();
 
@@ -555,7 +553,7 @@ fn test_commit_exact_threshold() {
 
     let env = mock_env();
 
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000)); // $1 per bluechip
+    with_factory_context(&mut deps); // $1 per bluechip
 
     let commit_amount = Uint128::new(5_000_000);
 
@@ -602,7 +600,7 @@ fn test_commit_exact_threshold() {
     );
 
     assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
-    let total_usd = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
+    let total_usd = GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap();
     assert_eq!(total_usd, Uint128::new(25_000_000_000)); // Should be exactly at $25k threshold
 }
 
@@ -646,12 +644,12 @@ fn test_concurrent_threshold_crossing_attempts() {
 
     setup_pool_storage(&mut deps);
     check_correct_factory(&mut deps);
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_999_000_000))
         .unwrap();
 
     let env = mock_env();
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
 
     // First user triggers threshold crossing
     THRESHOLD_PROCESSING.save(&mut deps.storage, &true).unwrap();
@@ -699,10 +697,10 @@ fn test_concurrent_threshold_crossing_attempts() {
     );
 
     // Storage state must be untouched: the rejection happens before any
-    // commit-side writes, so USD_RAISED_FROM_COMMIT and IS_THRESHOLD_HIT
+    // commit-side writes, so GROSS_NATIVE_COMMITTED and IS_THRESHOLD_HIT
     // are exactly as the test set them up.
     assert_eq!(
-        USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(),
+        GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap(),
         Uint128::new(24_999_000_000)
     );
     assert!(!IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
@@ -730,7 +728,7 @@ fn test_distribution_timeout_triggers_error() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000),
-        total_committed_usd: Uint128::new(1_000_000),
+        total_committed_native: Uint128::new(1_000_000),
         last_processed_key: None,
         distributions_remaining: 5,
         max_gas_per_tx: 1000,
@@ -817,7 +815,7 @@ fn test_distribution_just_below_timeout_succeeds() {
     let dist_state = DistributionState {
         is_distributing: true,
         total_to_distribute: Uint128::new(1_000_000),
-        total_committed_usd: Uint128::new(300),
+        total_committed_native: Uint128::new(300),
         last_processed_key: None,
         distributions_remaining: 3,
         max_gas_per_tx: crate::state::DEFAULT_MAX_GAS_PER_TX,
@@ -884,7 +882,7 @@ fn test_accumulated_bluechips_respected() {
     // assertion below is on the `max_bluechip_lock_per_pool` cap, which
     // is reached regardless of whether the input is treated as gross
     // or net (both well exceed the cap).
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_000_000_000))
         .unwrap();
     crate::state::NATIVE_RAISED_FROM_COMMIT
@@ -903,18 +901,17 @@ fn test_accumulated_bluechips_respected() {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { .. },
             )) = from_json(msg)
             {
                 let resp = pool_factory_interfaces::CommitContextResponse {
-                    amount,
-                    rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
                     bluechip_wallet: Addr::unchecked("ubluechip"),
                     // Legacy factory shape — no live fee context.
                     gamm_pool_creation_fee: None,
+                    fee_swap_budget_native: None,
                     pricing_pool_id: 0,
-                    usd_quote_denom: String::new(),
+                    fee_quote_denom: String::new(),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -997,7 +994,7 @@ fn test_concurrent_threshold_crossing_race_condition() {
 
     // Setup pool just below threshold. $5 below (not $1) so that the
     // minimum commit ($5 MIN_COMMIT_USD_PRE_THRESHOLD) crosses.
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_995_000_000))
         .unwrap();
     // At $1/bluechip, $24,995 of NET-of-fees bluechip has entered the
@@ -1010,7 +1007,7 @@ fn test_concurrent_threshold_crossing_race_condition() {
         .unwrap();
 
     let env = mock_env();
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
 
     // User 1 commits enough to OVERSHOOT the threshold. The
     // "threshold_crossing" phase (vs "threshold_hit_exact") requires
@@ -1209,18 +1206,17 @@ fn test_unpaused_pool_accepts_commit_after_previously_paused() {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
             if let Ok(WrapperProbe::PoolFactoryQuery(
-                pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
+                pool_factory_interfaces::FactoryQueryMsg::CommitContext { .. },
             )) = from_json(msg)
             {
                 let resp = pool_factory_interfaces::CommitContextResponse {
-                    amount,
-                    rate_used: Uint128::new(1_000_000),
                     timestamp: 0,
                     bluechip_wallet: Addr::unchecked("ubluechip"),
                     // Legacy factory shape — no live fee context.
                     gamm_pool_creation_fee: None,
+                    fee_swap_budget_native: None,
                     pricing_pool_id: 0,
-                    usd_quote_denom: String::new(),
+                    fee_quote_denom: String::new(),
                 };
                 return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
             }
@@ -1249,7 +1245,7 @@ fn test_unpaused_pool_accepts_commit_after_previously_paused() {
 // below pin both branches with the default floors set in `setup_pool_storage`
 // (pre = $5 / post = $1, both in 6-decimal USD).
 //
-// `with_factory_oracle(rate = 1_000_000)` makes the mock oracle treat ubluechip
+// `with_factory_context(rate = 1_000_000)` makes the mock oracle treat ubluechip
 // 1:1 with 6-decimal USD micros, so the commit amount in ubluechip is also the
 // resulting `usd_value` in micros — easy to pin to one micro below the floor.
 
@@ -1260,10 +1256,18 @@ fn test_commit_rejects_below_pre_threshold_floor() {
         amount: Uint128::new(100_000_000),
     }]);
     setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
 
-    // One micro under the default pre-threshold floor ($5.000000).
-    let pre_floor = crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD;
+    // Install the PRODUCTION floors (fixtures pin tiny test floors).
+    {
+        let mut cfg = crate::state::COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
+        cfg.min_commit_native_pre_threshold = crate::state::DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD;
+        cfg.min_commit_native_post_threshold =
+            crate::state::DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD;
+        crate::state::COMMIT_LIMIT_INFO.save(&mut deps.storage, &cfg).unwrap();
+    }
+    // One micro under the default pre-threshold floor (115 native).
+    let pre_floor = crate::state::DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD;
     let just_below = pre_floor.checked_sub(Uint128::one()).unwrap();
 
     let info = message_info(
@@ -1306,9 +1310,16 @@ fn test_commit_rejects_below_post_threshold_floor() {
     // Flip into post-threshold mode. Floor check fires before swap-path
     // setup so pre-existing reserves aren't required.
     IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
 
-    let post_floor = crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD;
+    {
+        let mut cfg = crate::state::COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
+        cfg.min_commit_native_pre_threshold = crate::state::DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD;
+        cfg.min_commit_native_post_threshold =
+            crate::state::DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD;
+        crate::state::COMMIT_LIMIT_INFO.save(&mut deps.storage, &cfg).unwrap();
+    }
+    let post_floor = crate::state::DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD;
     let just_below = post_floor.checked_sub(Uint128::one()).unwrap();
 
     let info = message_info(
@@ -1550,7 +1561,7 @@ mod native_raised_net_semantics_tests {
         }]);
         setup_pool_storage(&mut deps);
         check_correct_factory(&mut deps);
-        with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+        with_factory_context(&mut deps);
 
         // Sanity: NATIVE_RAISED starts at zero.
         let pre = NATIVE_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
@@ -1605,14 +1616,14 @@ mod native_raised_net_semantics_tests {
         }]);
         setup_pool_storage(&mut deps);
         check_correct_factory(&mut deps);
-        with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+        with_factory_context(&mut deps);
 
         // Pre-seed: 24_000_000_000 NET already raised, 24_000_000_000 USD raised
         // ($1/bluechip implied via the oracle mock).
         NATIVE_RAISED_FROM_COMMIT
             .save(&mut deps.storage, &Uint128::new(24_000_000_000))
             .unwrap();
-        USD_RAISED_FROM_COMMIT
+        GROSS_NATIVE_COMMITTED
             .save(&mut deps.storage, &Uint128::new(24_000_000_000))
             .unwrap();
 
@@ -1682,13 +1693,13 @@ mod native_raised_net_semantics_tests {
         }]);
         setup_pool_storage(&mut deps);
         check_correct_factory(&mut deps);
-        with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+        with_factory_context(&mut deps);
 
         // Pre-seed: $24,995 raised (matching NET), $5 short of threshold.
         NATIVE_RAISED_FROM_COMMIT
             .save(&mut deps.storage, &Uint128::new(24_995_000_000))
             .unwrap();
-        USD_RAISED_FROM_COMMIT
+        GROSS_NATIVE_COMMITTED
             .save(&mut deps.storage, &Uint128::new(24_995_000_000))
             .unwrap();
 
@@ -1798,8 +1809,8 @@ mod native_raised_net_semantics_tests {
             // Live wallet not under test here; mirror the snapshot.
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
-            // Legacy fee context ($1/native rate, no live fee coin).
-            Uint128::new(1_000_000),
+            // Legacy fee context: no live fee coin, no swap budget.
+            None,
             None,
             0,
             "",
@@ -1875,7 +1886,7 @@ mod native_raised_net_semantics_tests {
             },
             Uint128::new(1_000_000),
             Uint128::new(5_000_000),
-            commit_config.commit_amount_for_threshold_usd,
+            commit_config.commit_amount_for_threshold_native,
             &pool_specs,
             &pool_info,
             &commit_config,
@@ -1885,8 +1896,8 @@ mod native_raised_net_semantics_tests {
             // the snapshot directly; the handler short-circuits on the
             // IS_THRESHOLD_HIT gate before this value is consumed.
             &fee_info.bluechip_wallet_address,
-            // Legacy fee context ($1/native rate, no live fee coin).
-            Uint128::new(1_000_000),
+            // Legacy fee context: no live fee coin, no swap budget.
+            None,
             None,
             0,
             "",
@@ -1940,8 +1951,8 @@ mod native_raised_net_semantics_tests {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
-            // Legacy fee context ($1/native rate, no live fee coin).
-            Uint128::new(1_000_000),
+            // Legacy fee context: no live fee coin, no swap budget.
+            None,
             None,
             0,
             "",
@@ -2001,8 +2012,8 @@ mod native_raised_net_semantics_tests {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
-            // Legacy fee context ($1/native rate, no live fee coin).
-            Uint128::new(1_000_000),
+            // Legacy fee context: no live fee coin, no swap budget.
+            None,
             None,
             0,
             "",
@@ -2073,8 +2084,8 @@ mod crossed_at_snapshot_tests {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
-            // Legacy fee context ($1/native rate, no live fee coin).
-            Uint128::new(1_000_000),
+            // Legacy fee context: no live fee coin, no swap budget.
+            None,
             None,
             0,
             "",
@@ -2134,7 +2145,7 @@ mod crossed_at_snapshot_tests {
 // USDC, not uosmo. The pool still funds it from PROTOCOL revenue — the 1%
 // commit-fee retention in the native denom — and, at crossing, converts the
 // retained native into exactly the fee coin with a MsgSwapExactAmountOut
-// through the factory's pricing pool (which trades native/usd_quote by
+// through the factory's pricing pool (which trades native/fee_quote by
 // definition). These tests pin:
 //   * the exact-out swap message (route, budget = TWAP value + margin),
 //   * the seed/shortfall/leftover math under the native budget,
@@ -2152,8 +2163,6 @@ mod cross_denom_fee_tests {
     use pool_core::osmosis_msgs::swap_exact_amount_out_msg;
 
     const USDC: &str = "uusdc";
-    /// $1.00 per native token — keeps the USD↔native math 1:1.
-    const RATE_1_USD: Uint128 = Uint128::new(1_000_000);
     /// 20 USDC, 6 decimals — the live osmosis-1 fee as of 2026-07.
     const FEE_USDC: Uint128 = Uint128::new(20_000_000);
     const PRICING_POOL: u64 = 314;
@@ -2188,7 +2197,9 @@ mod cross_denom_fee_tests {
             &fee_info,
             &fee_info.bluechip_wallet_address,
             Decimal::permille(3),
-            RATE_1_USD,
+            // Budget the factory would compute at a $1-per-fee-unit TWAP:
+            // identical to the fee amount (native-denom fees ignore it).
+            fee.as_ref().map(|f| f.amount),
             fee.as_ref(),
             PRICING_POOL,
             quote_denom,
@@ -2247,11 +2258,14 @@ mod cross_denom_fee_tests {
         assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
     }
 
-    /// Reserve does NOT cover the budget: the uncovered part comes out of
-    /// the seed (protocol pays via a smaller seed contribution — never the
-    /// creator), and nothing is remitted.
+    /// Reserve does NOT cover the budget: the swap's `token_in_max` is
+    /// hard-CLAMPED to the reserve — the seed is NEVER touched (that is
+    /// the anti-TWAP-manipulation invariant: a inflated budget cannot
+    /// route committer funds out through the fee swap). The under-sized
+    /// swap either succeeds live (price better than the stale budget) or
+    /// fails inside x/gamm and reverts the whole crossing retryably.
     #[test]
-    fn cross_denom_fee_shortfall_reduces_seed() {
+    fn cross_denom_fee_shortfall_clamps_swap_never_seed() {
         let mut deps = mock_dependencies();
         setup_pool_storage(&mut deps);
         let raised = Uint128::new(100_000_000);
@@ -2267,17 +2281,49 @@ mod cross_denom_fee_tests {
             denom: USDC.to_string(),
             amount: FEE_USDC,
         };
-        let msgs = run_trigger(&mut deps, Some(fee), USDC).unwrap();
+        let msgs = run_trigger(&mut deps, Some(fee.clone()), USDC).unwrap();
 
-        let shortfall = expected_budget() - reserved;
-        let (seed_osmo, _) = SEED_LIQUIDITY.load(&deps.storage).unwrap();
-        assert_eq!(
-            seed_osmo,
-            raised - shortfall,
-            "uncovered swap budget must shrink the seed"
+        // token_in_max = min(budget*margin, reserved) = reserved here.
+        let pool_info = POOL_INFO.load(&deps.storage).unwrap();
+        let expected_swap = swap_exact_amount_out_msg(
+            &pool_info.pool_info.contract_addr,
+            PRICING_POOL,
+            "ubluechip",
+            reserved,
+            &fee,
         );
+        assert_eq!(
+            msgs.fee_swap.as_ref(),
+            Some(&expected_swap),
+            "swap spend must be clamped to the retained reserve"
+        );
+
+        // The FULL raise seeds the pool — no shortfall draw, ever.
+        let (seed_osmo, _) = SEED_LIQUIDITY.load(&deps.storage).unwrap();
+        assert_eq!(seed_osmo, raised, "seed funds must be untouchable by the fee swap");
         assert!(msgs.reserve_remit.is_none(), "no surplus to remit");
-        assert!(msgs.fee_swap.is_some());
+    }
+
+    /// Reserve is EMPTY with a live non-native fee: the crossing must fail
+    /// with the actionable retry error, not emit a zero-max swap.
+    #[test]
+    fn cross_denom_fee_empty_reserve_errors_retryably() {
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        NATIVE_RAISED_FROM_COMMIT
+            .save(&mut deps.storage, &Uint128::new(100_000_000))
+            .unwrap();
+        // BLUECHIP_FEE_RESERVED left unset (zero).
+
+        let fee = Coin {
+            denom: USDC.to_string(),
+            amount: FEE_USDC,
+        };
+        let err = run_trigger(&mut deps, Some(fee), USDC).unwrap_err();
+        assert!(
+            err.to_string().contains("creation-fee reserve is empty"),
+            "expected the empty-reserve retry error, got: {err}"
+        );
     }
 
     /// A fee denom that is neither the native denom nor the pricing quote
@@ -2350,7 +2396,8 @@ mod cross_denom_fee_tests {
             commit_fee,
             Some(&fee),
             "ubluechip",
-            RATE_1_USD,
+            USDC,
+            Some(FEE_USDC),
         )
         .unwrap();
         assert_eq!(
@@ -2372,7 +2419,8 @@ mod cross_denom_fee_tests {
             Uint128::new(400_000),
             Some(&native_fee),
             "ubluechip",
-            RATE_1_USD,
+            USDC,
+            None,
         )
         .unwrap();
         assert_eq!(to_wallet2, Uint128::zero(), "all retained while below target");

@@ -88,6 +88,25 @@ pub enum QueryMsg {
         start_after: Option<u64>,
         limit: Option<u32>,
     },
+    /// Every in-flight 48h-timelocked change, in one read. The timelock's
+    /// security value is community observability — dashboards and watchers
+    /// need a first-class way to ask "what is pending?" without raw-KV
+    /// reads or an event indexer. Empty/None everywhere ⇒ nothing pending.
+    #[returns(PendingChangesResponse)]
+    PendingChanges {},
+}
+
+#[cosmwasm_schema::cw_serde]
+pub struct PendingChangesResponse {
+    /// Pending factory-config replacement (`ProposeConfigUpdate`).
+    pub config: Option<crate::state::PendingConfig>,
+    /// Pending router registration/rotation (`ProposeRouter`).
+    pub router: Option<crate::state::PendingRouter>,
+    /// Pending batched pool wasm upgrade (`ProposePoolUpgrade`).
+    pub pool_upgrade: Option<crate::state::PoolUpgrade>,
+    /// Pending per-pool config updates (`ProposePoolConfigUpdate`),
+    /// as (pool_id, pending) pairs. Capped at 100 entries per read.
+    pub pool_configs: Vec<(u64, crate::state::PendingPoolConfig)>,
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -108,6 +127,23 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::Pools { start_after, limit } => {
             to_json_binary(&query_pools(deps, start_after, limit)?)
+        }
+        QueryMsg::PendingChanges {} => {
+            let pool_configs = crate::state::PENDING_POOL_CONFIG
+                .range(
+                    deps.storage,
+                    None,
+                    None,
+                    cosmwasm_std::Order::Ascending,
+                )
+                .take(100)
+                .collect::<StdResult<Vec<_>>>()?;
+            to_json_binary(&PendingChangesResponse {
+                config: crate::state::PENDING_CONFIG.may_load(deps.storage)?,
+                router: crate::state::PENDING_ROUTER.may_load(deps.storage)?,
+                pool_upgrade: crate::state::PENDING_POOL_UPGRADE.may_load(deps.storage)?,
+                pool_configs,
+            })
         }
     }
 }
@@ -208,9 +244,6 @@ pub fn query_creator_token_info(deps: Deps, pool_id: u64) -> StdResult<CreatorTo
 
 pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) -> StdResult<Binary> {
     match msg {
-        FactoryQueryMsg::ConvertNativeToUsd { amount } => to_json_binary(
-            &crate::usd_price::convert_native_to_usd(deps, &_env, amount)?,
-        ),
         FactoryQueryMsg::EmergencyWithdrawDelaySeconds {} => {
             // Pools call this from `pool-core::execute_emergency_withdraw_initiate`
             // so the delay always tracks the live factory config rather
@@ -231,30 +264,59 @@ pub fn handle_pool_factory_query(deps: Deps, _env: Env, msg: FactoryQueryMsg) ->
                 address: cfg.bluechip_wallet_address,
             })
         }
-        FactoryQueryMsg::CommitContext { amount } => {
-            // Single round-trip for the pool commit path: the USD
-            // valuation plus the live bluechip wallet in one response.
-            // One config load supplies both the Pyth pricing route and
-            // the wallet (`probe_native_usd_rate` is the explicit-config
-            // variant of the rate query, so the config isn't read twice).
+        FactoryQueryMsg::CommitContext { include_fee_budget } => {
+            // Single round-trip for the pool commit path. The threshold is
+            // native-denominated so there is no valuation here — just the
+            // live factory context a commit needs: wallet, gamm fee coin,
+            // and the TWAP-valued native budget for acquiring a non-native
+            // fee at crossing. Fail-closed: a TWAP error propagates and
+            // the commit reverts.
+            //
+            // The crossing charges the chain's LIVE `x/poolmanager` fee
+            // (the pool resolves live params first, this config second),
+            // so BOTH the returned fee coin and the budget sizing track
+            // the live value where available: config drift (admin set a
+            // zero/native fee while the chain charges USDC) or a chain-
+            // governance fee change can then never strand a crossing
+            // without a budget or leave the reserve sized to the wrong
+            // coin. Budget is valued at max(configured, live) of any
+            // quote-denominated fee — over-reserving is safe (surplus is
+            // remitted at crossing), under-reserving bricks retryably.
+            //
+            // `include_fee_budget: Some(false)` (sent on post-threshold
+            // commits, which never fund a fee swap) skips the TWAP read so
+            // a pricing-pool outage cannot block trading-phase commits.
             let cfg = FACTORYINSTANTIATEINFO.load(deps.storage)?;
-            let rate = crate::usd_price::probe_native_usd_rate(deps, &_env, &cfg)?;
+            let cfg_fee = Some(cfg.gamm_pool_creation_fee.clone())
+                .filter(|c| !c.amount.is_zero());
+            let live_fee = crate::fee_twap::query_live_pool_creation_fee(&deps.querier)
+                .filter(|c| !c.amount.is_zero());
+            let quote_fee_amount = [cfg_fee.as_ref(), live_fee.as_ref()]
+                .into_iter()
+                .flatten()
+                .filter(|c| c.denom == cfg.fee_quote_denom)
+                .map(|c| c.amount)
+                .max()
+                .unwrap_or_default();
+            let fee_swap_budget_native = if include_fee_budget.unwrap_or(true)
+                && !quote_fee_amount.is_zero()
+            {
+                Some(crate::fee_twap::fee_swap_budget_native(
+                    deps,
+                    &_env,
+                    &cfg,
+                    quote_fee_amount,
+                )?)
+            } else {
+                None
+            };
             to_json_binary(&pool_factory_interfaces::CommitContextResponse {
-                amount: crate::usd_price::native_to_usd(amount, rate)?,
-                rate_used: rate,
                 timestamp: _env.block.time.seconds(),
                 bluechip_wallet: cfg.bluechip_wallet_address,
-                // Live GAMM creation-fee context (see the response-struct
-                // docs): the fee coin the crossing must cover plus the
-                // pricing route pools use to swap into a non-native fee
-                // denom. A zero-amount fee reads as disabled.
-                gamm_pool_creation_fee: if cfg.gamm_pool_creation_fee.amount.is_zero() {
-                    None
-                } else {
-                    Some(cfg.gamm_pool_creation_fee.clone())
-                },
+                gamm_pool_creation_fee: live_fee.or(cfg_fee),
+                fee_swap_budget_native,
                 pricing_pool_id: cfg.pricing_pool_id,
-                usd_quote_denom: cfg.usd_quote_denom,
+                fee_quote_denom: cfg.fee_quote_denom,
             })
         }
         FactoryQueryMsg::RegisteredRouter {} => {

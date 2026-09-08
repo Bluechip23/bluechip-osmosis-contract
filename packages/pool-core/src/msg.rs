@@ -32,8 +32,8 @@ pub struct PoolConfigUpdate {
     pub lp_fee: Option<Decimal>,
     pub min_commit_interval: Option<u64>,
     /// Per-pool override for the pre-threshold minimum commit value
-    /// (in USD, 6 decimals). When `Some(_)` the pool
-    /// updates `CommitLimitInfo.min_commit_usd_pre_threshold` to the
+    /// (native base units, 6 decimals). When `Some(_)` the pool
+    /// updates `CommitLimitInfo.min_commit_native_pre_threshold` to the
     /// new value; `None` leaves it unchanged. Bounds enforced by the
     /// factory at propose time and re-enforced by the pool's wrapper
     /// dispatch on apply.
@@ -42,20 +42,18 @@ pub struct PoolConfigUpdate {
     /// field existed wire-compatible (the field deserializes as `None`
     /// when absent).
     #[serde(default)]
-    pub min_commit_usd_pre_threshold: Option<Uint128>,
+    pub min_commit_native_pre_threshold: Option<Uint128>,
     /// Per-pool override for the post-threshold minimum commit value
-    /// (in USD, 6 decimals). Same shape and rules as
-    /// `min_commit_usd_pre_threshold` above.
+    /// (native base units, 6 decimals). Same shape and rules as
+    /// `min_commit_native_pre_threshold` above.
     #[serde(default)]
-    pub min_commit_usd_post_threshold: Option<Uint128>,
-    // There is deliberately no per-pool price-source knob. One would
-    // be an admin-compromise vector: a malicious source can return
-    // arbitrary `ConversionResponse.amount`, letting a $5 commit register
-    // as a $25k threshold-cross and capturing the full pool seed +
-    // creator rewards on a single pool. USD pricing is pinned to the
-    // factory (`factory::usd_price`); re-routing, if ever needed, is a
-    // coordinated wasm migration via `UpgradePools` (already
-    // 48h-timelocked + batched), not a per-pool config knob.
+    pub min_commit_native_post_threshold: Option<Uint128>,
+    // There is deliberately no per-pool pricing knob. The threshold is
+    // native-denominated (no valuation at all), and the only price read
+    // left in the protocol — the fee-swap TWAP — is pinned to the
+    // factory's `pricing_pool_id`; re-routing, if ever needed, is a
+    // factory config update (48h-timelocked), not a per-pool knob a
+    // compromised admin could point at a malicious source.
 }
 
 #[cw_serde]

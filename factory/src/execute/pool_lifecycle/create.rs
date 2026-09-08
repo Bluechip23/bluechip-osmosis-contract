@@ -286,9 +286,8 @@ pub(crate) fn execute_create_creator_pool(
     let pool_id = pool_counter + 1;
     POOL_COUNTER.save(deps.storage, &pool_id)?;
 
-    // Phase-2: the pool no longer takes a position NFT (the internal LP
-    // system was removed), so the reply chain collapses to a single step:
-    // instantiate the pool directly, then `finalize_pool` registers it.
+    // The reply chain is a single step: instantiate the pool directly,
+    // then `finalize_pool` registers it.
     // The pool creates its own `factory/{pool_addr}/{subdenom}` denom and
     // seeds a NATIVE Osmosis pool at threshold crossing.
     //
@@ -314,7 +313,7 @@ pub(crate) fn execute_create_creator_pool(
             commit_fee_bluechip: factory_cw20.commit_fee_bluechip,
             commit_fee_creator: factory_cw20.commit_fee_creator,
         },
-        commit_threshold_limit_usd: factory_cw20.commit_threshold_limit_usd,
+        commit_threshold_limit_native: factory_cw20.commit_threshold_limit_native,
         subdenom: subdenom.clone(),
         // Forward the creator's chosen name/symbol/decimals so the
         // pool can register bank denom Metadata at instantiate. Already
@@ -330,8 +329,8 @@ pub(crate) fn execute_create_creator_pool(
         // protocol's own 1% commit fee (into CREATION_FEE_RESERVE_TARGET) so
         // the fee the `x/gamm` module auto-charges at threshold-crossing is
         // paid from protocol revenue — not from the creator, and not from the
-        // AMM seed. This also removes the old collect-from-creator TODO: with
-        // no coin forwarded there is nothing extra to collect at `Create`.
+        // AMM seed. With no coin forwarded there is nothing extra to
+        // collect at `Create`.
         gamm_pool_creation_fee_amount: factory_cw20.gamm_pool_creation_fee.amount,
     };
 

@@ -75,7 +75,7 @@ fn test_propose_and_execute_update_config() {
     let msg = FactoryInstantiate {
         cw721_nft_contract_id: 58,
         factory_admin_address: the_admin.clone(),
-        commit_threshold_limit_usd: Uint128::new(100),
+        commit_threshold_limit_native: Uint128::new(100),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: make_addr("ubluechip"),
@@ -85,7 +85,7 @@ fn test_propose_and_execute_update_config() {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -93,10 +93,6 @@ fn test_propose_and_execute_update_config() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     };
 
     let env = mock_env();
@@ -148,12 +144,6 @@ fn test_propose_and_execute_update_config() {
     let mut later_env = env.clone();
     later_env.block.time = pending.effective_after.plus_seconds(1);
 
-    // The apply step re-probes the Pyth price at the (advanced) apply-time
-    // block. Refresh the mock feed so it isn't stale relative to the new
-    // block time (this test exercises the timelock flow, not staleness).
-    deps.querier
-        .set_pyth_publish_time(later_env.block.time.seconds() - 30);
-
     let res = execute(deps.as_mut(), later_env, info.clone(), early_update_msg).unwrap();
     assert_eq!(res.attributes[0], ("action", "execute_update_config"));
 
@@ -161,25 +151,38 @@ fn test_propose_and_execute_update_config() {
     assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_none());
 }
 
-// The pricing route (pricing_pool_id / usd_quote_denom / window) is
-// live-probed with a real Pyth query at instantiate, propose, AND
-// apply. Without the probe, a typo'd pool id would pass all syntactic
-// validation and surface only as a chain-wide commit outage 48h later.
+/// Fixture variant whose gamm creation fee is denominated in the
+/// NON-native quote denom — the shape that makes the crossing need the
+/// fee-route TWAP, and therefore the shape the live TWAP probe guards.
+fn fee_quote_factory_instantiate_msg() -> FactoryInstantiate {
+    let mut msg = default_factory_instantiate_msg();
+    msg.gamm_pool_creation_fee = cosmwasm_std::Coin {
+        denom: "uusdc".to_string(),
+        amount: Uint128::new(20_000_000),
+    };
+    msg
+}
+
+// The fee-swap route (pricing_pool_id / fee_quote_denom) is live-probed
+// with a real x/twap read at instantiate, propose, AND apply whenever the
+// gamm creation fee is non-native. Without the probe, a typo'd pool id
+// would pass all syntactic validation and surface only as a chain-wide
+// crossing outage 48h later.
 #[test]
 fn instantiate_rejects_dead_pricing_route() {
     let mut deps = mock_dependencies_2(&[]);
     deps.querier
-        .set_pyth_error("pool 999 does not exist or lacks the requested denom pair");
+        .set_twap_error("pool 999 does not exist or lacks the requested denom pair");
 
     let err = instantiate(
         deps.as_mut(),
         mock_env(),
         message_info(&make_addr("deployer"), &[]),
-        default_factory_instantiate_msg(),
+        fee_quote_factory_instantiate_msg(),
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("live Pyth probe"),
+        err.to_string().contains("live TWAP probe"),
         "unexpected error: {}",
         err
     );
@@ -190,11 +193,11 @@ fn propose_rejects_dead_pricing_route() {
     let mut deps = mock_dependencies_2(&[]);
     setup_factory_custom(&mut deps);
 
-    // The proposal REPOINTS the pricing route (here to an unreachable oracle),
-    // which forces the live probe; the dead route is refused at propose time.
-    deps.querier.set_pyth_error("pool not found");
-    let mut proposed = default_factory_instantiate_msg();
-    proposed.pyth_contract_addr = "dead_pyth_oracle".to_string();
+    // The proposal introduces a non-native gamm fee against a dead route;
+    // the live TWAP probe refuses it at propose time.
+    deps.querier.set_twap_error("pool not found");
+    let mut proposed = fee_quote_factory_instantiate_msg();
+    proposed.pricing_pool_id = 999;
 
     let admin_info = message_info(&admin_addr(), &[]);
     let err = execute(
@@ -205,7 +208,7 @@ fn propose_rejects_dead_pricing_route() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("live Pyth probe"),
+        err.to_string().contains("live TWAP probe"),
         "unexpected error: {}",
         err
     );
@@ -219,10 +222,9 @@ fn apply_reprobes_pricing_route() {
 
     let admin_info = message_info(&admin_addr(), &[]);
     let env = mock_env();
-    // Propose a config that TOUCHES pricing (bump the confidence gate) so the
-    // apply-time re-probe will run; the propose-time probe passes (feed healthy).
-    let mut proposed = default_factory_instantiate_msg();
-    proposed.pyth_conf_threshold_bps = 250;
+    // Propose a config with a non-native gamm fee while the route is
+    // healthy — the propose-time probe passes.
+    let proposed = fee_quote_factory_instantiate_msg();
     execute(
         deps.as_mut(),
         env.clone(),
@@ -231,9 +233,9 @@ fn apply_reprobes_pricing_route() {
     )
     .unwrap();
 
-    // The pricing route dies during the 48h window; apply must re-probe
-    // and refuse rather than land a config that bricks every commit.
-    deps.querier.set_pyth_error("pool drained and pruned");
+    // The fee route dies during the 48h window; apply must re-probe and
+    // refuse rather than land a config that bricks every crossing.
+    deps.querier.set_twap_error("pool drained and pruned");
 
     let pending = PENDING_CONFIG.load(&deps.storage).unwrap();
     let mut later_env = env;
@@ -246,7 +248,7 @@ fn apply_reprobes_pricing_route() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("live Pyth probe"),
+        err.to_string().contains("live TWAP probe"),
         "unexpected error: {}",
         err
     );
@@ -257,19 +259,13 @@ fn propose_rejects_wrong_decimals_quote_rate() {
     let mut deps = mock_dependencies_2(&[]);
     setup_factory_custom(&mut deps);
 
-    // A wrong-decimals / wrong-asset feed inflates the rate far past the
-    // OSMO plausibility ceiling. The probe parses the rate through the same
-    // sanity band the commit path uses, so the misconfig dies at propose time.
-    deps.querier
-        .set_pyth_price(10_001_000_000, -6, 0);
+    // A wrong-decimals / wrong-pair pool reports an absurd native-per-fee
+    // TWAP. The probe parses the price through the same plausibility
+    // ceiling the CommitContext budget path uses, so the misconfig dies at
+    // propose time instead of overdrawing fee reserves later.
+    deps.querier.set_twap("2000000.0");
 
-    // The proposal must TOUCH a pricing field for the live probe to run
-    // (a purely non-pricing change is intentionally allowed to skip it — see
-    // `propose_nonpricing_change_skips_probe_during_feed_outage`). Changing the
-    // confidence gate is a probe-input change, so the probe fires and the
-    // over-ceiling rate is rejected.
-    let mut proposed = default_factory_instantiate_msg();
-    proposed.pyth_conf_threshold_bps = 250;
+    let proposed = fee_quote_factory_instantiate_msg();
 
     let admin_info = message_info(&admin_addr(), &[]);
     let err = execute(
@@ -288,50 +284,49 @@ fn propose_rejects_wrong_decimals_quote_rate() {
 }
 
 #[test]
-fn propose_nonpricing_change_skips_probe_during_feed_outage() {
+fn twap_outage_blocks_config_but_bundled_repoint_recovers() {
     let mut deps = mock_dependencies_2(&[]);
-    setup_factory_custom(&mut deps); // instantiate probes with the healthy default price
+    setup_factory_custom(&mut deps);
 
-    // Simulate a lapsed price keeper: every feed read now fails.
-    deps.querier.set_pyth_error("keeper lapsed: feed unreadable");
+    // Kill the TWAP route. The probe now runs UNCONDITIONALLY — even for
+    // a native/zero configured fee — because budget sizing tracks the
+    // chain's LIVE x/poolmanager fee, which governance can flip to the
+    // quote denom at any time: a garbage route must fail HERE, at config
+    // time, not detonate at commit time after such a flip.
+    deps.querier.set_twap_error("pricing pool pruned");
 
-    // A NON-pricing change (rotate the protocol wallet after a key compromise)
-    // must still go through — the live probe is skipped because no pricing
-    // field changed, so a feed outage cannot block the recovery action.
     let mut proposed = default_factory_instantiate_msg();
     proposed.bluechip_wallet_address = make_addr("rotated_wallet");
 
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::ProposeConfigUpdate {
+            config: proposed.clone(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("failed live TWAP probe"),
+        "dead route must fail the probe, got: {err}"
+    );
+    assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_none());
+
+    // The escape hatch when the pricing pool itself is the casualty: the
+    // probe validates the PROPOSED config, so bundling a repoint to a
+    // healthy pool into the same proposal (here: the mock route coming
+    // back) lets the wallet rotation through — a dead pricing pool can
+    // delay an admin change, never permanently wedge it.
+    deps.querier.set_twap(crate::mock_querier::DEFAULT_MOCK_TWAP_PRICE);
     execute(
         deps.as_mut(),
         mock_env(),
         message_info(&admin_addr(), &[]),
         ExecuteMsg::ProposeConfigUpdate { config: proposed },
     )
-    .expect("non-pricing change must not be blocked by a feed outage");
+    .expect("healthy proposed route must let the rotation through");
     assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_some());
-
-    // Sanity: a PRICING change during the same outage IS still rejected (the
-    // probe runs). Cancel the pending proposal first, as the handler requires.
-    execute(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&admin_addr(), &[]),
-        ExecuteMsg::CancelConfigUpdate {},
-    )
-    .unwrap();
-    let mut pricing = default_factory_instantiate_msg();
-    pricing.pyth_conf_threshold_bps = 250;
-    let err = execute(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&admin_addr(), &[]),
-        ExecuteMsg::ProposeConfigUpdate { config: pricing },
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("live Pyth probe"),
-        "pricing change during outage must still be probed: {err}"
-    );
 }
 
 #[test]
@@ -984,7 +979,7 @@ fn setup_factory_custom(deps: &mut OwnedDeps<MockStorage, MockApi, WasmMockQueri
 fn default_factory_instantiate_msg() -> FactoryInstantiate {
     FactoryInstantiate {
         factory_admin_address: admin_addr(),
-        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        commit_threshold_limit_native: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         cw721_nft_contract_id: 20,
         create_pool_wasm_contract_id: 30,
@@ -995,7 +990,7 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -1003,10 +998,6 @@ fn default_factory_instantiate_msg() -> FactoryInstantiate {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     }
 }
 
@@ -1092,4 +1083,184 @@ fn test_upgrade_retry_queue_rotates_when_head_stays_paused() {
         post_retry.pending_retry, expected_rotated,
         "after retry with all head pools still paused, queue must rotate so pool 11 (previously at the back) moves to the front"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Timelock-governance hardening: denom immutability, apply-window expiry,
+// pending-change observability, and live-fee budget sizing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bluechip_denom_is_immutable_on_live_factory() {
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
+
+    let mut proposed = default_factory_instantiate_msg();
+    proposed.bluechip_denom = "uother".to_string();
+    // Keep the fee-route probe satisfiable so the ONLY failure is the pin.
+    proposed.fee_quote_denom = "uusdc".to_string();
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::ProposeConfigUpdate { config: proposed },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("immutable"),
+        "changing bluechip_denom must be rejected at propose, got: {err}"
+    );
+    assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_none());
+}
+
+#[test]
+fn stale_pending_config_expires_after_apply_window() {
+    use crate::state::{ADMIN_APPLY_WINDOW_SECONDS, ADMIN_TIMELOCK_SECONDS};
+
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
+
+    let mut proposed = default_factory_instantiate_msg();
+    proposed.bluechip_wallet_address = make_addr("rotated_wallet");
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::ProposeConfigUpdate { config: proposed },
+    )
+    .unwrap();
+
+    // One second past the apply window: the stale proposal must be
+    // rejected — "propose quietly, wait for attention to decay, apply"
+    // is exactly what the window exists to prevent.
+    let mut env = mock_env();
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(ADMIN_TIMELOCK_SECONDS + ADMIN_APPLY_WINDOW_SECONDS + 1);
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::UpdateConfig {},
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("expired"),
+        "stale apply must be rejected, got: {err}"
+    );
+
+    // Inside the window the same pending config applies cleanly.
+    let mut env = mock_env();
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(ADMIN_TIMELOCK_SECONDS + ADMIN_APPLY_WINDOW_SECONDS - 1);
+    execute(
+        deps.as_mut(),
+        env,
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::UpdateConfig {},
+    )
+    .expect("apply inside the window must land");
+    assert!(PENDING_CONFIG.may_load(&deps.storage).unwrap().is_none());
+}
+
+#[test]
+fn pending_changes_query_surfaces_all_pending() {
+    use crate::query::{query, PendingChangesResponse, QueryMsg};
+
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
+
+    // Nothing pending → all-empty response.
+    let bin = query(deps.as_ref(), mock_env(), QueryMsg::PendingChanges {}).unwrap();
+    let resp: PendingChangesResponse = cosmwasm_std::from_json(&bin).unwrap();
+    assert!(resp.config.is_none() && resp.router.is_none());
+    assert!(resp.pool_upgrade.is_none() && resp.pool_configs.is_empty());
+
+    // Propose a config change + a router registration.
+    let mut proposed = default_factory_instantiate_msg();
+    proposed.bluechip_wallet_address = make_addr("rotated_wallet");
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::ProposeConfigUpdate { config: proposed },
+    )
+    .unwrap();
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin_addr(), &[]),
+        ExecuteMsg::ProposeRouter {
+            router: make_addr("router").to_string(),
+        },
+    )
+    .unwrap();
+
+    let bin = query(deps.as_ref(), mock_env(), QueryMsg::PendingChanges {}).unwrap();
+    let resp: PendingChangesResponse = cosmwasm_std::from_json(&bin).unwrap();
+    let cfg = resp.config.expect("pending config visible");
+    assert_eq!(cfg.new_config.bluechip_wallet_address, make_addr("rotated_wallet"));
+    assert_eq!(resp.router.expect("pending router visible").router, make_addr("router"));
+}
+
+#[test]
+fn commit_context_budget_tracks_live_chain_fee() {
+    use crate::query::{query, QueryMsg};
+    use pool_factory_interfaces::{CommitContextResponse, FactoryQueryMsg};
+
+    let mut deps = mock_dependencies_2(&[]);
+    setup_factory_custom(&mut deps);
+
+    // Configured gamm fee is ZERO (the default fixture) but the CHAIN
+    // charges 20 uusdc — the drift case that used to strand crossings.
+    deps.querier.set_live_pool_creation_fee("uusdc", 20_000_000);
+    deps.querier.set_twap("3.0");
+
+    let bin = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::PoolFactoryQuery(FactoryQueryMsg::CommitContext {
+            include_fee_budget: None,
+        }),
+    )
+    .unwrap();
+    let ctx: CommitContextResponse = cosmwasm_std::from_json(&bin).unwrap();
+    let fee = ctx.gamm_pool_creation_fee.expect("live fee surfaced");
+    assert_eq!(fee.denom, "uusdc");
+    assert_eq!(fee.amount, Uint128::new(20_000_000));
+    assert_eq!(
+        ctx.fee_swap_budget_native,
+        Some(Uint128::new(60_000_000)),
+        "budget = live fee 20e6 × TWAP 3.0"
+    );
+
+    // Post-threshold callers skip the TWAP read entirely.
+    let bin = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::PoolFactoryQuery(FactoryQueryMsg::CommitContext {
+            include_fee_budget: Some(false),
+        }),
+    )
+    .unwrap();
+    let ctx: CommitContextResponse = cosmwasm_std::from_json(&bin).unwrap();
+    assert!(ctx.fee_swap_budget_native.is_none());
+    assert!(ctx.gamm_pool_creation_fee.is_some(), "fee coin still served");
+
+    // And a TWAP outage must NOT block the budget-skipping path.
+    deps.querier.set_twap_error("pricing pool pruned");
+    let bin = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::PoolFactoryQuery(FactoryQueryMsg::CommitContext {
+            include_fee_budget: Some(false),
+        }),
+    )
+    .unwrap();
+    let ctx: CommitContextResponse = cosmwasm_std::from_json(&bin).unwrap();
+    assert!(ctx.fee_swap_budget_native.is_none());
 }

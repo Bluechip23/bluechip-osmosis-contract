@@ -59,9 +59,9 @@ script tag, and the only thing you edit is your pool address:
 ```html
 <script src="https://cdn.jsdelivr.net/gh/Bluechip23/bluechipblockexplorer@main/widget/dist/bluechip-widget.min.js"></script>
 
-<div data-bluechip-subscribe data-pool="osmo1YOUR_POOL_ADDRESS" data-amount="25"></div>
+<div data-bluechip-subscribe data-pool="osmo1YOUR_POOL_ADDRESS" data-amount="115"></div>
 
-<div data-bluechip-gate data-pool="osmo1YOUR_POOL_ADDRESS" data-min-usd="5">
+<div data-bluechip-gate data-pool="osmo1YOUR_POOL_ADDRESS" data-min-osmo="115">
     Subscriber-only content.
 </div>
 ```
@@ -234,9 +234,11 @@ async function connectKeplrWallet() {
 
 ## 4. Subscribe Button (Commit)
 
-The **Subscribe** button lets your fans commit OSMO to your creator pool. This is how people support you. Before the pool reaches its USD threshold ($25,000 by default), commits are recorded in a ledger. After the threshold is crossed, commits are swapped through the native Osmosis pool and your supporter receives your creator tokens.
+The **Subscribe** button lets your fans commit OSMO to your creator pool. This is how people support you. Before the pool reaches its commit threshold (**500,000 OSMO** for pools created under the current factory config — a value governance retunes over time as market conditions change, applying to pools created after the change), commits are recorded in a ledger. After the threshold is crossed, commits are swapped through the native Osmosis pool and your supporter receives your creator tokens. A commit's value toward the threshold is simply the OSMO attached to it — there is no price conversion involved.
 
 **A 6% fee is deducted:** 1% goes to the BlueChip protocol, 5% goes to you the creator.
+
+**Minimum commit:** 115 OSMO before the threshold, 25 OSMO after it (per-pool defaults).
 
 > **Post-threshold commits require a `belief_price`.** Once the pool is
 > active, a commit is a market buy — and the pool **rejects**
@@ -400,7 +402,7 @@ async function handleSubscribe() {
 
 ## 5. Buy Button (Swap OSMO for Creator Tokens)
 
-The **Buy** button lets people swap their OSMO for your creator tokens. This only works **after** the pool has crossed the USD threshold and its native Osmosis pool exists. (Since it's a normal Osmosis pool, buyers can also just trade it on [app.osmosis.zone](https://app.osmosis.zone) — the contract's `simple_swap` is a convenience venue with the same result.)
+The **Buy** button lets people swap their OSMO for your creator tokens. This only works **after** the pool has crossed its OSMO commit threshold and its native Osmosis pool exists. (Since it's a normal Osmosis pool, buyers can also just trade it on [app.osmosis.zone](https://app.osmosis.zone) — the contract's `simple_swap` is a convenience venue with the same result.)
 
 ```html
 <!-- ============================================================ -->
@@ -777,7 +779,7 @@ pool's reserves queries (Section 10).
 
 The factory exposes a single creation path — the commit (creator) pool:
 
-- **Commit (creator) pool** — factory `create` message. The new pool mints its own **TokenFactory denom** (`factory/{pool_address}/{subdenom}`) and starts in a funding (commit) phase. Once the configured USD threshold is crossed, 1,200,000 creator tokens are minted and distributed:
+- **Commit (creator) pool** — factory `create` message. The new pool mints its own **TokenFactory denom** (`factory/{pool_address}/{subdenom}`) and starts in a funding (commit) phase. Once the configured OSMO commit threshold is crossed, 1,200,000 creator tokens are minted and distributed:
    - **500,000** to early subscribers (proportional to their commits)
    - **325,000** to you, the creator
    - **25,000** to the BlueChip protocol
@@ -811,7 +813,7 @@ The factory exposes a single creation path — the commit (creator) pool:
         <ul style="margin:8px 0 0 0;padding-left:20px;">
             <li>Choose a name and ticker for your token</li>
             <li>Your connected wallet becomes the creator wallet — <strong>DO NOT LOSE IT</strong></li>
-            <li>Pool requires $25,000 USD in commits (paid in OSMO) to activate</li>
+            <li>Pool requires 500,000 OSMO in commits to activate (current factory config; governance retunes this over time for newly created pools)</li>
             <li>You earn 5% of every commit transaction</li>
             <li>Once threshold is met, a native Osmosis pool is created and your token becomes tradeable</li>
             <li>You receive 325,000 creator tokens at threshold crossing</li>
@@ -837,7 +839,7 @@ The factory exposes a single creation path — the commit (creator) pool:
     <div style="padding:12px;background:#e3f2fd;border:1px solid #90caf9;border-radius:8px;
                 margin-bottom:16px;font-size:13px;">
         <strong>Sourced from factory config:</strong><br>
-        &bull; Commit threshold, fee splits, threshold-payout amounts, lock caps, x/twap pricing config<br>
+        &bull; Commit threshold (in OSMO), fee splits, threshold-payout amounts, lock caps, fee-swap pool config<br>
         &bull; Creator-token decimals are pinned to 6; mint cap pinned at 1,200,000 tokens<br>
         &bull; The flat OSMO creation fee is read live and attached automatically below
     </div>
@@ -969,13 +971,15 @@ async function checkPoolStatus(poolAddress) {
     });
 
     // status is either "fully_committed" or { in_progress: { raised: "...", target: "..." } }
+    // raised/target are micro-OSMO (6 decimals): the gross OSMO committed
+    // so far, and the pool's OSMO commit threshold.
     if (status === "fully_committed") {
         console.log("Pool is active! Trading is enabled.");
         return true;
     } else {
         var raised = parseInt(status.in_progress.raised) / 1000000;
         var target = parseInt(status.in_progress.target) / 1000000;
-        console.log("Pool funding: $" + raised.toFixed(2) + " / $" + target.toFixed(2));
+        console.log("Pool funding: " + raised.toFixed(2) + " / " + target.toFixed(2) + " OSMO");
         return false;
     }
 }
@@ -1017,10 +1021,12 @@ async function getSubscriptionInfo(poolAddress, walletAddress) {
         committing_info: { wallet: walletAddress }
     });
 
-    // Returns null if never committed, or a Committing object
+    // Returns null if never committed, or a Committing object.
+    // total_paid_native is the wallet's cumulative OSMO committed (gross,
+    // before the 6% fee), in micro-OSMO. total_paid_bluechip carries the
+    // same value — kept for response-shape stability.
     if (info) {
-        console.log("Total paid (USD):",  parseInt(info.total_paid_usd) / 1000000);
-        console.log("Total paid (OSMO):", parseInt(info.total_paid_bluechip) / 1000000);
+        console.log("Total committed (OSMO):", parseInt(info.total_paid_native) / 1000000);
     } else {
         console.log("User has not subscribed yet.");
     }
@@ -1111,16 +1117,6 @@ async function listPools() {
     // each entry: { pool_id, pool_addr, pool_token_info: [bluechip, creator_token] }
     return all;
 }
-
-// Convert an OSMO amount to USD with the exact same x/twap conversion
-// the pools use (micro-units in, micro-USD out):
-async function osmoToUsd(microOsmo) {
-    var client = await CosmWasmClient.CosmWasmClient.connect(BLUECHIP_CONFIG.rpc);
-    var res = await client.queryContractSmart(BLUECHIP_CONFIG.factoryAddress, {
-        pool_factory_query: { convert_native_to_usd: { amount: microOsmo } }
-    });
-    return res;
-}
 </script>
 ```
 
@@ -1128,7 +1124,7 @@ async function osmoToUsd(microOsmo) {
 
 ## 11. Granting Special Privileges to Committed Users
 
-Every commit writes a permanent, public record to your pool's ledger: who committed, how much (in USD and OSMO), and when. After the threshold, supporters also receive your creator tokens. Your website can read either of these to give supporters **special privileges** — subscriber-only pages, download links, badges, Discord roles, early access, anything you can gate.
+Every commit writes a permanent, public record to your pool's ledger: who committed, how much OSMO, and when. After the threshold, supporters also receive your creator tokens. Your website can read either of these to give supporters **special privileges** — subscriber-only pages, download links, badges, Discord roles, early access, anything you can gate.
 
 Because every stack is different (static site, WordPress, Node, Discord bot...), this section shows three building blocks, from simplest to most robust. They are plain JavaScript and standard HTTP/WebSocket calls, so they port to any environment.
 
@@ -1140,9 +1136,10 @@ Read the connected wallet's commit record with the `committing_info` query and s
 
 ```html
 <script>
-// Tier thresholds in micro-USD (6 decimals): $5,000 / $500.
-var TIER_GOLD_MICRO_USD   = 5000000000;
-var TIER_SILVER_MICRO_USD = 500000000;
+// Tier thresholds in micro-OSMO (6 decimals): 10,000 / 1,000 OSMO.
+// These are YOUR site's policy — pick whatever cutoffs you like.
+var TIER_GOLD_MICRO_OSMO   = 10000000000;
+var TIER_SILVER_MICRO_OSMO = 1000000000;
 
 // How recent the last commit must be to count as an "active"
 // subscriber. The chain never expires commit records — recency
@@ -1162,11 +1159,12 @@ async function getSupporterStatus(walletAddress) {
         return { isSupporter: false, tier: "none", isActive: false };
     }
 
-    // total_paid_usd is micro-USD (1000000 = $1.00), as a string.
-    var totalUsd = parseInt(info.total_paid_usd);
+    // total_paid_native is micro-OSMO (1000000 = 1 OSMO), as a string —
+    // the wallet's cumulative gross OSMO committed to this pool.
+    var totalOsmo = parseInt(info.total_paid_native);
     var tier = "bronze";
-    if (totalUsd >= TIER_GOLD_MICRO_USD)        tier = "gold";
-    else if (totalUsd >= TIER_SILVER_MICRO_USD) tier = "silver";
+    if (totalOsmo >= TIER_GOLD_MICRO_OSMO)        tier = "gold";
+    else if (totalOsmo >= TIER_SILVER_MICRO_OSMO) tier = "silver";
 
     // last_committed is a timestamp in NANOSECONDS (as a string).
     var lastCommitMs = parseInt(info.last_committed) / 1000000;
@@ -1177,7 +1175,7 @@ async function getSupporterStatus(walletAddress) {
         isSupporter: true,
         tier: tier,
         isActive: isActive,
-        totalPaidUsd: totalUsd / 1000000,
+        totalPaidOsmo: totalOsmo / 1000000,
         lastCommitted: new Date(lastCommitMs)
     };
 }
@@ -1307,14 +1305,15 @@ async function handleVerify(req, res) {
     const record = await queryCommitRecord(address);
     if (!record) return res.json({ role: "visitor" });
 
-    // 4. Map the record to YOUR privileges. total_paid_usd is micro-USD.
-    const totalUsd = Number(record.total_paid_usd) / 1e6;
-    const role = totalUsd >= 5000 ? "gold"
-               : totalUsd >= 500  ? "silver"
+    // 4. Map the record to YOUR privileges. total_paid_native is the
+    //    wallet's cumulative gross OSMO committed, in micro-OSMO.
+    const totalOsmo = Number(record.total_paid_native) / 1e6;
+    const role = totalOsmo >= 10000 ? "gold"
+               : totalOsmo >= 1000  ? "silver"
                : "bronze";
 
     // 5. Issue your normal session (cookie / JWT / Discord role grant...).
-    res.json({ role: role, totalUsd: totalUsd, lastCommitted: record.last_committed });
+    res.json({ role: role, totalOsmo: totalOsmo, lastCommitted: record.last_committed });
 }
 ```
 
@@ -1332,12 +1331,13 @@ Every commit emits a `wasm` event with these attributes:
 | `commit_amount_bluechip` | OSMO committed, in micro-units |
 | `total_commit_count` | running commit counter for the pool |
 | `pool_contract`, `block_height`, `block_time` | context fields |
-| `total_raised_after` / `total_bluechip_raised_after` | pool totals after this commit (funding phase; USD and net OSMO, micro-units) |
+| `total_raised_after` / `total_bluechip_raised_after` | pool OSMO totals after this commit (funding phase; gross and net-of-fee, micro-units) |
 
-> **Note:** events carry the **OSMO** amount only — `commit_amount_usd` is
-> no longer emitted. If you need the USD value of a specific commit, query
-> `committing_info` for the wallet (its `last_payment_usd` field) or
-> convert via the factory's `convert_native_to_usd`.
+> **Note:** `total_raised_after` is the gross OSMO committed (what counts
+> toward the threshold); `total_bluechip_raised_after` is the net OSMO the
+> pool retains after the 6% fee split. For a single wallet's cumulative
+> record, query `committing_info` (its `total_paid_native` /
+> `last_payment_native` fields, in micro-OSMO).
 
 ```javascript
 var RPC_WS = BLUECHIP_CONFIG.rpc.replace(/^http/, "ws") + "/websocket";
@@ -1388,7 +1388,7 @@ watchCommits(function (commit) {
 //        AND wasm._contract_address='<POOL>'&order_by=ORDER_BY_DESC&limit=20
 ```
 
-> **Design notes:** amounts are micro-units (`total_paid_usd` of `5000000000` = $5,000); `last_committed` is in nanoseconds; commit records never expire on-chain, so "active subscriber" windows (e.g. committed within 30 days) are your site's policy, enforced from `last_committed`. For token-balance-based perks instead, read the wallet's **bank balance** of the creator token's `factory/...` denom (see Section 10) — creator tokens are native coins, so there is no CW20 `balance` query.
+> **Design notes:** amounts are micro-OSMO (`total_paid_native` of `5000000000` = 5,000 OSMO); `last_committed` is in nanoseconds; commit records never expire on-chain, so "active subscriber" windows (e.g. committed within 30 days) are your site's policy, enforced from `last_committed`. For token-balance-based perks instead, read the wallet's **bank balance** of the creator token's `factory/...` denom (see Section 10) — creator tokens are native coins, so there is no CW20 `balance` query.
 
 ---
 
@@ -1540,15 +1540,15 @@ Here's a complete, self-contained HTML page you can save and use. It includes wa
 | **"out of gas"** | Increase the gas limit in the `execute()` call (e.g., change `"500000"` to `"800000"`) |
 | **"insufficient funds"** | You need more OSMO. Check your balance in Keplr |
 | **"Belief price required" (post-threshold commit)** | Once the pool is active, commits must carry a `belief_price`. Take a live `simulation` quote and set `belief_price = offer / expected_out` (see Section 4) |
-| **"Invalid creation funds: ... Send exactly one denom"** | Create-pool requires exactly one coin entry of `uosmo`. Remove any IBC / tokenfactory / stray denoms from the `funds` array before re-broadcasting |
+| **"Invalid commit-pool creation funds: ... Send exactly one denom"** | Create-pool requires exactly one coin entry of `uosmo`. Remove any IBC / tokenfactory / stray denoms from the `funds` array before re-broadcasting |
 | **"Insufficient commit-pool creation fee"** | The attached OSMO is below the factory's flat `pool_creation_fee`. Query `{ factory: {} }` for the live value and re-attach |
 | **"creation fee is disabled; do not attach any funds"** | The factory currently has the creation fee set to zero. Pass an empty `funds` array on these calls |
 | **"rate limited"** | Commits have a 13-second cooldown per wallet. Wait and try again |
 | **"Route exceeds the maximum of 3 hops"** | The router caps routes at 3 hops. Any creator-token pair needs at most 2 (token → OSMO → token) |
 | **"...not registered with the factory" (router)** | A hop's pool address is not in the factory registry. Use addresses from the factory's `pools` query |
 | **Router swap reverts on minimum_receive** | Price moved past your tolerance between simulation and execution. Re-quote and retry, or widen slippage slightly |
-| **"Commit too small: $X USD (minimum $Y USD ...)"** | Each pool enforces a minimum commit value in USD (separate pre- and post-threshold floors). Increase the amount |
-| **"Pool is not fully committed"** | Buy/Sell only work after the pool crosses the USD threshold. Use Subscribe instead |
+| **"Commit too small"** | Each pool enforces a minimum commit in OSMO: 115 OSMO pre-threshold, 25 OSMO post-threshold by default (the error prints the amounts in micro-OSMO base units). Increase the amount |
+| **"Pool is not fully committed"** | Buy/Sell only work after the pool crosses its OSMO commit threshold. Use Subscribe instead |
 | **Swap refunded, pool paused ("circuit breaker")** | The pool's liquidity breaker latched (a reserve fell below 25% of its seed). Your offer was refunded in the same tx; trading resumes when the admin unpauses |
 | **Calls to `deposit_liquidity` / `collect_fees` / `position` fail** | Those entry points no longer exist — liquidity lives in the native Osmosis pool. LP directly on [app.osmosis.zone](https://app.osmosis.zone) (see Section 8) |
 | **Transaction stuck / pending** | The transaction may still be processing. Check the tx hash on [Mintscan](https://www.mintscan.io/osmosis) or another Osmosis explorer |

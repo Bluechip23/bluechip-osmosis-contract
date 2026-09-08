@@ -54,7 +54,8 @@ pub const REGISTRY_BACKFILL_DONE: Item<bool> = Item::new("registry_backfill_done
 // that exists must appear in all three. Always go through `register_pool`
 // rather than touching them individually.
 // - POOLS_BY_ID:               pool_id  -> PoolDetails (token info, addresses)
-// - POOLS_BY_CONTRACT_ADDRESS: pool addr -> snapshot used by queries
+// - POOLS_BY_CONTRACT_ADDRESS: pool addr -> registration-time snapshot;
+//   consistency-checked at registration, not served by any query
 // - PAIRS:                     canonical (asset_a, asset_b) key -> pool_id.
 // Single-pool-per-pair guard. The Uniswap-style invariant: at most one
 // pool exists per (asset_a, asset_b) tuple. Without it, any sender can
@@ -86,6 +87,15 @@ pub const ADMIN_TIMELOCK_SECONDS: u64 = 86_400 * 2;
 // `--features integration_short_timing` shortens to 120s for local integration tests.
 #[cfg(feature = "integration_short_timing")]
 pub const ADMIN_TIMELOCK_SECONDS: u64 = 120;
+
+/// How long after `effective_after` a pending timelocked change stays
+/// applicable. The 48h window's security value is community observability;
+/// an apply months after attention has decayed defeats it ("propose
+/// quietly, wait, apply"). Past this window the apply is rejected and the
+/// admin must re-propose — restarting the observable clock. 7 days gives
+/// generous operational slack (weekends, multisig coordination) while
+/// keeping the propose-to-apply distance human-attention-sized.
+pub const ADMIN_APPLY_WINDOW_SECONDS: u64 = 86_400 * 7;
 pub const PENDING_POOL_UPGRADE: Item<PoolUpgrade> = Item::new("pending_upgrade");
 
 /// Per-pool flag set the first (and only) time the pool's
@@ -139,11 +149,12 @@ pub struct PendingPoolConfig {
 pub struct FactoryInstantiate {
     pub factory_admin_address: Addr,
     /// Commit threshold each creator pool must raise before it seeds its
-    /// AMM and opens for swaps. USD-denominated, 6 decimals
-    /// (`25_000_000_000` = $25,000). Commits are made in `bluechip_denom`
-    /// and valued against this target via the Pyth native/USD price
-    /// (see `crate::usd_price`).
-    pub commit_threshold_limit_usd: Uint128,
+    /// AMM and opens for swaps. NATIVE-denominated: base units of
+    /// `bluechip_denom` (`500_000_000_000` = 500,000 OSMO). A commit's value
+    /// toward the threshold IS its attached native amount — there is no
+    /// price oracle anywhere in the protocol, so no external price feed
+    /// or thin-liquidity TWAP can influence when a pool crosses.
+    pub commit_threshold_limit_native: Uint128,
     pub cw20_token_contract_id: u64,
     pub cw721_nft_contract_id: u64,
     pub create_pool_wasm_contract_id: u64,
@@ -162,53 +173,20 @@ pub struct FactoryInstantiate {
     /// having every downstream commit path treat that denom's
     /// balance as the real pairing asset.
     pub bluechip_denom: String,
-    /// Osmosis pool id used ONLY as the cross-denom fee-swap EXECUTION
-    /// route at threshold crossing — it acquires the chain's
-    /// `usd_quote_denom`-denominated `gamm_pool_creation_fee` by swapping
-    /// `bluechip_denom` → `usd_quote_denom` through this pool. It is NO
-    /// LONGER a price source (USD pricing is via Pyth below); the fee swap
-    /// is tiny (~$20) so this pool need only hold enough liquidity to fill
-    /// that, not to resist price manipulation. When the gamm fee is
-    /// denominated in the native denom this pool is unused.
+    /// Osmosis pool id used ONLY for the cross-denom GAMM-creation-fee at
+    /// threshold crossing: (a) its arithmetic TWAP (window
+    /// `FEE_TWAP_WINDOW_SECONDS`) values the fee in native units to budget
+    /// the swap, and (b) the exact-out swap executes through it. The fee is
+    /// tiny (~$20) and a manipulated TWAP can at worst revert the crossing
+    /// (recoverable) or spend the pool-side 1%-retention reserve (the swap's
+    /// `token_in_max` is hard-clamped to it — protocol revenue, never
+    /// committer funds) — a liveness bound, never a threshold-pricing
+    /// surface. When the gamm fee is denominated in the native denom this
+    /// pool is unused.
     pub pricing_pool_id: u64,
-    /// The USD-stable quote denom of the `gamm_pool_creation_fee` acquired
-    /// through `pricing_pool_id` at crossing (e.g. Noble USDC's IBC denom).
-    pub usd_quote_denom: String,
-    /// Address of the Pyth CW contract to read the native/USD price from.
-    /// The USD valuation of every commit is `price(pyth) × amount`. Read
-    /// live at instantiate/propose/apply so a typo surfaces immediately.
-    ///
-    /// `#[serde(default)]` (empty string) lets a factory upgraded in place
-    /// from a pre-Pyth serialized config still deserialize instead of
-    /// bricking every config load. An empty value fails CLOSED at the read
-    /// site (`usd_price::probe_pyth_usd_rate` rejects it), so a migrated
-    /// factory cannot value commits until the admin proposes a config update
-    /// that sets the real contract; a fresh `instantiate` always supplies
-    /// and validates a non-empty value.
-    #[serde(default)]
-    pub pyth_contract_addr: String,
-    /// The Pyth price-feed id (64-hex, no `0x`) for `bluechip_denom`/USD
-    /// (e.g. the OSMO/USD feed). The read verifies the returned feed id
-    /// matches this before trusting the price. `#[serde(default)]` for the
-    /// same migration reason as `pyth_contract_addr` above, and empty fails
-    /// closed at the read site.
-    #[serde(default)]
-    pub pyth_native_usd_feed_id: String,
-    /// Maximum acceptable age (seconds) of the Pyth price vs block time —
-    /// the staleness gate. A price older than this fails closed, so a
-    /// lagging price keeper halts commits rather than mispricing them.
-    /// Bounds `[MAX_PYTH_STALENESS_MIN_SECONDS, MAX_PYTH_STALENESS_MAX_SECONDS]`;
-    /// `#[serde(default)]` fills `DEFAULT_MAX_PYTH_STALENESS_SECONDS` (300).
-    #[serde(default = "default_max_pyth_staleness_seconds")]
-    pub max_pyth_staleness_seconds: u64,
-    /// Confidence-interval gate in basis points of price. A Pyth price
-    /// whose `conf/price` exceeds this is rejected (too dispersed). Clamped
-    /// to `[PYTH_CONF_THRESHOLD_BPS_MIN, PYTH_CONF_THRESHOLD_BPS_MAX]` at
-    /// read time so neither a mis-set value nor an unset slot can disable
-    /// the check. `#[serde(default)]` fills `PYTH_CONF_THRESHOLD_BPS_DEFAULT`
-    /// (200 = 2%).
-    #[serde(default = "default_pyth_conf_threshold_bps")]
-    pub pyth_conf_threshold_bps: u16,
+    /// The non-native quote denom of the `gamm_pool_creation_fee` acquired
+    /// through `pricing_pool_id` at crossing (osmosis-1: alloyed USDC).
+    pub fee_quote_denom: String,
     /// Flat fee charged on every `Create`
     /// call, denominated in base units of `bluechip_denom`.
     /// Forwarded to `bluechip_wallet_address`; surplus refunded to the
@@ -220,12 +198,12 @@ pub struct FactoryInstantiate {
     pub pool_creation_fee: Uint128,
     /// GAMM pool-creation fee that the chain's `x/gamm` module auto-charges
     /// when `MsgCreateBalancerPool` executes at threshold crossing. The
-    /// pool contract must hold this coin at that moment, so the factory
-    /// collects it from the creator at `Create` time (IN ADDITION to the
-    /// flat `pool_creation_fee` above) and forwards it into the pool's
-    /// instantiate `funds`. The pool holds it until threshold crossing.
-    /// Zero amount disables collection (e.g. test environments where the
-    /// gamm create fee is waived).
+    /// creator NEVER pays it: the pool is instantiated with no funds and
+    /// covers the fee from its 1% commit-fee retention (the reserve sized
+    /// by `CommitContext`'s fee budget). This coin is the factory's
+    /// configured expectation of that fee; budget sizing takes the max of
+    /// it and the chain's LIVE `x/poolmanager` value. A zero amount is
+    /// allowed — sizing then keys off the live fee alone.
     ///
     /// `#[serde(default)]` lets pre-this-field factory records deserialize
     /// with an empty (zero) coin.
@@ -286,39 +264,14 @@ pub fn default_emergency_withdraw_delay_seconds() -> u64 {
     86_400
 }
 
-pub fn default_max_pyth_staleness_seconds() -> u64 {
-    crate::usd_price::DEFAULT_MAX_PYTH_STALENESS_SECONDS
-}
-
-pub fn default_pyth_conf_threshold_bps() -> u16 {
-    crate::usd_price::PYTH_CONF_THRESHOLD_BPS_DEFAULT
-}
-
-/// The effective Pyth confidence-interval gate (bps), clamped to the
-/// allowed range so neither a mis-set config value nor a future edit can
-/// disable the check (config validation also range-checks it at
-/// propose/instantiate; this clamp is defense-in-depth for the runtime
-/// read and any direct state write / migration). Read by the live Pyth
-/// valuation.
-pub fn effective_pyth_conf_bps(config: &FactoryInstantiate) -> u16 {
-    config.pyth_conf_threshold_bps.clamp(
-        crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MIN,
-        crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MAX,
-    )
-}
-
-/// The effective staleness gate (seconds), clamped to the allowed range at
-/// read time. Mirrors [`effective_pyth_conf_bps`]: config validation also
-/// range-checks this at propose/instantiate, but a direct state write or a
-/// bad migration must not be able to widen the staleness window past
-/// `MAX_PYTH_STALENESS_MAX_SECONDS` (or shrink it below the minimum). Read
-/// by the live Pyth valuation.
-pub fn effective_max_staleness(config: &FactoryInstantiate) -> u64 {
-    config.max_pyth_staleness_seconds.clamp(
-        crate::usd_price::MAX_PYTH_STALENESS_MIN_SECONDS,
-        crate::usd_price::MAX_PYTH_STALENESS_MAX_SECONDS,
-    )
-}
+/// Trailing window for the pricing pool's arithmetic TWAP used to budget
+/// the cross-denom GAMM-creation-fee swap at crossing. 600s: long enough
+/// that a single-block spot push does not move the budget, short enough to
+/// track real price during the crossing. This TWAP prices only the ~fee
+/// (~$20) — worst-case manipulation reverts the crossing (recoverable) or
+/// overspends the pool-side margin on that fee; the commit threshold is
+/// native-denominated and never touches it.
+pub const FEE_TWAP_WINDOW_SECONDS: u64 = 600;
 
 /// Default (zero) GAMM pool-creation fee — collection disabled.
 pub fn default_gamm_pool_creation_fee() -> Coin {
@@ -434,10 +387,11 @@ pub fn canonical_pair_key(pair: &[TokenType; 2]) -> (String, String) {
 /// Atomically register a freshly created pool across all three registry
 /// maps. Rejects with a generic_err if `pair` already exists in `PAIRS`
 /// — this is the canonical guard against silent duplicate registrations
-/// from any code path (entry-point pre-check, future admin restore,
-/// migrate back-fill, etc). The pre-check at the create entry points
-/// exists purely to fail-fast before the caller's fee is forwarded;
-/// THIS is the load-bearing check.
+/// from any code path (future admin restore, migrate back-fill, etc).
+/// THIS is the load-bearing check; there is no separate pre-check at the
+/// create entry points. (For creator pools the pair embeds the unique
+/// pool address, so uniqueness is structural and this guard is pure
+/// defense-in-depth.)
 ///
 /// Initial `PoolStateResponseForFactory` is materialized from `pool_details`
 /// — caller doesn't need to construct it. Reserves and TWAP accumulators

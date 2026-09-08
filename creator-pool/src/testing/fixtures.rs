@@ -20,7 +20,7 @@ use crate::state::{
     CommitLimitInfo, PoolDetails, PoolInfo, PoolSpecs, PoolState, ThresholdPayoutAmounts,
     COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_ID,
     POOL_INFO, POOL_SPECS, POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
-    USD_RAISED_FROM_COMMIT,
+    GROSS_NATIVE_COMMITTED,
 };
 
 /// The pool's native creator TokenFactory denom used across the shared
@@ -87,11 +87,14 @@ pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(
     POOL_SPECS.save(&mut deps.storage, &pool_specs).unwrap();
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: Uint128::new(25_000_000_000), // 25k native with 6 decimals
+        commit_amount_for_threshold_native: Uint128::new(25_000_000_000), // 25k native with 6 decimals
         max_bluechip_lock_per_pool: Uint128::new(10_000_000_000),
         creator_excess_liquidity_lock_days: 7,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+        // Test-world floors: tiny values so fixtures can commit small round
+        // numbers. The production defaults (115 / 25 native) are asserted in
+        // their own dedicated tests, not here.
+        min_commit_native_pre_threshold: Uint128::new(1_000_000),
+        min_commit_native_post_threshold: Uint128::new(1_000_000),
     };
     COMMIT_LIMIT_INFO
         .save(&mut deps.storage, &commit_config)
@@ -121,7 +124,7 @@ pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(
         .save(&mut deps.storage, &false)
         .unwrap();
     IS_THRESHOLD_HIT.save(&mut deps.storage, &false).unwrap();
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::zero())
         .unwrap();
     NATIVE_RAISED_FROM_COMMIT
@@ -142,7 +145,7 @@ pub fn setup_pool_post_threshold<Q: cosmwasm_std::Querier>(
 ) {
     setup_pool_storage(deps);
     IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(25_000_000_000))
         .unwrap();
     // The native pool id learned from the MsgCreateBalancerPool reply at
@@ -150,39 +153,20 @@ pub fn setup_pool_post_threshold<Q: cosmwasm_std::Querier>(
     POOL_ID.save(&mut deps.storage, &1u64).unwrap();
 }
 
-/// Installs a mock factory USD-valuation responder at the given rate
-/// (micro-USD per micro-native; 1_000_000 = $1 per token). Answers both
-/// `ConvertNativeToUsd` and the commit path's `CommitContext` (whose
-/// `bluechip_wallet` matches the `bluechip_treasury` snapshot pinned by
-/// `setup_pool_storage`). All other cross-contract queries error.
-pub fn with_factory_oracle(
-    deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
-    native_to_usd_rate: Uint128,
-) {
+/// Installs the mock factory responder for the commit path's
+/// `CommitContext` query (whose `bluechip_wallet` matches the
+/// `bluechip_treasury` snapshot pinned by `setup_pool_storage`) and the
+/// `RegisteredRouter` probe. No fee context is served — pools fall back
+/// to the instantiate-time reserve target. All other cross-contract
+/// queries error.
+pub fn with_factory_context(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>) {
     deps.querier.update_wasm(move |query| match query {
         WasmQuery::Smart { msg, .. } => {
             #[cosmwasm_schema::cw_serde]
             enum WrapperProbe {
                 PoolFactoryQuery(pool_factory_interfaces::FactoryQueryMsg),
             }
-            let usd_at_rate = |amount: Uint128| {
-                amount
-                    .checked_mul(native_to_usd_rate)
-                    .unwrap()
-                    .checked_div(Uint128::new(1_000_000))
-                    .unwrap()
-            };
             match cosmwasm_std::from_json(msg) {
-                Ok(WrapperProbe::PoolFactoryQuery(
-                    pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
-                )) => {
-                    let resp = pool_factory_interfaces::ConversionResponse {
-                        amount: usd_at_rate(amount),
-                        rate_used: native_to_usd_rate,
-                        timestamp: 0,
-                    };
-                    return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
-                }
                 Ok(WrapperProbe::PoolFactoryQuery(
                     pool_factory_interfaces::FactoryQueryMsg::RegisteredRouter {},
                 )) => {
@@ -196,19 +180,17 @@ pub fn with_factory_oracle(
                     return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
                 }
                 Ok(WrapperProbe::PoolFactoryQuery(
-                    pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
+                    pool_factory_interfaces::FactoryQueryMsg::CommitContext { .. },
                 )) => {
                     let resp = pool_factory_interfaces::CommitContextResponse {
-                        amount: usd_at_rate(amount),
-                        rate_used: native_to_usd_rate,
                         timestamp: 0,
                         bluechip_wallet: Addr::unchecked("bluechip_treasury"),
-                        // Legacy (pre-cross-denom) factory shape: no live fee
-                        // context — pools fall back to the instantiate-time
-                        // reserve target.
+                        // No live fee context — pools fall back to the
+                        // instantiate-time reserve target.
                         gamm_pool_creation_fee: None,
+                        fee_swap_budget_native: None,
                         pricing_pool_id: 0,
-                        usd_quote_denom: String::new(),
+                        fee_quote_denom: String::new(),
                     };
                     return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
                 }

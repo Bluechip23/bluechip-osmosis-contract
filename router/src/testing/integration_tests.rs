@@ -10,12 +10,11 @@
 //! TokenFactory bank denom (see `pool_factory_interfaces::asset::TokenType`),
 //! NOT a CW20 contract. The harness therefore models each creator token as
 //! a native bank denom (`factory/{creator}/ucreator`) held/seeded via the
-//! bank module, and asserts balances via `bank_balance`. The router's
-//! public `execute_multi_hop` currently only accepts a *native bluechip*
-//! first hop (it rejects a `CreatorToken` first-hop offer), and the CW20
-//! `Receive` entry point is a dead reject path — so routes whose FIRST hop
-//! offers a creator token are not yet executable end to end and are marked
-//! `#[ignore]` below.
+//! bank module, and asserts balances via `bank_balance`. Since creator
+//! tokens are plain bank denoms, `execute_multi_hop` accepts EITHER pair
+//! side as the first-hop offer (the happy-path test below offers a
+//! creator token first); the CW20 `Receive` entry point is a dead reject
+//! path kept only for wire compatibility.
 
 use cosmwasm_std::testing::MockStorage;
 use cosmwasm_std::{Addr, Coin, Empty, Timestamp, Uint128};
@@ -280,9 +279,8 @@ fn instantiate_pool(
         )
         .unwrap();
     if seed_reserves {
-        // Both reserves are native bank balances now: bluechip AND the
-        // creator TokenFactory denom (previously the creator side was seeded
-        // via a CW20 `Transfer`).
+        // Both reserves are native bank balances: bluechip AND the
+        // creator TokenFactory denom.
         app.send_tokens(
             admin.clone(),
             pool.clone(),
@@ -345,8 +343,8 @@ fn happy_path_two_hop_creator_to_creator() {
     let amount = Uint128::new(100_000);
     let creator_b_before = creator_balance(&world.app, &world.user, &world.creator_b);
 
-    // Post-migration a creator-token offer is native funds attached to a
-    // plain `ExecuteMultiHop` (previously a `cw20::Send` to the router).
+    // A creator-token offer is native funds attached to a
+    // plain `ExecuteMultiHop`.
     world
         .app
         .execute_contract(

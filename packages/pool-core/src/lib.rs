@@ -32,8 +32,7 @@ pub mod asset;
 pub mod error;
 pub mod generic;
 pub mod msg;
-/// Osmosis-native message builders (TokenFactory / GAMM / poolmanager)
-/// backing the migration off the internal CW20 AMM.
+/// Osmosis-native message builders (TokenFactory / GAMM / poolmanager).
 pub mod osmosis_msgs;
 pub mod query;
 pub mod state;

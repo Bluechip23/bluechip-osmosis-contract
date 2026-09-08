@@ -19,61 +19,16 @@ use crate::state::{
 use super::ensure_admin;
 
 /// Validates every caller-supplied address + the bluechip_denom on a
-/// `FactoryInstantiate` payload, then live-probes the pricing route.
-/// Shared between `instantiate` and
-/// `execute_propose_factory_config_update` so the same rules apply to
-/// the initial config and any subsequent config proposal.
-/// Fields that may be updated WITHOUT re-running the live Pyth probe. The
-/// probe's result is independent of every one of them — it reads only
-/// `pyth_contract_addr`, `pyth_native_usd_feed_id`, `max_pyth_staleness_seconds`
-/// and `pyth_conf_threshold_bps` — and each remains validated by the cheap,
-/// always-run checks in `validate_factory_config`. Letting these through
-/// without a fresh feed means a lapsed price keeper cannot block unrelated
-/// admin actions (most importantly rotating a compromised
-/// `bluechip_wallet_address`).
-///
-/// Returns true when `proposed` differs from `current` ONLY in these fields.
-///
-/// SAFETY: implemented by neutralizing exactly this operational allowlist and
-/// then comparing the WHOLE struct, so ANY field not listed here — every field
-/// the probe reads, the priced-asset / fee-swap route fields, and any field
-/// added to `FactoryInstantiate` in the future — forces a re-probe by default.
-/// NEVER add a pricing- or fee-route-relevant field to this list.
-fn only_probe_independent_fields_changed(
-    current: &FactoryInstantiate,
-    proposed: &FactoryInstantiate,
-) -> bool {
-    let mut probe_view = proposed.clone();
-    probe_view.factory_admin_address = current.factory_admin_address.clone();
-    probe_view.bluechip_wallet_address = current.bluechip_wallet_address.clone();
-    probe_view.commit_fee_bluechip = current.commit_fee_bluechip;
-    probe_view.commit_fee_creator = current.commit_fee_creator;
-    probe_view.commit_threshold_limit_usd = current.commit_threshold_limit_usd;
-    probe_view.max_bluechip_lock_per_pool = current.max_bluechip_lock_per_pool;
-    probe_view.creator_excess_liquidity_lock_days = current.creator_excess_liquidity_lock_days;
-    probe_view.pool_creation_fee = current.pool_creation_fee;
-    probe_view.threshold_payout_amounts = current.threshold_payout_amounts.clone();
-    probe_view.emergency_withdraw_delay_seconds = current.emergency_withdraw_delay_seconds;
-    probe_view.cw20_token_contract_id = current.cw20_token_contract_id;
-    probe_view.cw721_nft_contract_id = current.cw721_nft_contract_id;
-    probe_view.create_pool_wasm_contract_id = current.create_pool_wasm_contract_id;
-    // Deliberately NOT copied (⇒ a change forces a re-probe): the probe inputs
-    // pyth_contract_addr / pyth_native_usd_feed_id / max_pyth_staleness_seconds /
-    // pyth_conf_threshold_bps, and the priced-asset / fee-swap route fields
-    // bluechip_denom / pricing_pool_id / usd_quote_denom / gamm_pool_creation_fee.
-    probe_view == *current
-}
-
-/// `current` is the config already stored on the factory (for propose/apply);
-/// pass `None` at instantiate (no prior config, so the live probe always runs).
-/// When `current` is `Some` and only probe-independent operational fields
-/// changed, the live Pyth probe is skipped so a keeper outage can't block the
-/// change — every other (cheap) validation below still runs unconditionally.
+/// `FactoryInstantiate` payload, then live-probes the fee-swap route.
+/// Shared between `instantiate`, propose and apply so the same rules apply
+/// to the initial config and every subsequent proposal. There is no oracle
+/// and therefore no oracle probe; the only live read is the fee-route TWAP
+/// check when the gamm creation fee is non-native, and Osmosis's `x/twap`
+/// is a chain module (no keeper to lapse), so it runs unconditionally.
 pub(crate) fn validate_factory_config(
     deps: cosmwasm_std::Deps,
     env: &Env,
     config: &FactoryInstantiate,
-    current: Option<&FactoryInstantiate>,
 ) -> Result<(), ContractError> {
     deps.api
         .addr_validate(config.factory_admin_address.as_str())?;
@@ -106,9 +61,9 @@ pub(crate) fn validate_factory_config(
     // permanently sit pre-threshold, never minting, never opening swaps.
     // Reject explicitly rather than letting that misconfig ride through
     // a 48h timelock.
-    if config.commit_threshold_limit_usd.is_zero() {
+    if config.commit_threshold_limit_native.is_zero() {
         return Err(ContractError::Std(StdError::generic_err(
-            "commit_threshold_limit_usd must be non-zero",
+            "commit_threshold_limit_native must be non-zero",
         )));
     }
     if config.bluechip_denom.trim().is_empty() {
@@ -116,86 +71,55 @@ pub(crate) fn validate_factory_config(
             "bluechip_denom must be non-empty",
         )));
     }
-    // Cross-denom fee-swap route. `pricing_pool_id` is NOT a price source
-    // (USD valuation is via Pyth); it is only the pool used to acquire the
-    // `usd_quote_denom`-denominated gamm creation fee at crossing. A broken
-    // value here would brick crossings when the gamm fee is in that quote
-    // denom, so validate at propose time.
+    // Cross-denom fee-swap route. `pricing_pool_id` prices and executes ONLY
+    // the ~fee-sized swap that acquires the `fee_quote_denom`-denominated
+    // gamm creation fee at crossing — never the commit threshold, which is
+    // native-denominated. A broken value here would brick crossings when the
+    // gamm fee is in that quote denom, so validate at propose time.
     if config.pricing_pool_id == 0 {
         return Err(ContractError::Std(StdError::generic_err(
-            "pricing_pool_id must be non-zero (the Osmosis pool that swaps bluechip_denom into usd_quote_denom for the gamm creation fee at crossing)",
+            "pricing_pool_id must be non-zero (the Osmosis pool that swaps bluechip_denom into fee_quote_denom for the gamm creation fee at crossing)",
         )));
     }
-    if config.usd_quote_denom.trim().is_empty() {
+    if config.fee_quote_denom.trim().is_empty() {
         return Err(ContractError::Std(StdError::generic_err(
-            "usd_quote_denom must be non-empty (e.g. the USDC denom on this chain)",
+            "fee_quote_denom must be non-empty (e.g. the USDC denom on this chain)",
         )));
     }
-    if config.usd_quote_denom == config.bluechip_denom {
+    if config.fee_quote_denom == config.bluechip_denom {
         return Err(ContractError::Std(StdError::generic_err(
-            "usd_quote_denom must differ from bluechip_denom",
+            "fee_quote_denom must differ from bluechip_denom",
         )));
     }
-    // --- Pyth oracle config validation ---
-    if config.pyth_contract_addr.trim().is_empty() {
-        return Err(ContractError::Std(StdError::generic_err(
-            "pyth_contract_addr must be non-empty (the Pyth CW contract address)",
-        )));
-    }
-    // A malformed/unreachable address is caught by the live Pyth probe
-    // below (the smart query fails), so no separate addr_validate here —
-    // that keeps the check chain-native rather than relying on the host
-    // bech32 prefix.
-    // Pyth feed ids are 64 lowercase hex chars (no `0x`).
-    let feed = config.pyth_native_usd_feed_id.trim();
-    if feed.len() != 64 || !feed.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(ContractError::Std(StdError::generic_err(
-            "pyth_native_usd_feed_id must be 64 hex characters (no 0x prefix)",
-        )));
-    }
-    if config.max_pyth_staleness_seconds < crate::usd_price::MAX_PYTH_STALENESS_MIN_SECONDS
-        || config.max_pyth_staleness_seconds > crate::usd_price::MAX_PYTH_STALENESS_MAX_SECONDS
+    // Live probe of the fee-swap route: when the gamm creation fee is
+    // denominated in the non-native quote denom, the crossing must value and
+    // execute a swap through `pricing_pool_id`, so a typo'd pool id or a
+    // pool that doesn't trade this pair would brick crossings after the 48h
+    // timelock. Reading the real TWAP at instantiate/propose/apply turns
+    // that into an immediate error. The probe runs UNCONDITIONALLY: even
+    // when the CONFIGURED fee is zero or native-denominated, the budget
+    // path sizes against the chain's LIVE `x/poolmanager` fee, which chain
+    // governance can flip to the quote denom at any time — a dead route
+    // would then detonate at commit time instead of here. A nominal
+    // 1-quote-unit amount stands in when the configured coin is not
+    // quote-denominated; the probe checks route liveness and price
+    // plausibility, not the exact budget. x/twap is a chain module —
+    // always available, no keeper — so this cannot couple admin changes
+    // to third-party liveness beyond the pricing pool itself (a dead
+    // pricing pool is fixed by bundling a `pricing_pool_id` repoint into
+    // the same proposal: the probe runs against the PROPOSED config).
     {
-        return Err(ContractError::Std(StdError::generic_err(format!(
-            "max_pyth_staleness_seconds {} outside allowed range [{}, {}]",
-            config.max_pyth_staleness_seconds,
-            crate::usd_price::MAX_PYTH_STALENESS_MIN_SECONDS,
-            crate::usd_price::MAX_PYTH_STALENESS_MAX_SECONDS,
-        ))));
-    }
-    if config.pyth_conf_threshold_bps < crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MIN
-        || config.pyth_conf_threshold_bps > crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MAX
-    {
-        return Err(ContractError::Std(StdError::generic_err(format!(
-            "pyth_conf_threshold_bps {} outside allowed range [{}, {}]",
-            config.pyth_conf_threshold_bps,
-            crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MIN,
-            crate::usd_price::PYTH_CONF_THRESHOLD_BPS_MAX,
-        ))));
-    }
-
-    // Live probe of the Pyth route. A typo'd contract/feed, a stale feed,
-    // or a wide-confidence price would otherwise surface only as a
-    // chain-wide commit outage after the 48h timelock. Reading the real
-    // Pyth price against the proposed config turns it into an instant
-    // instantiate/propose/apply-time error.
-    //
-    // The probe is skipped ONLY when this is a config UPDATE (`current` is
-    // Some) whose changes are confined to probe-independent operational
-    // fields. That decouples a lapsed price keeper from unrelated admin
-    // actions: e.g. rotating a compromised `bluechip_wallet_address` must not
-    // require a fresh feed. Any change touching the probe's inputs or the
-    // pricing/fee-route fields still probes, and instantiate (`current` None)
-    // always probes. All the cheap validations above/below run regardless.
-    let must_probe = match current {
-        None => true,
-        Some(cur) => !only_probe_independent_fields_changed(cur, config),
-    };
-    if must_probe {
-        crate::usd_price::probe_native_usd_rate(deps, env, config).map_err(|e| {
+        let probe_amount = if config.gamm_pool_creation_fee.denom == config.fee_quote_denom
+            && !config.gamm_pool_creation_fee.amount.is_zero()
+        {
+            config.gamm_pool_creation_fee.amount
+        } else {
+            cosmwasm_std::Uint128::new(1_000_000)
+        };
+        crate::fee_twap::fee_swap_budget_native(deps, env, config, probe_amount).map_err(|e| {
             ContractError::Std(StdError::generic_err(format!(
-                "pricing config failed live Pyth probe (contract {}, feed {}): {}",
-                config.pyth_contract_addr, config.pyth_native_usd_feed_id, e
+                "fee-swap route failed live TWAP probe (pool {}, quote {}): {}",
+                config.pricing_pool_id, config.fee_quote_denom, e
             )))
         })?;
     }
@@ -228,23 +152,25 @@ pub(crate) fn validate_factory_config(
     // - denom == bluechip_denom (osmo-test-5: 1 OSMO): the pool retains
     //   this much bluechip from the 1% commit fee and the gamm module
     //   charges it straight from the pool's native balance;
-    // - denom == usd_quote_denom (osmosis-1: 20 Noble USDC): the pool
-    //   still retains NATIVE from the 1% fee (sized at the live Pyth
-    //   rate) and swaps it into the fee coin through the pricing pool at
-    //   crossing — the pricing pool trades native/usd_quote by
+    // - denom == fee_quote_denom (osmosis-1: 20 alloyed USDC): the pool
+    //   still retains NATIVE from the 1% fee (sized at the pricing pool's
+    //   TWAP) and swaps it into the fee coin through the pricing pool at
+    //   crossing — the pricing pool trades native/fee_quote by
     //   definition, so the route always exists.
     // Any other denom is unroutable at crossing; reject it up front
     // rather than letting it ride a 48h timelock and brick crossings. A
-    // zero amount disables the reserve (the crossing then pays the whole
-    // fee out of the seed, still covered by the live-fee query).
+    // zero amount is allowed: budget sizing and reserve retention then key
+    // off the chain's LIVE `x/poolmanager` fee (see the CommitContext
+    // handler), so a live non-native fee is still budgeted and reserved
+    // for — never silently unpaid.
     if !config.gamm_pool_creation_fee.amount.is_zero()
         && config.gamm_pool_creation_fee.denom != config.bluechip_denom
-        && config.gamm_pool_creation_fee.denom != config.usd_quote_denom
+        && config.gamm_pool_creation_fee.denom != config.fee_quote_denom
     {
         return Err(ContractError::Std(StdError::generic_err(format!(
-            "gamm_pool_creation_fee.denom must be bluechip_denom \"{}\" or usd_quote_denom \
+            "gamm_pool_creation_fee.denom must be bluechip_denom \"{}\" or fee_quote_denom \
              \"{}\" (the pricing pool's quote side, swappable at crossing); got \"{}\"",
-            config.bluechip_denom, config.usd_quote_denom, config.gamm_pool_creation_fee.denom
+            config.bluechip_denom, config.fee_quote_denom, config.gamm_pool_creation_fee.denom
         ))));
     }
 
@@ -266,19 +192,60 @@ pub fn execute_update_factory_config(
         });
     }
 
+    ensure_apply_window(&env, pending.effective_after)?;
+
     // Re-validate at apply time. Between propose (48h ago) and apply,
-    // on-chain state can have moved (the pricing pool could have been
-    // drained or pruned, or the Pyth config could no longer read); re-running
-    // the validation — including the live Pyth probe when the proposal touches
-    // pricing — catches stale-proposal hazards before the state lands. The
-    // still-stored config is the "current" baseline for the skip decision.
-    let current = FACTORYINSTANTIATEINFO.load(deps.storage)?;
-    validate_factory_config(deps.as_ref(), &env, &pending.new_config, Some(&current))?;
+    // on-chain state can have moved (the fee-route pricing pool could have
+    // been drained or pruned); re-running the validation — including the
+    // live fee-route TWAP probe — catches stale-proposal hazards before the
+    // state lands.
+    validate_factory_config(deps.as_ref(), &env, &pending.new_config)?;
+    ensure_bluechip_denom_unchanged(deps.as_ref(), &pending.new_config)?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &pending.new_config)?;
     PENDING_CONFIG.remove(deps.storage);
 
     Ok(Response::new().add_attribute("action", "execute_update_config"))
+}
+
+/// `bluechip_denom` is IMMUTABLE on a live factory. Every existing pool
+/// pins its native denom at instantiate; a factory-side change would
+/// desync them all — CommitContext's TWAP would quote the NEW native
+/// (mis-budgeting every existing pre-threshold pool's fee swap) and
+/// `Create` would collect fees in the new denom. Enforced at propose AND
+/// apply (not at instantiate, where the denom is first set).
+pub(crate) fn ensure_bluechip_denom_unchanged(
+    deps: cosmwasm_std::Deps,
+    proposed: &FactoryInstantiate,
+) -> Result<(), ContractError> {
+    let current = FACTORYINSTANTIATEINFO.load(deps.storage)?;
+    if proposed.bluechip_denom != current.bluechip_denom {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "bluechip_denom is immutable ('{}'); changing it (to '{}') would desync every \
+             existing pool's native denom, fee budgeting, and fee collection",
+            current.bluechip_denom, proposed.bluechip_denom
+        ))));
+    }
+    Ok(())
+}
+
+/// Reject an apply that arrives more than `ADMIN_APPLY_WINDOW_SECONDS`
+/// after the timelock elapsed: the 48h window's security value is
+/// community observability, and an apply long after attention has decayed
+/// defeats it. The admin re-proposes, restarting the observable clock.
+pub(crate) fn ensure_apply_window(
+    env: &Env,
+    effective_after: cosmwasm_std::Timestamp,
+) -> Result<(), ContractError> {
+    let expires = effective_after.plus_seconds(crate::state::ADMIN_APPLY_WINDOW_SECONDS);
+    if env.block.time > expires {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "pending change expired at {expires} (apply window {}s after the timelock); \
+             cancel and re-propose to restart the observable 48h window",
+            crate::state::ADMIN_APPLY_WINDOW_SECONDS
+        ))));
+    }
+    Ok(())
 }
 
 pub fn execute_propose_factory_config_update(
@@ -306,10 +273,9 @@ pub fn execute_propose_factory_config_update(
     // Validate at propose time so any mistake surfaces 48h earlier than it
     // otherwise would (the existing config keeps flowing until the timelock
     // elapses and the admin calls UpdateConfig, but a malformed proposal
-    // should fail loudly now, not then). The stored config is the baseline
-    // for deciding whether the live probe is needed.
-    let current = FACTORYINSTANTIATEINFO.load(deps.storage)?;
-    validate_factory_config(deps.as_ref(), &env, &config, Some(&current))?;
+    // should fail loudly now, not then).
+    validate_factory_config(deps.as_ref(), &env, &config)?;
+    ensure_bluechip_denom_unchanged(deps.as_ref(), &config)?;
 
     let pending = PendingConfig {
         new_config: config,
@@ -401,6 +367,8 @@ pub fn execute_apply_pool_config_update(
             effective_after: pending.effective_after,
         });
     }
+
+    ensure_apply_window(&env, pending.effective_after)?;
 
     // Re-validate at apply time. Bounds are static today, but pool-core's
     // bounds could plausibly tighten in a future migration between propose

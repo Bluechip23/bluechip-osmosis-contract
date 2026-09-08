@@ -5,10 +5,9 @@
 //! back to the committer.
 //!
 //! The per-commit 1%/5% fee kickout and the `update_commit_info`
-//! subscription record are preserved (the fee split happens in the
-//! dispatcher; `swap_amount` here is already net-of-fees). The retired
-//! internal-AMM machinery (compute_swap, reserve drain guards, the
-//! post-threshold cooldown + swap-cap ramp) is gone.
+//! subscription record are applied here as on every commit path (the fee
+//! split happens in the dispatcher; `swap_amount` here is already
+//! net-of-fees).
 
 use cosmwasm_std::{to_json_binary, Addr, Coin, CosmosMsg, Decimal, DepsMut, Env, Response, SubMsg, Uint128};
 
