@@ -30,7 +30,7 @@ use crate::generic::{check_rate_limit, enforce_transaction_deadline, with_reentr
 use crate::osmosis_msgs::swap_exact_amount_in_msg;
 use crate::state::{
     PoolCtx, SwapForwardPayload, BREAKER_FLOOR_PERCENT, IS_THRESHOLD_HIT, POOL_ANALYTICS, POOL_ID,
-    POOL_PAUSED, POOL_PAUSED_AUTO, REPLY_ID_SWAP_FORWARD, SEED_LIQUIDITY,
+    POOL_PAUSED, REPLY_ID_SWAP_FORWARD, SEED_LIQUIDITY,
 };
 use cosmwasm_std::{
     to_json_binary, Addr, BankMsg, Coin, CustomQuery, Decimal, DepsMut, Env, Fraction, MessageInfo,
@@ -218,51 +218,34 @@ pub fn compute_token_out_min<C: CustomQuery>(
     Ok(token_out_min)
 }
 
-/// Outcome of the relative liquidity circuit breaker.
-///
-/// The breaker must be able to LATCH the pool paused
-/// (`POOL_PAUSED` + `POOL_PAUSED_AUTO`) and have that write survive. A
-/// handler that returns `Err` has ALL of its storage writes rolled back by
-/// the CosmWasm VM — a "save the pause flags, then `return Err`" shape
-/// would never actually pause the pool on-chain, because the save is
-/// reverted by the very error it returns. The breaker therefore reports its
-/// outcome as a value and lets the caller decide the response: on `Tripped`
-/// the caller returns `Ok` (refunding any attached funds) so the latched
-/// pause persists; on `Proceed` it continues with the swap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BreakerOutcome {
-    /// Live liquidity is healthy (or no snapshot / query unavailable);
-    /// continue dispatching the swap.
-    Proceed,
-    /// A side fell below the floor. The breaker has already persisted the
-    /// latched pause; the caller MUST return `Ok` (refunding attached
-    /// offer funds) so the pause is not rolled back, and MUST NOT dispatch
-    /// the swap.
-    Tripped,
-}
-
-/// Native relative circuit breaker.
+/// Native relative circuit breaker — a PER-TRANSACTION revert.
 ///
 /// Queries the LIVE per-side liquidity of the native GAMM pool (`pool_id`)
 /// via the poolmanager `total_pool_liquidity` query and compares each side
 /// against the amount seeded at threshold-crossing ([`SEED_LIQUIDITY`]). If
 /// EITHER side has fallen below [`BREAKER_FLOOR_PERCENT`]% of its seeded
-/// amount, the pool is auto-paused (`POOL_PAUSED` + `POOL_PAUSED_AUTO` set
-/// to `true`) and [`BreakerOutcome::Tripped`] is returned. Manual admin
-/// `Unpause` clears both flags. Relative-to-seed (not absolute) so the
-/// floor scales with each pool's own raise size.
+/// amount, this returns `Err(LiquidityBelowSeedFloor)` and the calling
+/// swap / post-threshold commit reverts. Relative-to-seed (not absolute) so
+/// the floor scales with each pool's own raise size.
+///
+/// NOTHING IS LATCHED. An `Err` rolls back every storage write in the
+/// handler, so `POOL_PAUSED` / `POOL_PAUSED_AUTO` are never touched here and
+/// the next transaction re-evaluates the live pool on its own. This is
+/// deliberate: a latched auto-pause needed a multisig `Unpause` to clear,
+/// would re-latch on the very next swap while the condition still held, and
+/// in the meantime blocked commits, swaps AND the committer distribution
+/// (`ContinueDistribution` / `ClaimFailedDistribution` honour `POOL_PAUSED`)
+/// — while the native GAMM pool kept trading regardless. A per-tx revert
+/// gives the individual trade the same protection with no operational
+/// wedge. `POOL_PAUSED_AUTO` is retained purely for storage compatibility
+/// and is now never set to `true` by any code path.
 ///
 /// Called at the START of swap routing on BOTH swap sites (SimpleSwap here,
-/// and the post-threshold commit path), before dispatching the swap.
+/// and the post-threshold commit path), before dispatching the swap. The
+/// revert returns the attached offer funds to the sender through normal tx
+/// failure semantics — no explicit refund message is needed.
 ///
-/// On a trip the pause writes are persisted here and the caller
-/// returns `Ok` so the latch survives (an `Err` from the caller would roll
-/// the pause back). The caller is responsible for refunding any attached
-/// offer funds in that `Ok` response, since no revert-based auto-refund
-/// occurs.
-///
-/// Two fail-soft short-circuits (return [`BreakerOutcome::Proceed`], breaker
-/// not applied):
+/// Two fail-soft short-circuits (return `Ok(())`, breaker not applied):
 /// - `SEED_LIQUIDITY` unset — a pre-breaker or pre-threshold pool has no
 ///   snapshot to compare against.
 /// - the `total_pool_liquidity` query errors — a transient/unavailable query
@@ -273,20 +256,20 @@ pub enum BreakerOutcome {
 /// and therefore trips the breaker — the correct, conservative behaviour if
 /// the pool has been drained of one side.
 pub fn enforce_liquidity_breaker<C: CustomQuery>(
-    storage: &mut dyn Storage,
+    storage: &dyn Storage,
     querier: &QuerierWrapper<C>,
     pool_id: u64,
     bluechip_denom: &str,
     creator_denom: &str,
-) -> Result<BreakerOutcome, ContractError> {
+) -> Result<(), ContractError> {
     let (seed_osmo, seed_creator) = match SEED_LIQUIDITY.may_load(storage)? {
         Some(seed) => seed,
-        None => return Ok(BreakerOutcome::Proceed),
+        None => return Ok(()),
     };
 
     let liquidity = match PoolmanagerQuerier::new(querier).total_pool_liquidity(pool_id) {
         Ok(resp) => resp.liquidity,
-        Err(_) => return Ok(BreakerOutcome::Proceed),
+        Err(_) => return Ok(()),
     };
 
     // Resolve each side's current amount by denom; a side absent from the
@@ -311,43 +294,23 @@ pub fn enforce_liquidity_breaker<C: CustomQuery>(
         current.saturating_mul(hundred) < seed.saturating_mul(floor_pct)
     };
 
-    if below_floor(current_osmo, seed_osmo) || below_floor(current_creator, seed_creator) {
-        // Latch the pause. The caller returns `Ok` so this write survives.
-        POOL_PAUSED.save(storage, &true)?;
-        POOL_PAUSED_AUTO.save(storage, &true)?;
-        return Ok(BreakerOutcome::Tripped);
-    }
-    Ok(BreakerOutcome::Proceed)
-}
-
-/// Build the `Ok` response a swap site returns when the breaker latches the
-/// pool paused: refund the attached offer coin to the sender (there is
-/// no revert-based auto-refund on an `Ok` path) and emit the auto-pause
-/// attributes. Kept here so both swap sites produce an identical response.
-pub fn breaker_tripped_refund_response(
-    refund_to: &Addr,
-    refund_denom: &str,
-    refund_amount: Uint128,
-    pool_id: u64,
-    action: &str,
-) -> Response {
-    let mut resp = Response::new()
-        .add_attribute("action", action.to_string())
-        .add_attribute("pool_id", pool_id.to_string())
-        .add_attribute("auto_paused", "true")
-        .add_attribute("refund_to", refund_to.to_string())
-        .add_attribute("refund_denom", refund_denom.to_string())
-        .add_attribute("refund_amount", refund_amount.to_string());
-    if !refund_amount.is_zero() {
-        resp = resp.add_message(BankMsg::Send {
-            to_address: refund_to.to_string(),
-            amount: vec![Coin {
-                denom: refund_denom.to_string(),
-                amount: refund_amount,
-            }],
+    if below_floor(current_osmo, seed_osmo) {
+        return Err(ContractError::LiquidityBelowSeedFloor {
+            side: bluechip_denom.to_string(),
+            current: current_osmo,
+            seed: seed_osmo,
+            floor_percent: BREAKER_FLOOR_PERCENT,
         });
     }
-    resp
+    if below_floor(current_creator, seed_creator) {
+        return Err(ContractError::LiquidityBelowSeedFloor {
+            side: creator_denom.to_string(),
+            current: current_creator,
+            seed: seed_creator,
+            floor_percent: BREAKER_FLOOR_PERCENT,
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -458,37 +421,23 @@ fn execute_simple_swap_with_ctx(
         .may_load(deps.storage)?
         .ok_or(ContractError::ShortOfThreshold {})?;
 
-    // Trip the native relative circuit breaker BEFORE dispatching
-    // the swap: if either side of the live pool has fallen below
-    // BREAKER_FLOOR_PERCENT% of its seeded liquidity, this auto-pauses the
-    // pool and rejects. Shares the exact helper with the post-threshold
-    // commit swap path so the protection can't drift between the two sites.
-    // The breaker keys on the CANONICAL pair sides ([0] = bluechip Native,
-    // [1] = creator) so it matches `SEED_LIQUIDITY = (seed_osmo, seed_creator)`
+    // Native relative circuit breaker BEFORE dispatching the swap: if
+    // either side of the live pool has fallen below BREAKER_FLOOR_PERCENT%
+    // of its seeded liquidity, this returns `Err` and the whole tx reverts
+    // (offer funds go back to the sender by tx failure; no pause is
+    // latched). Shares the exact helper with the post-threshold commit swap
+    // path so the protection can't drift between the two sites. The breaker
+    // keys on the CANONICAL pair sides ([0] = bluechip Native, [1] =
+    // creator) so it matches `SEED_LIQUIDITY = (seed_osmo, seed_creator)`
     // regardless of the swap DIRECTION (`offer_denom`/`ask_denom` flip on a
     // sell).
-    //
-    // On a trip the breaker has already latched the pause; we return
-    // `Ok` (refunding the attached offer coin) so the pause persists — an
-    // `Err` here would roll the pause write back.
-    match enforce_liquidity_breaker(
+    enforce_liquidity_breaker(
         deps.storage,
         &deps.querier,
         pool_id,
         &denom_of(&pool_info.pool_info.asset_infos[0]),
         &denom_of(&pool_info.pool_info.asset_infos[1]),
-    )? {
-        BreakerOutcome::Proceed => {}
-        BreakerOutcome::Tripped => {
-            return Ok(breaker_tripped_refund_response(
-                &sender,
-                &offer_denom,
-                offer_asset.amount,
-                pool_id,
-                "swap_auto_paused_low_liquidity",
-            ));
-        }
-    }
+    )?;
 
     let token_in = Coin {
         denom: offer_denom.clone(),

@@ -17,10 +17,7 @@ use crate::generic_helpers::update_commit_info;
 use crate::state::{
     PoolAnalytics, PoolInfo, PoolSpecs, POOL_ID, POOL_PAUSED, REPLY_ID_SWAP_FORWARD,
 };
-use crate::swap_helper::{
-    breaker_tripped_refund_response, compute_token_out_min, enforce_liquidity_breaker,
-    BreakerOutcome,
-};
+use crate::swap_helper::{compute_token_out_min, enforce_liquidity_breaker};
 use pool_core::osmosis_msgs::swap_exact_amount_in_msg;
 use pool_core::state::SwapForwardPayload;
 
@@ -76,33 +73,20 @@ pub(super) fn process_post_threshold_commit(
     let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
     let creator_denom = pool_info.token_denom.clone();
 
-    // Trip the native relative circuit breaker BEFORE dispatching
-    // the swap leg, matching the `SimpleSwap` site (both share the helper).
-    // If either side of the live pool has fallen below BREAKER_FLOOR_PERCENT%
-    // of its seeded liquidity, this auto-pauses the pool and rejects the
-    // commit. Pre-threshold commits never reach here (no pool yet).
-    //
-    // On a trip the breaker has latched the pause; return `Ok`
-    // (refunding the committer's GROSS attached bluechip — no fees taken,
-    // no swap) so the pause persists. Returning `Err` would roll it back.
-    match enforce_liquidity_breaker(
+    // Native relative circuit breaker BEFORE dispatching the swap leg,
+    // matching the `SimpleSwap` site (both share the helper). If either side
+    // of the live pool has fallen below BREAKER_FLOOR_PERCENT% of its seeded
+    // liquidity, this returns `Err` and the whole commit reverts: the
+    // committer's GROSS attached bluechip is returned by tx failure, no fees
+    // are taken, no swap is dispatched, and no pause is latched. Pre-threshold
+    // commits never reach here (no pool yet).
+    enforce_liquidity_breaker(
         deps.storage,
         &deps.querier,
         pool_id,
         &bluechip_denom,
         &creator_denom,
-    )? {
-        BreakerOutcome::Proceed => {}
-        BreakerOutcome::Tripped => {
-            return Ok(breaker_tripped_refund_response(
-                &sender,
-                &bluechip_denom,
-                asset.amount,
-                pool_id,
-                "commit_auto_paused_low_liquidity",
-            ));
-        }
-    }
+    )?;
 
     let token_in = Coin {
         denom: bluechip_denom.clone(),

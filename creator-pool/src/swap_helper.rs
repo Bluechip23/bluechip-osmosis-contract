@@ -18,10 +18,12 @@ use pool_factory_interfaces::{
 /// creation-fee coin, and — when that fee is non-native — the TWAP-valued
 /// native budget for acquiring it at crossing.
 ///
-/// There is NO price valuation here: the commit threshold is denominated in
-/// the native asset, so a commit's value toward it is simply its attached
-/// amount. Fail-closed: any error (factory unreachable, fee-route TWAP
-/// failure) propagates and reverts the commit.
+/// The commit itself is never valued: the threshold is denominated in the
+/// native asset, so a commit's value toward it is simply its attached
+/// amount. The query DOES read a price when `include_fee_budget` is true —
+/// the factory's fee-route TWAP that budgets the GAMM creation-fee swap —
+/// and it is fail-closed: any error (factory unreachable, TWAP query
+/// failure, implausible price) propagates and reverts the commit.
 pub fn get_commit_context(
     deps: Deps,
     factory_addr: &Addr,

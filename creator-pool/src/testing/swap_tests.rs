@@ -2233,11 +2233,11 @@ fn test_crossing_seed_math_normal_and_shortfall() {
 }
 
 // ---------------------------------------------------------------------------
-// Native relative circuit breaker (pause below 25% of seeded).
+// Native relative circuit breaker (per-tx revert below 25% of seeded).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_native_breaker_pauses_below_floor() {
+fn test_native_breaker_reverts_below_floor_without_latching_pause() {
     use crate::mock_querier::mock_deps_estimate;
     let mut deps = mock_deps_estimate(&[Coin {
         denom: "ubluechip".to_string(),
@@ -2285,38 +2285,42 @@ fn test_native_breaker_pauses_below_floor() {
         to: None,
         transaction_deadline: None,
     };
-    // A tripped breaker returns `Ok` (so the latched pause persists;
-    // an `Err` would have rolled the pause writes back on-chain) and refunds
-    // the attached offer coin. No swap SubMsg is dispatched.
-    let res = execute(deps.as_mut(), env.clone(), info.clone(), msg.clone()).unwrap();
-    assert_eq!(action_attr(&res), "swap_auto_paused_low_liquidity");
+    // The breaker is a PER-TRANSACTION revert: the swap errors (so the
+    // attached offer coin returns to the trader by tx failure) and NO
+    // pause flag is written. There is nothing for the multisig to reset.
+    let err = execute(deps.as_mut(), env.clone(), info.clone(), msg.clone()).unwrap_err();
+    match err {
+        ContractError::LiquidityBelowSeedFloor {
+            side,
+            current,
+            seed,
+            floor_percent,
+        } => {
+            assert_eq!(side, "ubluechip");
+            assert_eq!(current, Uint128::new(200_000));
+            assert_eq!(seed, Uint128::new(1_000_000));
+            assert_eq!(floor_percent, crate::state::BREAKER_FLOOR_PERCENT);
+        }
+        other => panic!("expected LiquidityBelowSeedFloor, got {:?}", other),
+    }
     assert!(
-        !res.messages.iter().any(|m| m.id == REPLY_ID_SWAP_FORWARD),
-        "no swap is dispatched when the breaker trips"
+        !crate::state::POOL_PAUSED
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or(false),
+        "breaker must not latch POOL_PAUSED"
     );
-    // The attached offer coin is refunded to the trader.
-    let refunded = res.messages.iter().any(|m| matches!(
-        &m.msg,
-        cosmwasm_std::CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount })
-            if to_address == "trader"
-                && amount.len() == 1
-                && amount[0].denom == "ubluechip"
-                && amount[0].amount == swap_amount
-    ));
-    assert!(refunded, "breaker refunds the attached offer coin on trip");
     assert!(
-        crate::state::POOL_PAUSED.load(&deps.storage).unwrap(),
-        "breaker latches POOL_PAUSED (persists because the caller returns Ok)"
-    );
-    assert!(
-        crate::state::POOL_PAUSED_AUTO.load(&deps.storage).unwrap(),
-        "breaker latches POOL_PAUSED_AUTO"
+        !crate::state::POOL_PAUSED_AUTO
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or(false),
+        "breaker must not latch POOL_PAUSED_AUTO"
     );
 
-    // The latch holds: a subsequent swap is now rejected at the POOL_PAUSED
-    // gate, proving the pause actually stuck. Use a FRESH sender so the
-    // per-address swap/commit rate limit (stamped by the first, tripped
-    // call for `trader`) doesn't mask the pause rejection.
+    // Still below the floor: a second trader is rejected the same way (the
+    // check is re-evaluated against the live pool every transaction, not
+    // against a stored flag).
     let info2 = message_info(
         &Addr::unchecked("trader2"),
         &[Coin {
@@ -2324,12 +2328,37 @@ fn test_native_breaker_pauses_below_floor() {
             amount: swap_amount,
         }],
     );
-    let err = execute(deps.as_mut(), env, info2, msg).unwrap_err();
+    let err2 = execute(deps.as_mut(), env.clone(), info2, msg.clone()).unwrap_err();
     assert!(
-        matches!(err, ContractError::PoolPausedLowLiquidity {}),
-        "latched pause rejects the next swap; got {:?}",
-        err
+        matches!(err2, ContractError::LiquidityBelowSeedFloor { .. }),
+        "second swap below floor also reverts; got {:?}",
+        err2
     );
+
+    // Once the live pool recovers above the floor, the very next swap goes
+    // through with NO admin action in between — the failure mode the old
+    // latched pause had (Unpause via multisig, then re-latch on the next
+    // swap) no longer exists.
+    deps.querier.set_pool_liquidity(vec![
+        Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(500_000),
+        },
+        Coin {
+            denom: CREATOR_DENOM.to_string(),
+            amount: Uint128::new(1_000_000),
+        },
+    ]);
+    let info3 = message_info(
+        &Addr::unchecked("trader3"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let res = execute(deps.as_mut(), env, info3, msg).unwrap();
+    assert_eq!(action_attr(&res), "swap");
+    expect_single_swap_forward(&res);
 }
 
 #[test]

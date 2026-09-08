@@ -403,8 +403,10 @@ fn default_min_commit_native_post_threshold() -> Uint128 {
 pub struct CommitLimitInfo {
     /// Native-denominated threshold target (base units of the chain's
     /// native asset, 6 decimals): once total GROSS native committed reaches
-    /// this, the pool seeds. No oracle — a commit's value toward the
-    /// threshold is its attached amount.
+    /// this, the pool seeds. No oracle values a commit — its value toward
+    /// the threshold is its attached amount. (The fee-route TWAP the
+    /// factory reads in `CommitContext` budgets only the GAMM creation-fee
+    /// swap; see `commit.rs`.)
     pub commit_amount_for_threshold_native: Uint128,
     /// Max native bluechip locked into pool reserves; remainder becomes creator excess.
     pub max_bluechip_lock_per_pool: Uint128,

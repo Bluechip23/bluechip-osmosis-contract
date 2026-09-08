@@ -20,10 +20,13 @@ chain-native:
   with a slippage floor derived from the on-chain estimate and the
   caller's `belief_price`.
 - The commit threshold is **OSMO-denominated**: a commit's value
-  toward the threshold is simply its attached OSMO. There is no price
-  oracle anywhere in the protocol — the only price read is a chain-native
-  `x/twap` query over `pricing_pool_id`, used solely to budget the
-  ~20 USDC GAMM pool-creation fee swap at threshold crossing.
+  toward the threshold is simply its attached OSMO. No oracle prices the
+  threshold. The protocol's one price read is a chain-native `x/twap`
+  query over `pricing_pool_id`, used solely to budget the ~20 USDC GAMM
+  pool-creation fee swap at threshold crossing — and it runs inside every
+  pre-threshold commit, fail-closed, so `pricing_pool_id` is a liveness
+  dependency for ledger-phase commits and crossings (see the parameter
+  cheat-sheet below).
 
 One compiled artifact set works on both testnet and mainnet — only the
 instantiate config differs.
@@ -71,7 +74,7 @@ sha256sum artifacts/*.wasm   # hashes go in the gov proposal
 
 Before spending anything on-chain, run the integration harness — it
 executes the real `tokenfactory` / `gamm` / `poolmanager` modules
-in-process (with a mock Pyth contract supplying the USD price feed)
+in-process (including the real `x/twap` module for the fee-route TWAP)
 and covers create → cross (native pool seed) →
 distribute → swap → third-party `MsgJoinPool`/`MsgExitPool`:
 
@@ -130,14 +133,17 @@ address-permission route:
 > cosmwasm/optimizer 0.16.0; artifact sha256 hashes: <hashes>.
 > Test suite: full unit/integration coverage plus an
 > osmosis-test-tube end-to-end harness that exercises the real
-> tokenfactory/gamm/poolmanager modules (with a mock Pyth contract
-> for the USD price feed); security review docs in-repo.
+> tokenfactory/gamm/poolmanager/twap modules; security review docs
+> in-repo.
 >
 > **What this protocol does NOT do:** no external price feeds, no
-> keeper-updated oracles, no USD conversion anywhere (the threshold is
+> keeper-updated oracles, no USD conversion of commits (the threshold is
 > OSMO-denominated), no bridged assets, no privileged mint of OSMO —
 > pools only hold OSMO + TokenFactory denoms they administer, and every
-> admin mutation is behind a 48h timelock.
+> admin mutation is behind a 48h timelock. The one on-chain price read is
+> the `x/twap` query on `pricing_pool_id` that budgets the GAMM
+> creation-fee swap at crossing; it runs in every pre-threshold commit
+> and fails closed.
 
 For the per-contract route instead, generate the combined gov v1
 proposal (one vote stores the three wasms, gzip-compressed, hashes and
@@ -188,7 +194,7 @@ not upload fresh copies).
 | Knob | Meaning | Testnet suggestion | Mainnet decision |
 |---|---|---|---|
 | `COMMIT_THRESHOLD_LIMIT_NATIVE` | OSMO (6-dec base units) a pool must raise to open | 250 OSMO = `250000000` | 500,000 OSMO = `500000000000` |
-| `PRICING_POOL_ID` / `FEE_QUOTE_DENOM` | fee-route pool: budgets the cross-denom gamm creation-fee swap at crossing (600s TWAP; not a price source for commits) | pool 314 (uosmo/USDC-ibc) | the deepest OSMO/allUSDC pool on osmosis-1 (verify id + denom) |
+| `PRICING_POOL_ID` / `FEE_QUOTE_DENOM` | fee-route pool: its 600s TWAP budgets the cross-denom gamm creation-fee swap at crossing (never values a commit). Read fail-closed inside every pre-threshold commit, so this pool is a liveness dependency for ledger-phase commits and crossings; pick the deepest one | pool 314 (uosmo/USDC-ibc) | the deepest OSMO/allUSDC pool on osmosis-1 (verify id + denom) |
 | `POOL_CREATION_FEE` | flat uosmo anti-spam fee on Create | 1 OSMO | 1–10 OSMO |
 | `GAMM_POOL_CREATION_FEE` (+`_DENOM`) | the fee COIN x/gamm charges at crossing, funded from the 1% commit-fee retention (never the creator); the pool settles against the LIVE fee and, when the denom is the USD quote (osmosis-1: **20 Noble USDC**), swaps its native retention into the fee coin via the pricing pool | 1 OSMO (`uosmo`) | match `osmosisd q poolmanager params` — 20 USDC as of 2026-07 |
 | `COMMIT_FEE_BLUECHIP` / `COMMIT_FEE_CREATOR` | per-commit fee split | 1% / 5% | your call |
