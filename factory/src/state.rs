@@ -151,9 +151,13 @@ pub struct FactoryInstantiate {
     /// Commit threshold each creator pool must raise before it seeds its
     /// AMM and opens for swaps. NATIVE-denominated: base units of
     /// `bluechip_denom` (`500_000_000_000` = 500,000 OSMO). A commit's value
-    /// toward the threshold IS its attached native amount — there is no
-    /// price oracle anywhere in the protocol, so no external price feed
-    /// or thin-liquidity TWAP can influence when a pool crosses.
+    /// toward the threshold IS its attached native amount — no oracle
+    /// prices a commit, so no external feed or thin-liquidity TWAP can
+    /// change how much native a pool needs to cross. (The protocol's one
+    /// price read, the fee-route TWAP on `pricing_pool_id`, budgets only
+    /// the GAMM creation-fee swap; it runs fail-closed inside every
+    /// pre-threshold commit and can therefore block a crossing's
+    /// liveness, never its size.)
     pub commit_threshold_limit_native: Uint128,
     pub cw20_token_contract_id: u64,
     pub cw721_nft_contract_id: u64,

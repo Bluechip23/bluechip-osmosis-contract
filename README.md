@@ -15,7 +15,7 @@ price oracle** — chain-native modules do the heavy lifting:
 | AMM venue | **GAMM** balancer pool (`gamm/pool/{id}`) |
 | Swaps | **poolmanager** `MsgSwapExactAmountIn` |
 | LP position | the pool contract holds its GAMM LP shares directly |
-| Commit threshold | **native OSMO base units** — no price feed anywhere |
+| Commit threshold | **native OSMO base units** — no price feed values a commit; the only price read is the [fee-route TWAP](#the-fee-route-twap-the-only-price-read) that budgets the GAMM creation-fee swap |
 
 > Reviewing the code? Start with `packages/pool-core/src/osmosis_msgs.rs`
 > (every native message the system builds lives there), then
@@ -68,8 +68,16 @@ config and enforced on every pool (`validate_pool_token_info`). OSMO is:
 The commit *threshold* is **500,000 OSMO** at launch
 (`commit_threshold_limit_native = 500000000000`, 6-dec base units), tunable
 through the factory's 48h config flow (a retune applies to pools created
-after it). There is no price oracle anywhere in the protocol, so no external
-feed or thin-liquidity price can influence when a pool crosses.
+after it). No oracle prices a commit or the threshold, so no external feed or
+thin-liquidity price can change *how much* OSMO a pool needs to cross. The
+protocol does make one on-chain price read — the pricing pool's 600s
+arithmetic TWAP in `factory/src/fee_twap.rs`, which budgets the ~20 USDC GAMM
+creation-fee swap at crossing. It runs inside every **pre-threshold** commit
+(via the factory's `CommitContext` query) and fails closed: if the TWAP query
+errors, or the price exceeds the plausibility ceiling, pre-threshold commits
+and crossings on every pool revert until the pricing pool recovers or the
+factory config is re-pointed. Post-threshold commits skip it. See
+[the fee-route TWAP](#the-fee-route-twap-the-only-price-read).
 
 ---
 
@@ -471,21 +479,20 @@ rejected). The same registration also exempts the router from the per-address
 so all router users would otherwise share one rate-limit slot per pool.
 Direct callers keep the cooldown.
 
-**Post-crossing circuit breaker.** Before any contract-routed swap, a relative
-liquidity breaker compares the live GAMM pool to what was seeded and **latches
-the pool paused** if either side falls below 25% of its seed (a drain signal):
+**Post-crossing circuit breaker.** Before any contract-routed swap or
+post-threshold commit, a relative liquidity breaker compares the live GAMM
+pool to what was seeded and **reverts that transaction** if either side is
+below 25% of its seed (a drain signal). It is a per-transaction check, not a
+latched pause: nothing is written, the caller's funds come back through
+normal tx failure, and the next transaction re-evaluates the live pool on its
+own. There is no auto-pause for the multisig to reset, and the committer
+distribution (`ContinueDistribution`) is never blocked by it. Only an explicit
+admin `Pause` halts the pool.
 
 ```rust
-// packages/pool-core/src/swap.rs — returns an outcome and LATCHES the
-// pause (an Err would be rolled back by the VM, so the pause could
-// never persist on-chain; the Ok return is what makes the write stick).
-match enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creator_denom)? {
-    BreakerOutcome::Proceed => { /* dispatch the swap */ }
-    BreakerOutcome::Tripped => {
-        // pause persisted; return Ok and refund the attached offer coin.
-        return Ok(breaker_tripped_refund_response(&sender, &offer_denom, offer_asset.amount, pool_id, "..."));
-    }
-}
+// packages/pool-core/src/swap.rs — Err(LiquidityBelowSeedFloor) reverts the
+// swap; no pause flag is touched.
+enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creator_denom)?;
 ```
 
 ---
@@ -534,12 +541,16 @@ match enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creat
 
 ## The fee-route TWAP (the only price read)
 
-There is **no price oracle in the protocol** — the commit threshold is
-native-denominated, so no commit is ever "valued". The single price read
-lives in `factory/src/fee_twap.rs`, and it prices exactly one thing: the
-native budget for the ~$20 cross-denom GAMM creation-fee swap at threshold
-crossing. It is a chain-module read (`x/twap`), so there is no keeper and no
-external feed:
+**No oracle prices the threshold** — it is native-denominated, so no commit
+is ever "valued". The protocol does have exactly one price read, in
+`factory/src/fee_twap.rs`, and it prices exactly one thing: the native budget
+for the ~$20 cross-denom GAMM creation-fee swap at threshold crossing. It is a
+chain-module read (`x/twap` on the factory's `pricing_pool_id`), so there is
+no keeper and no external feed — but it IS a live dependency: every
+pre-threshold commit executes it through the factory's `CommitContext` query,
+so a pricing-pool outage blocks ledger-phase commits and crossings (not
+trading) until the pool recovers or the multisig re-points
+`pricing_pool_id`:
 
 ```rust
 // factory/src/fee_twap.rs — arithmetic TWAP over the trailing 600s window.

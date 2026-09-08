@@ -166,9 +166,10 @@ pub const POOL_ANALYTICS: Item<PoolAnalytics> = Item::new("pool_analytics");
 /// Top-level pause flag — true if the pool is paused for any reason.
 pub const POOL_PAUSED: Item<bool> = Item::new("pool_paused");
 /// Distinguishes admin/emergency pause (false) from auto-pause (true).
-/// Retained for wire/behaviour compatibility; auto-pause-on-low-liquidity
-/// no longer fires (no internal reserves), so this is effectively always
-/// false in Phase-2.
+/// Retained for storage compatibility only. No code path sets it to `true`
+/// any more: the liquidity circuit breaker is a per-transaction revert
+/// (see `BREAKER_FLOOR_PERCENT`), not a latched pause. Admin pause /
+/// unpause / emergency paths still write `false` defensively.
 pub const POOL_PAUSED_AUTO: Item<bool> = Item::new("pool_paused_auto");
 /// Record written on completed emergency drain (Phase 2 drain).
 pub const EMERGENCY_WITHDRAWAL: Item<EmergencyWithdrawalInfo> = Item::new("emergency_withdrawal");
@@ -203,8 +204,8 @@ pub const IS_THRESHOLD_HIT: Item<bool> = Item::new("threshold_hit");
 /// threshold-crossing, snapshotted as `(seed_osmo, seed_creator)` — the
 /// exact `(bluechip, creator)` amounts passed to `MsgCreateBalancerPool`
 /// AFTER the creation-fee adjustment. This is the reference point
-/// for the relative circuit breaker: a swap is halted if EITHER
-/// side of the live native pool has fallen below
+/// for the relative circuit breaker: a swap reverts (per-tx, no latched
+/// pause) if EITHER side of the live native pool has fallen below
 /// `BREAKER_FLOOR_PERCENT`% of its seeded amount here. Unset until the
 /// pool crosses its threshold (no native pool exists before then).
 pub const SEED_LIQUIDITY: Item<(Uint128, Uint128)> = Item::new("seed_liquidity");
@@ -268,11 +269,12 @@ pub const POOL_KIND_COMMIT: &str = "commit";
 
 /// Relative circuit-breaker floor, as a whole-number percent of the
 /// seeded per-side liquidity ([`SEED_LIQUIDITY`]). If EITHER side of the
-/// live native pool drops below this percentage of what was seeded, the
-/// next routed swap trips the breaker: it sets `POOL_PAUSED` +
-/// `POOL_PAUSED_AUTO` and rejects with a low-liquidity pause error.
+/// live native pool is below this percentage of what was seeded, a routed
+/// swap or post-threshold commit REVERTS with
+/// `ContractError::LiquidityBelowSeedFloor`. It is a per-transaction check:
+/// no pause flag is latched, so nothing needs an admin `Unpause` to clear
+/// and the next transaction re-evaluates the live pool on its own.
 /// Relative-to-seed so the floor scales with each pool's raise size.
-/// Manual admin `Unpause` clears both pause flags.
 pub const BREAKER_FLOOR_PERCENT: u128 = 25;
 
 /// Recovery window for `RecoverPoolStuckStates::StuckThreshold`.

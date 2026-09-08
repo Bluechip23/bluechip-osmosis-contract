@@ -1549,7 +1549,7 @@ Here's a complete, self-contained HTML page you can save and use. It includes wa
 | **Router swap reverts on minimum_receive** | Price moved past your tolerance between simulation and execution. Re-quote and retry, or widen slippage slightly |
 | **"Commit too small"** | Each pool enforces a minimum commit in OSMO: 115 OSMO pre-threshold, 25 OSMO post-threshold by default (the error prints the amounts in micro-OSMO base units). Increase the amount |
 | **"Pool is not fully committed"** | Buy/Sell only work after the pool crosses its OSMO commit threshold. Use Subscribe instead |
-| **Swap refunded, pool paused ("circuit breaker")** | The pool's liquidity breaker latched (a reserve fell below 25% of its seed). Your offer was refunded in the same tx; trading resumes when the admin unpauses |
+| **"Native pool liquidity below the circuit-breaker floor"** | A reserve of the native GAMM pool is below 25% of what was seeded at crossing, so this swap/commit reverted (funds returned by tx failure). Nothing is paused: retry once the pool's liquidity recovers, or trade directly on the native pool |
 | **Calls to `deposit_liquidity` / `collect_fees` / `position` fail** | Those entry points no longer exist — liquidity lives in the native Osmosis pool. LP directly on [app.osmosis.zone](https://app.osmosis.zone) (see Section 8) |
 | **Transaction stuck / pending** | The transaction may still be processing. Check the tx hash on [Mintscan](https://www.mintscan.io/osmosis) or another Osmosis explorer |
 | **Keplr not detecting on mobile** | Use the Keplr mobile app's built-in browser to visit your site |

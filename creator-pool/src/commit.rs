@@ -194,9 +194,14 @@ fn execute_commit_logic(
     }
 
     // A commit's value toward the threshold IS its GROSS (pre-fee) native
-    // amount — the threshold is native-denominated and no oracle exists
-    // anywhere in the protocol. The factory's CommitContext query supplies
-    // the live context a commit still needs (one query per commit):
+    // amount — the threshold is native-denominated and no oracle values a
+    // commit. The factory's CommitContext query supplies the live context a
+    // commit still needs (one query per commit). NOTE: on a pre-threshold
+    // commit that query also runs the factory's fee-route TWAP
+    // (`factory/src/fee_twap.rs`) to budget the GAMM creation-fee swap, and
+    // it is fail-closed — a TWAP error or an implausible price reverts THIS
+    // commit. That is the protocol's one live price dependency: it bounds
+    // whether a pre-threshold commit can execute, never how much it counts.
     //
     // The same response carries the factory's LIVE bluechip
     // protocol-wallet, used for both the per-commit fee transfer and the

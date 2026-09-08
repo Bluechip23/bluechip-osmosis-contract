@@ -28,6 +28,20 @@ pub enum ContractError {
     PositionLocked { unlock_time: Timestamp },
     #[error("The pool is paused due to low liquidity, please supply liquidity before swapping")]
     PoolPausedLowLiquidity {},
+    /// Per-transaction circuit-breaker revert: the live native pool's
+    /// `{side}` reserve is below `BREAKER_FLOOR_PERCENT`% of what was seeded
+    /// at threshold crossing. Nothing is latched — the next swap re-evaluates
+    /// the live pool on its own.
+    #[error(
+        "Native pool liquidity below the circuit-breaker floor: {side} side is {current}, \
+         floor is {floor_percent}% of the seeded {seed}; this transaction reverted, no pause latched"
+    )]
+    LiquidityBelowSeedFloor {
+        side: String,
+        current: Uint128,
+        seed: Uint128,
+        floor_percent: u128,
+    },
     #[error("No distribution or threshold locks and none are in progress")]
     NothingToRecover {},
 
