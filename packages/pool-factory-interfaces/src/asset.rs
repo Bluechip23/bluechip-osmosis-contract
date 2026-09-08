@@ -61,9 +61,9 @@ impl TokenType {
     /// Whether this side is a native bank coin (funds are ATTACHED to the
     /// message rather than pulled via a CW20 allowance).
     ///
-    /// Post-migration BOTH variants are bank denoms, so this returns
-    /// `true` for both. Callers historically used this to mean "is a bank
-    /// coin so `info.funds` carries it" — that meaning now covers the
+    /// BOTH variants are bank denoms, so this returns
+    /// `true` for both. Callers use this to mean "is a bank
+    /// coin so `info.funds` carries it" — that covers the
     /// creator token too (a `SimpleSwap` selling the creator denom, a
     /// deposit attaching the creator denom, etc.), so treating
     /// `CreatorToken` as native here is correct.

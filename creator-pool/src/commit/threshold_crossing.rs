@@ -1,15 +1,15 @@
 //! Threshold-crossing commit handlers. Fire when a single commit carries
-//! the pool over its `commit_amount_for_threshold_usd` target.
+//! the pool over its `commit_amount_for_threshold_native` target.
 //!
-//! Phase-2 responsibilities (in order):
+//! Responsibilities (in order):
 //! 1. Split the incoming commit into a threshold portion (up to the
 //!    remaining target) and an excess portion.
 //! 2. Credit the threshold portion to `COMMIT_LEDGER` +
-//!    `USD_RAISED_FROM_COMMIT` / `NATIVE_RAISED_FROM_COMMIT`, then run the
+//!    `GROSS_NATIVE_COMMITTED` / `NATIVE_RAISED_FROM_COMMIT`, then run the
 //!    payout: mint the splits, schedule the distribution airdrop, and emit
 //!    the `MsgCreateBalancerPool` SubMsg that seeds the NATIVE pool.
 //! 3. REFUND the entire post-fee bluechip excess to the crosser via
-//!    `BankMsg::Send` — there is no inline swap anymore (the native pool
+//!    `BankMsg::Send` — there is no inline swap (the native pool
 //!    doesn't exist yet within this tx; third-party trading happens on the
 //!    native pool once seeded).
 //! 4. Update commit analytics and clear `THRESHOLD_PROCESSING`.
@@ -24,9 +24,8 @@ use crate::generic_helpers::{
 use crate::msg::CommitFeeInfo;
 use crate::state::{
     CommitLimitInfo, PoolAnalytics, PoolInfo, PoolSpecs, ThresholdPayoutAmounts,
-    IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
 };
-use crate::swap_helper::usd_to_native_at_rate;
 
 use super::commit_base_attributes;
 
@@ -40,7 +39,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     amount_after_fees: Uint128,
     _commit_value: Uint128,
     value_to_threshold: Uint128,
-    usd_rate: Uint128,
+    fee_swap_budget: Option<Uint128>,
     pool_specs: &PoolSpecs,
     pool_info: &PoolInfo,
     commit_config: &CommitLimitInfo,
@@ -51,7 +50,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // threaded into `trigger_threshold_payout` (see its docs).
     fee_cfg: Option<&Coin>,
     pricing_pool_id: u64,
-    usd_quote_denom: &str,
+    fee_quote_denom: &str,
     mut messages: Vec<CosmosMsg>,
     _belief_price: Option<Decimal>,
     _max_spread: Option<Decimal>,
@@ -62,10 +61,10 @@ pub(crate) fn process_threshold_crossing_with_excess(
         return Err(ContractError::StuckThresholdProcessing);
     }
 
-    // The threshold gap is USD-denominated; convert it back to native at
-    // EXACTLY the rate captured at commit entry so the split is
-    // arithmetically consistent with the valuation.
-    let bluechip_to_threshold = usd_to_native_at_rate(value_to_threshold, usd_rate)?;
+    // The threshold gap is native-denominated — same units as the commit
+    // itself — so the split needs no conversion: the portion of this commit
+    // that fills the gap IS the gap.
+    let bluechip_to_threshold = value_to_threshold;
     let _bluechip_excess = asset.amount.checked_sub(bluechip_to_threshold)?;
 
     let threshold_portion_after_fees = if amount.is_zero() {
@@ -83,7 +82,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // initial `distributions_remaining`, so it MUST reflect the crosser
     // before the payout runs — hence the insert-and-count happens here.
     super::record_committer(deps.storage, &sender, value_to_threshold)?;
-    USD_RAISED_FROM_COMMIT.save(deps.storage, &commit_config.commit_amount_for_threshold_usd)?;
+    GROSS_NATIVE_COMMITTED.save(deps.storage, &commit_config.commit_amount_for_threshold_native)?;
     // NATIVE_RAISED_FROM_COMMIT stores the NET bluechip entering the pool
     // for the threshold portion. The excess is refunded, not seeded.
     NATIVE_RAISED_FROM_COMMIT.update::<_, ContractError>(deps.storage, |r| {
@@ -101,10 +100,10 @@ pub(crate) fn process_threshold_crossing_with_excess(
         fee_info,
         bluechip_wallet,
         pool_specs.lp_fee,
-        usd_rate,
+        fee_swap_budget,
         fee_cfg,
         pricing_pool_id,
-        usd_quote_denom,
+        fee_quote_denom,
         &env,
     )?;
     messages.extend(payout_msgs.other_msgs);
@@ -185,10 +184,10 @@ pub(crate) fn process_threshold_hit_exact(
     bluechip_wallet: &Addr,
     // Rate + live GAMM-fee context from the dispatcher's CommitContext
     // query — threaded into `trigger_threshold_payout` (see its docs).
-    usd_rate: Uint128,
+    fee_swap_budget: Option<Uint128>,
     fee_cfg: Option<&Coin>,
     pricing_pool_id: u64,
-    usd_quote_denom: &str,
+    fee_quote_denom: &str,
     mut messages: Vec<CosmosMsg>,
     analytics: &PoolAnalytics,
 ) -> Result<Response, ContractError> {
@@ -199,8 +198,8 @@ pub(crate) fn process_threshold_hit_exact(
     // Insert the crosser into the ledger + bump COMMITTER_COUNT if new
     // before `trigger_threshold_payout` reads it below.
     super::record_committer(deps.storage, &sender, commit_value)?;
-    let final_raised = new_total.min(commit_config.commit_amount_for_threshold_usd);
-    USD_RAISED_FROM_COMMIT.save(deps.storage, &final_raised)?;
+    let final_raised = new_total.min(commit_config.commit_amount_for_threshold_native);
+    GROSS_NATIVE_COMMITTED.save(deps.storage, &final_raised)?;
     NATIVE_RAISED_FROM_COMMIT
         .update::<_, ContractError>(deps.storage, |r| Ok(r.checked_add(amount_after_fees)?))?;
 
@@ -213,10 +212,10 @@ pub(crate) fn process_threshold_hit_exact(
         fee_info,
         bluechip_wallet,
         pool_specs.lp_fee,
-        usd_rate,
+        fee_swap_budget,
         fee_cfg,
         pricing_pool_id,
-        usd_quote_denom,
+        fee_quote_denom,
         &env,
     )?;
     messages.extend(payout.other_msgs);

@@ -148,5 +148,5 @@ echo "appended entry to $LOG_FILE"
 
 echo ""
 echo "NEXT:"
-echo "  scripts/cross_threshold.sh $POOL_ADDR    # commit past the USD threshold"
+echo "  scripts/cross_threshold.sh $POOL_ADDR    # commit past the threshold"
 echo "  scripts/status.sh $POOL_ADDR             # watch pool state"

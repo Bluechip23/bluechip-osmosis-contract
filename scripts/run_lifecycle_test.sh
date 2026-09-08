@@ -9,8 +9,8 @@
 # rehearsal, in order:
 #
 #   1. create a commit pool (factory.Create)
-#   2. make a small pre-threshold commit and verify USD accounting
-#   3. commit past the USD threshold (auto-sized at the x/twap rate)
+#   2. make a small pre-threshold commit and verify raise accounting
+#   3. commit past the native threshold (auto-sized from the gap)
 #   4. verify the crossing seeded the NATIVE GAMM pool (reserves > 0)
 #   5. drain the committer distribution and verify the TokenFactory
 #      payout landed (bank balance of the creator denom)
@@ -22,9 +22,9 @@
 #
 # Notes:
 #   - Costs real testnet OSMO: crossing the threshold takes
-#     COMMIT_THRESHOLD_LIMIT_USD worth at the live rate. Drop the
-#     threshold to a few hundred dollars in osmo_testnet.env before
-#     deploying, per docs/OSMOSIS_DEPLOY.md.
+#     COMMIT_THRESHOLD_LIMIT_NATIVE worth of OSMO. Drop the threshold
+#     to a few OSMO in osmo_testnet.env before deploying, per
+#     docs/OSMOSIS_DEPLOY.md.
 #   - Respects the per-wallet 13s commit/swap rate limit with sleeps.
 #   - Pool creation is rate-limited to 1/hour/address on the prod
 #     factory build; re-runs within the hour fail at step 1 unless you
@@ -100,13 +100,11 @@ fi
 
 # ---- 2. small pre-threshold commit ----------------------------------
 small_commit() {
-    # ~$6 at the live rate (min pre-threshold commit is $5).
-    local probe usd_per_osmo amount raised_before raised_after
-    probe="$(query_smart "$FACTORY_ADDR" \
-        '{"pool_factory_query":{"convert_native_to_usd":{"amount":"1000000"}}}')"
-    usd_per_osmo="$(echo "$probe" | jq -r '.amount // empty')"
-    [ -z "$usd_per_osmo" ] && { echo "pricing probe failed: $probe" >&2; return 1; }
-    amount="$(awk -v r="$usd_per_osmo" 'BEGIN { printf "%.0f", 6000000/r*1000000 + 1 }')"
+    # 115 OSMO: exactly the contract's built-in pre-threshold minimum,
+    # and below the 250-OSMO rehearsal threshold, so it must bank
+    # without crossing.
+    local amount raised_before raised_after
+    amount="115000000"
     raised_before="$(query_smart "$POOL_ADDR" '{"is_fully_commited":{}}' \
         | jq -r '.in_progress.raised // "0"')"
     "$SCRIPTS/cross_threshold.sh" "$POOL_ADDR" "$amount" || return 1
@@ -115,11 +113,11 @@ small_commit() {
     # A tiny commit must not cross; raised must strictly increase.
     [ -n "$raised_after" ] && [ "$raised_after" -gt "$raised_before" ]
 }
-step "small pre-threshold commit (USD accounting)" small_commit
+step "small pre-threshold commit (raise accounting)" small_commit
 rate_limit_pause
 
 # ---- 3. cross the threshold ------------------------------------------
-step "cross the USD threshold" "$SCRIPTS/cross_threshold.sh" "$POOL_ADDR"
+step "cross the threshold" "$SCRIPTS/cross_threshold.sh" "$POOL_ADDR"
 
 # ---- 4. AMM seeded ----------------------------------------------------
 amm_seeded() {

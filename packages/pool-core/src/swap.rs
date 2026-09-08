@@ -1,8 +1,7 @@
-//! Pair-shape-agnostic swap — now routed through the NATIVE Osmosis pool.
+//! Pair-shape-agnostic swap, routed through the NATIVE Osmosis pool.
 //!
-//! Phase-2 replaced the internal constant-product AMM with a native GAMM
-//! balancer pool created at threshold-crossing. A swap therefore no longer
-//! does any reserve math locally. Instead it:
+//! Liquidity lives on the native GAMM balancer pool created at
+//! threshold-crossing, so a swap does no reserve math locally. It:
 //!
 //! 1. Confirms/derives the offer coin and the ask (`token_out`) denom from
 //!    `POOL_INFO.asset_infos`.
@@ -67,7 +66,7 @@ fn denom_of(t: &crate::asset::TokenType) -> String {
 ///    [`estimate_swap_out`] — see [`compute_token_out_min`]); and
 /// 2. a **belief-price floor** — `expected_ask * (1 - effective_max_spread)`
 ///    where `expected_ask = offer_amount / belief_price` (the same
-///    convention the retired internal `assert_max_spread` used), only when
+///    convention), only when
 ///    the caller supplies a `belief_price`.
 ///
 /// The result is `max(estimate_floor, belief_floor)`.
@@ -224,10 +223,9 @@ pub fn compute_token_out_min<C: CustomQuery>(
 /// The breaker must be able to LATCH the pool paused
 /// (`POOL_PAUSED` + `POOL_PAUSED_AUTO`) and have that write survive. A
 /// handler that returns `Err` has ALL of its storage writes rolled back by
-/// the CosmWasm VM, so the old "save the pause flags, then `return Err`"
-/// shape never actually paused the pool on-chain — the save was reverted by
-/// the very error it returned (it only appeared to work under the
-/// non-reverting unit-test mock storage). The breaker therefore reports its
+/// the CosmWasm VM — a "save the pause flags, then `return Err`" shape
+/// would never actually pause the pool on-chain, because the save is
+/// reverted by the very error it returns. The breaker therefore reports its
 /// outcome as a value and lets the caller decide the response: on `Tripped`
 /// the caller returns `Ok` (refunding any attached funds) so the latched
 /// pause persists; on `Proceed` it continues with the swap.
@@ -251,8 +249,8 @@ pub enum BreakerOutcome {
 /// EITHER side has fallen below [`BREAKER_FLOOR_PERCENT`]% of its seeded
 /// amount, the pool is auto-paused (`POOL_PAUSED` + `POOL_PAUSED_AUTO` set
 /// to `true`) and [`BreakerOutcome::Tripped`] is returned. Manual admin
-/// `Unpause` clears both flags. Replaces the retired absolute
-/// `MINIMUM_LIQUIDITY` guard, which is meaningless on a native pool.
+/// `Unpause` clears both flags. Relative-to-seed (not absolute) so the
+/// floor scales with each pool's own raise size.
 ///
 /// Called at the START of swap routing on BOTH swap sites (SimpleSwap here,
 /// and the post-threshold commit path), before dispatching the swap.
@@ -369,6 +367,7 @@ pub fn simple_swap(
     to: Option<Addr>,
     transaction_deadline: Option<cosmwasm_std::Timestamp>,
     preloaded_ctx: Option<PoolCtx>,
+    sender_is_registered_router: bool,
 ) -> Result<Response, ContractError> {
     enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
@@ -391,6 +390,7 @@ pub fn simple_swap(
             allow_high_max_spread,
             to,
             ctx,
+            sender_is_registered_router,
         )
     })
 }
@@ -409,6 +409,7 @@ fn execute_simple_swap_with_ctx(
     allow_high_max_spread: Option<bool>,
     to: Option<Addr>,
     ctx: PoolCtx,
+    sender_is_registered_router: bool,
 ) -> Result<Response, ContractError> {
     let PoolCtx {
         info: pool_info,
@@ -416,7 +417,20 @@ fn execute_simple_swap_with_ctx(
         specs: pool_specs,
     } = ctx;
 
-    check_rate_limit(deps, &env, &pool_specs, &sender)?;
+    // The registered multi-hop router is exempt from the per-address swap
+    // cooldown: every router hop arrives with `sender = router`, so ALL
+    // router users would otherwise share ONE 13s slot per pool — a
+    // dust-cost griefing vector (one bot swap per pool per 13s locks the
+    // router out) that also breaks multi-hop routes touching a pool twice.
+    // Exempting it does not weaken the limit's protection: the per-address
+    // cooldown is rotatable by any direct caller with multiple keys, while
+    // each router hop is still bounded by the 5% spread cap, the breaker,
+    // and the router's end-to-end `minimum_receive`. The exemption is
+    // fail-closed — it applies only when the pool has ALREADY verified
+    // `sender` against the factory's registered router this call.
+    if !sender_is_registered_router {
+        check_rate_limit(deps, &env, &pool_specs, &sender)?;
+    }
 
     // Resolve which side is being offered and the ask denom.
     let (offer_denom, ask_denom) =

@@ -57,12 +57,11 @@ use crate::{CONTRACT_NAME, CONTRACT_VERSION};
 
 // Reply step constants (stored in low 8 bits of reply ID).
 //
-// Phase-2: the CW20-instantiate step AND the position-NFT-instantiate step
-// are both gone. The creator token is a pool-owned native denom and the
-// internal LP system was removed, so the reply chain is a single step:
-// pool-instantiate -> finalize. `FINALIZE_POOL` handles the pool-created
-// reply. (`MINT_CREATE_POOL` = 2 is retired; the constant is left out so a
-// stale reply id routes to `UnknownReplyId`.)
+// The creator token is a pool-owned native TokenFactory denom, so the
+// reply chain is a single step: pool-instantiate -> finalize.
+// `FINALIZE_POOL` handles the pool-created reply. (Reply id 2 is
+// deliberately unassigned so an unexpected id routes to
+// `UnknownReplyId`.)
 pub const FINALIZE_POOL: u64 = 3;
 
 /// Encodes a `pool_id` and a reply-chain step into a single SubMsg reply ID.
@@ -97,8 +96,7 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     cw2::set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    // No prior config at instantiate, so the live Pyth probe always runs.
-    config::validate_factory_config(deps.as_ref(), &env, &msg, None)?;
+    config::validate_factory_config(deps.as_ref(), &env, &msg)?;
 
     FACTORYINSTANTIATEINFO.save(deps.storage, &msg)?;
     // A fresh deployment maintains PAIRS / POOL_ID_BY_ADDRESS through
@@ -332,6 +330,7 @@ pub fn execute_apply_router(
             effective_after: pending.effective_after,
         });
     }
+    crate::execute::config::ensure_apply_window(&env, pending.effective_after)?;
     crate::state::ROUTER_ADDRESS.save(deps.storage, &pending.router)?;
     crate::state::PENDING_ROUTER.remove(deps.storage);
     Ok(Response::new()
@@ -345,6 +344,14 @@ pub fn execute_cancel_router(
     info: MessageInfo,
 ) -> Result<Response, ContractError> {
     ensure_admin(deps.as_ref(), &info)?;
+    // Error (not no-op) when nothing is pending, mirroring
+    // CancelPoolUpgrade: a cancel that "succeeds" against thin air masks
+    // an operator's wrong assumption about what is in flight.
+    if crate::state::PENDING_ROUTER.may_load(deps.storage)?.is_none() {
+        return Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
+            "No pending router update to cancel",
+        )));
+    }
     crate::state::PENDING_ROUTER.remove(deps.storage);
     Ok(Response::new().add_attribute("action", "cancel_router"))
 }

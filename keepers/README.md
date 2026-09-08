@@ -1,9 +1,9 @@
 # Bluechip Keepers
 
 > Keeper actions pay **no bounty** — the operator absorbs gas costs as
-> part of running the protocol. There is no price-oracle keeper: USD
-> pricing is chain-native (Osmosis `x/twap`) and needs no off-chain
-> upkeep.
+> part of running the protocol. There is no price keeper: the commit
+> threshold is denominated in OSMO itself, so nothing needs off-chain
+> price upkeep.
 
 One off-chain bot keeps the Bluechip protocol tidy — the **distribution
 keeper**, which per sweep:

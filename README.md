@@ -1,22 +1,21 @@
 # bluechip-osmosis-contract
 
 A decentralized subscription / creator-economy protocol built with CosmWasm
-for **Osmosis**. Creators launch a token by raising a USD-denominated
-threshold in **OSMO**; when the threshold is crossed the protocol mints the
-token, seeds a **native Osmosis GAMM pool**, and airdrops the token to the
-people who funded it.
+for **Osmosis**. Creators launch a token by raising a fixed,
+**native-denominated** commit threshold in **OSMO**; when the threshold is
+crossed the protocol mints the token, seeds a **native Osmosis GAMM pool**,
+and airdrops the token to the people who funded it.
 
-This is the **Osmosis-native** rewrite of the original Bluechip protocol.
-There is **no in-house AMM, no CW20, and no LP-position NFT** anymore — those
-were removed and replaced by chain-native modules:
+The protocol has **no in-house AMM, no CW20, no LP-position NFT, and no
+price oracle** — chain-native modules do the heavy lifting:
 
-| Concern | Old (pre-migration) | Now (this repo) |
-|---|---|---|
-| Creator token | custom CW20 contract | **TokenFactory** denom `factory/{pool}/{sub}` |
-| AMM venue | internal constant-product reserves | **GAMM** balancer pool (`gamm/pool/{id}`) |
-| Swaps | internal `compute_swap` | **poolmanager** `MsgSwapExactAmountIn` |
-| LP positions | position-NFT + reserve math | pool holds the GAMM LP shares directly |
-| USD price | bespoke oracle | **Pyth** OSMO/USD feed (gated, fail-closed) |
+| Concern | Implementation |
+|---|---|
+| Creator token | **TokenFactory** denom `factory/{pool}/{sub}` |
+| AMM venue | **GAMM** balancer pool (`gamm/pool/{id}`) |
+| Swaps | **poolmanager** `MsgSwapExactAmountIn` |
+| LP position | the pool contract holds its GAMM LP shares directly |
+| Commit threshold | **native OSMO base units** — no price feed anywhere |
 
 > Reviewing the code? Start with `packages/pool-core/src/osmosis_msgs.rs`
 > (every native message the system builds lives there), then
@@ -29,7 +28,8 @@ were removed and replaced by chain-native modules:
 
 ```
 factory/          Creates & registers every pool. Owns global config
-                  (48h timelock). Serves USD pricing from the Pyth oracle.
+                  (48h timelock). Serves the per-commit CommitContext
+                  (live protocol wallet + GAMM-creation-fee budget).
 creator-pool/     One instance per creator. Commit ledger → threshold
                   crossing → post-threshold trading. Denom admin of its
                   own TokenFactory token; holds its GAMM LP shares.
@@ -43,7 +43,7 @@ packages/
   easy-addr/      Test-only address helper.
 ```
 
-`pool-core` no longer contains AMM math — it contains the typed surface for
+`pool-core` contains no AMM math — it is the typed surface for
 TokenFactory / GAMM / poolmanager and the swap/reply plumbing.
 
 ---
@@ -54,17 +54,22 @@ TokenFactory / GAMM / poolmanager and the swap/reply plumbing.
 config and enforced on every pool (`validate_pool_token_info`). OSMO is:
 
 - the **only** asset a commit may attach (`must_pay` strict),
+- the unit the **commit threshold is denominated in** — a commit's value
+  toward the threshold IS its attached OSMO, with no conversion,
 - the **pairing side** of every creator pool (`asset_infos[0]` is always the
   `Native` OSMO side, `asset_infos[1]` the creator TokenFactory side),
 - the denom the **GAMM pool-creation-fee reserve** is retained in (the fee
-  itself is charged in whatever coin x/poolmanager params name — 20 Noble
+  itself is charged in whatever coin x/poolmanager params name — 20 alloyed
   USDC on osmosis-1 — and the pool swaps its OSMO retention into that coin
-  at crossing when they differ), and
+  at crossing when they differ; see
+  [how the pool is paid for](#how-the-liquidity-pool-is-paid-for)), and
 - the reserve the creator's over-cap excess is paid out in.
 
-The commit *threshold* is USD-denominated ($25k default) but paid in OSMO, so
-every commit is valued through the Pyth oracle at entry (see
-[USD pricing](#usd-pricing-pyth)).
+The commit *threshold* is **500,000 OSMO** at launch
+(`commit_threshold_limit_native = 500000000000`, 6-dec base units), tunable
+through the factory's 48h config flow (a retune applies to pools created
+after it). There is no price oracle anywhere in the protocol, so no external
+feed or thin-liquidity price can influence when a pool crosses.
 
 ---
 
@@ -77,7 +82,7 @@ the threshold is `Commit`; everything else is gated on `IS_THRESHOLD_HIT`.
  Stage 0            Stage 1                Stage 2                 Stage 3
  CREATE     →       PRE-THRESHOLD    →     CROSSING (atomic)   →   POST-THRESHOLD
  factory.Create     Commit (funding)       mint + seed GAMM        Commit (buy) + SimpleSwap
-                    USD-valued ledger      + queue airdrop         + distribution
+                    OSMO-valued ledger     + queue airdrop         + distribution
 ```
 
 ### Stage 0 — Create (factory, permissionless)
@@ -123,24 +128,29 @@ if info.sender != cfg.expected_factory_address { return Err(ContractError::Unaut
 
 ### Stage 1 — Pre-threshold (funding)
 
-Each `Commit` attaches OSMO, is valued in USD, has fees split off, and is
-recorded in a ledger. The net OSMO accrues toward the threshold.
+Each `Commit` attaches OSMO, has fees split off, and is recorded in a
+ledger. The gross OSMO accrues toward the threshold; the net enters the
+pool's balance toward the seed.
 
 ```json
 { "commit": {
-  "asset": { "info": { "bluechip": { "denom": "uosmo" } }, "amount": "1000000" },
+  "asset": { "info": { "bluechip": { "denom": "uosmo" } }, "amount": "115000000" },
   "transaction_deadline": null, "belief_price": null, "max_spread": null
 } }
 ```
 
 ```rust
-// creator-pool/src/commit.rs — one factory round-trip (which reads Pyth); the
-// rate is captured once and threaded through the whole tx (no mid-tx drift).
-let commit_ctx = get_commit_context(deps.as_ref(), &pool_info.factory_addr, asset.amount)?;
-let commit_value = commit_ctx.amount;          // USD (6-dec)
-let usd_rate     = commit_ctx.rate_used;
+// creator-pool/src/commit.rs — one factory round-trip for live context
+// (protocol wallet + gamm-fee budget). The threshold needs NO valuation:
+// a commit's value toward it IS its attached native amount.
+let threshold_already_hit = IS_THRESHOLD_HIT.load(deps.storage)?;
+let commit_ctx = get_commit_context(
+    deps.as_ref(),
+    &pool_info.factory_addr,
+    !threshold_already_hit,   // post-threshold commits skip the fee budget
+)?;
+let commit_value = asset.amount;
 let live_bluechip_wallet = commit_ctx.bluechip_wallet;   // live, so wallet rotations apply
-if usd_rate.is_zero() || commit_value.is_zero() { return Err(ContractError::InvalidOraclePrice {}); }
 ```
 
 Fees are split for **every** commit path (1% protocol + 5% creator):
@@ -153,17 +163,18 @@ The net enters the pool's OSMO balance and the committer is recorded:
 
 ```rust
 super::record_committer(deps.storage, &sender, commit_value)?;   // ledger + O(1) distinct-committer count
-USD_RAISED_FROM_COMMIT.save(deps.storage, &new_usd_total)?;
-NATIVE_RAISED_FROM_COMMIT.update(..)?;                            // NET OSMO held toward the seed
+GROSS_NATIVE_COMMITTED.save(deps.storage, &new_total)?;          // GROSS OSMO toward the threshold
+NATIVE_RAISED_FROM_COMMIT.update(..)?;                           // NET OSMO held toward the seed
 ```
 
-Commits are floored (min **$5** pre / **$1** post, admin-tunable to $1,000)
-and rate-limited to **13s/wallet**. Pre-threshold, `SimpleSwap` and every
-claim/recover path reject — only `Commit` works.
+Commits are floored (min **115 OSMO** pre / **25 OSMO** post, admin-tunable
+per pool up to 25,000 OSMO) and rate-limited to **13s/wallet**.
+Pre-threshold, `SimpleSwap` and every claim/recover path reject — only
+`Commit` works.
 
 ### Stage 2 — Threshold crossing (one atomic transaction)
 
-When a commit pushes `USD_RAISED_FROM_COMMIT` to the target,
+When a commit pushes `GROSS_NATIVE_COMMITTED` to the target,
 `trigger_threshold_payout` runs. It is a **one-shot** event guarded by four
 independent gates (dispatcher latch, two handler entry gates, and the
 load-bearing `IS_THRESHOLD_HIT` check):
@@ -180,18 +191,17 @@ It does five things:
 **(1) Mint the four token splits** via TokenFactory `MsgMint` (pool is admin):
 
 ```rust
-other_msgs.push(mint_tokens(pool, denom, &creator_wallet,  creator_reward_amount));  // 325,000 → creator
-other_msgs.push(mint_tokens(pool, denom, bluechip_wallet,  bluechip_reward_amount)); //  25,000 → protocol
-other_msgs.push(mint_tokens(pool, denom, &pool_contract,   pool_seed_amount));       // 350,000 → pool (to seed)
-// commit_return_amount (500,000) is minted per-committer during distribution.
+other_msgs.push(mint_tokens(pool, denom, &creator_wallet,  payout.creator_reward_amount));  // 325,000 → creator
+other_msgs.push(mint_tokens(pool, denom, bluechip_wallet,  payout.bluechip_reward_amount)); //  25,000 → protocol
+other_msgs.push(mint_tokens(pool, denom, &pool_contract,   payout.pool_seed_amount));       // 350,000 → pool (to seed)
+// payout.commit_return_amount (500,000) is minted per-committer during distribution.
 ```
 
 **(2) Queue the committer airdrop** (`DISTRIBUTION_STATE`) — paid in batches
 later, not here (see [distribution](#batched-distribution)).
 
 **(3) Seed a native GAMM balancer pool** with the raised OSMO + the pool-seed
-tokens. Equal weights give the same constant-product (`x·y=k`) curve the old
-internal AMM had:
+tokens. Equal weights give a standard constant-product (`x·y=k`) curve:
 
 ```rust
 // packages/pool-core/src/osmosis_msgs.rs
@@ -217,7 +227,7 @@ creation reverts the whole crossing** — so if the pool ends up `FullyCommitted
 the native pool provably exists.
 
 **(4) Handle over-raise** — the OSMO above the cap is escrowed for the creator
-(see [excess](#excess-liquidity-when-osmo-is-cheap)).
+(see [excess](#excess-liquidity-above-the-lock-cap)).
 
 **(5) Notify the factory** (`NotifyThresholdCrossed`, one-shot + idempotent).
 It's dispatched `reply_on_error` so a factory hiccup can't revert the
@@ -228,7 +238,9 @@ crossing; a permissionless `RetryFactoryNotify` re-sends it.
 - **`SimpleSwap`** routes through the native pool via `MsgSwapExactAmountIn`;
   the output is forwarded to the receiver in the reply.
 - **`Commit` still works** — post-threshold it's a market **buy**: the net
-  OSMO (after the same 1%+5% fees) is swapped for the creator token.
+  OSMO (after the same 1%+5% fees) is swapped for the creator token. These
+  commits pass `include_fee_budget: false` to the factory, so a
+  pricing-pool outage can never block trading-phase commits.
 - **`ContinueDistribution`** flushes the airdrop in batches.
 
 ```rust
@@ -269,19 +281,27 @@ nobody can claim them out.
 
 ## How the liquidity pool is paid for
 
-Creating a GAMM pool costs the chain's `PoolCreationFee` (**1000 OSMO** on
-Osmosis mainnet, governance-adjustable), charged by the `x/gamm` module *on
-top of* the seeded coins. Neither the creator nor the committers pay it
-directly — it's funded from the **protocol's own 1% commit fee**, retained
-in-pool during funding up to a target:
+Creating a GAMM pool costs the chain's `PoolCreationFee` (an
+`x/poolmanager` param — **20 alloyed USDC** on osmosis-1,
+governance-adjustable), charged *on top of* the seeded coins when
+`MsgCreateBalancerPool` executes. Neither the creator nor the committers pay
+it directly — it's funded from the **protocol's own 1% commit fee**, retained
+in-pool during funding up to a live target:
 
 ```rust
-// creator-pool/src/commit.rs — H-2: only retain toward the fee while
+// creator-pool/src/commit.rs — only retain toward the fee while
 // pre-threshold; once crossed the full 1% always goes to the wallet.
 let bluechip_fee_to_wallet = if threshold_already_hit {
     commit_fee_bluechip_amt
 } else {
-    reserve_bluechip_fee(deps.storage, commit_fee_bluechip_amt)?   // fills BLUECHIP_FEE_RESERVED
+    reserve_bluechip_fee(              // fills BLUECHIP_FEE_RESERVED toward the live target
+        deps.storage,
+        commit_fee_bluechip_amt,
+        gamm_fee_cfg.as_ref(),
+        &bluechip_denom,
+        &fee_quote_denom,
+        fee_swap_budget,
+    )?
 };
 ```
 
@@ -291,23 +311,40 @@ config can't brick the crossing:
 
 ```rust
 // creator-pool/src/commit/threshold_payout.rs — cross-denom fee resolution
-let fee_coin = query_pool_creation_fee_coin(querier)   // authoritative x/poolmanager param
-    .or_else(|| fee_cfg.cloned())                      // live factory config (CommitContext)
-    .or_else(|| legacy_native_target());               // instantiate-time fallback
+let fee_coin: Option<Coin> = query_pool_creation_fee_coin(querier) // authoritative x/poolmanager param
+    .or_else(|| fee_cfg.cloned())                                  // live factory config (CommitContext)
+    .or_else(|| /* instantiate-time native-denom fallback */)
+    .filter(|c| !c.amount.is_zero());
 ```
 
 The fee's **denom** decides how it is paid. On chains that charge it in the
-native denom (osmo-test-5: 1 OSMO) the gamm module deducts it straight from
-the pool's OSMO balance. On **osmosis-1 the fee is 20 Noble USDC** — the pool
+native denom (osmo-test-5: 1 OSMO) the module deducts it straight from the
+pool's OSMO balance. On **osmosis-1 the fee is 20 alloyed USDC** — the pool
 holds no USDC, so the crossing first emits a `MsgSwapExactAmountOut` through
-the factory's pricing pool (which trades OSMO/USDC by definition), converting
-the retained OSMO reserve into *exactly* the fee coin; the budget is the
-fee's value at the commit-entry oracle rate plus a 20% margin, and exact-out
-leaves zero USDC dust. Any other fee denom fails with an actionable config
-error instead of an opaque gamm revert. Either way the funding source is the
-same: **the 1% commit-fee retention — protocol revenue, never the creator.**
+the factory's pricing pool (which trades OSMO against the fee-quote denom by
+definition), converting the retained OSMO reserve into *exactly* the fee
+coin; exact-out leaves zero USDC dust. The swap's spend cap is the factory's
+[fee-route TWAP](#the-fee-route-twap-the-only-price-read) valuation plus a
+20% margin, **hard-clamped to the retained reserve**:
 
-The seed is then sized so `seed_osmo + fee_budget ≤ balance` always holds
+```rust
+// creator-pool/src/commit/threshold_payout.rs — HARD CLAMP to the reserve:
+// MsgSwapExactAmountOut draws from the pool's ENTIRE bank balance up to
+// token_in_max_amount, so an unclamped budget would let a manipulated
+// pricing-pool TWAP route committer seed funds out through the fee swap.
+let max_in = base_in
+    .multiply_ratio(10_000u128 + FEE_SWAP_MARGIN_BPS, 10_000u128)
+    .checked_add(Uint128::one())?
+    .min(reserved);
+```
+
+Clamped, the swap can spend at most the 1%-retention reserve — protocol fee
+revenue, never committer or seed funds. Any other fee denom fails with an
+actionable config error instead of an opaque gamm revert. Either way the
+funding source is the same: **the 1% commit-fee retention — protocol
+revenue, never the creator.**
+
+The seed is then sized so `seed_osmo + creation_fee ≤ balance` always holds
 (the protocol absorbs any shortfall via a smaller seed, never the creator's
 escrow), and any reserve surplus is remitted back to the protocol wallet. If
 the fee ever met or exceeded the whole raise, the crossing fails with a clear,
@@ -315,9 +352,11 @@ actionable error rather than an opaque gamm revert:
 
 ```rust
 if seed_osmo.is_zero() {
-    return Err(ContractError::InvalidThresholdParams { msg:
-        "pool-creation fee meets or exceeds the raised bluechip seed; \
-         the commit threshold is too small relative to the chain's pool-creation fee".into() });
+    return Err(ContractError::InvalidThresholdParams { msg: format!(
+        "pool-creation fee ({}) meets or exceeds the raised bluechip seed ({}); \
+         the commit threshold is too small relative to the chain's pool-creation fee",
+        creation_fee, base_seed_osmo
+    ) });
 }
 ```
 
@@ -342,32 +381,37 @@ if !effective_bluechip_excess.is_zero() {
 }
 ```
 
-`USD_RAISED_FROM_COMMIT` is pinned to exactly the target, so the committer
-ledger provably sums to the threshold and the 500,000-token airdrop can never
-over-mint.
+`GROSS_NATIVE_COMMITTED` is pinned to exactly the target at crossing —
+
+```rust
+GROSS_NATIVE_COMMITTED.save(deps.storage, &commit_config.commit_amount_for_threshold_native)?;
+```
+
+— so the committer ledger provably sums to the threshold and the
+500,000-token airdrop can never over-mint.
 
 ---
 
-## Excess liquidity when OSMO is cheap
+## Excess liquidity above the lock cap
 
-The threshold is USD-denominated, so when **OSMO is cheap it takes more OSMO
-to reach $25k** — and a pool can accumulate more OSMO than you want locked in
-one AMM. `max_bluechip_lock_per_pool` caps how much of the raised OSMO is
-seeded into the GAMM pool. Anything above the cap — plus the proportional
-creator tokens — is **time-locked to the creator**, not seeded and not lost:
+`max_bluechip_lock_per_pool` caps how much of the raised OSMO is seeded into
+the GAMM pool, so a single AMM never has to absorb the full raise. Anything
+above the cap — plus the proportional creator tokens — is **time-locked to
+the creator**, not seeded and not lost:
 
 ```rust
 // creator-pool/src/commit/threshold_payout.rs
 if pools_bluechip_seed > commit_config.max_bluechip_lock_per_pool {
-    let excess_bluechip = pools_bluechip_seed.checked_sub(max_lock)?;
+    let excess_bluechip = pools_bluechip_seed.checked_sub(commit_config.max_bluechip_lock_per_pool)?;
     let excess_creator_tokens = payout.pool_seed_amount.multiply_ratio(excess_bluechip, pools_bluechip_seed);
     CREATOR_EXCESS_POSITION.save(storage, &CreatorExcessLiquidity {
         creator: fee_info.creator_wallet_address.clone(),
         bluechip_amount: excess_bluechip,           // RAW OSMO, kept in the contract
         token_amount:    excess_creator_tokens,     // RAW creator tokens, minted-but-not-seeded
-        unlock_time: env.block.time.plus_seconds(creator_excess_liquidity_lock_days * SECONDS_PER_DAY),
+        unlock_time: env.block.time.plus_seconds(
+            commit_config.creator_excess_liquidity_lock_days * SECONDS_PER_DAY),
     })?;
-    // pool is seeded with max_lock OSMO + the non-earmarked creator tokens.
+    // pool is seeded with max_bluechip_lock_per_pool OSMO + the non-earmarked creator tokens.
 }
 ```
 
@@ -410,26 +454,31 @@ commits require an explicit `belief_price`** (there's no end-to-end
 `minimum_receive` backstop on that path, unlike the router):
 
 ```rust
-// creator-pool/src/commit/post_threshold.rs — H-3
+// creator-pool/src/commit/post_threshold.rs
 if belief_price.is_none() {
     return Err(ContractError::BeliefPriceRequired {});
 }
 ```
 
 The reference frontend takes a live `Simulation` quote at submit time and sets
-`belief_price = offer / expected_out`. `SimpleSwap` still accepts
-`belief_price: null` because the **router** relies on it (the router pins each
-hop's `max_spread` to the 5% cap and enforces an end-to-end `minimum_receive`
-instead — a `minimum_receive` of 0 is rejected).
+`belief_price = offer / expected_out`. A direct `SimpleSwap` with
+`belief_price: null` is likewise rejected — with one exception: the
+**registered router**, verified against the live factory registration, may
+swap null-belief because it pins each hop's `max_spread` to the 5% cap and
+enforces an end-to-end `minimum_receive` instead (a `minimum_receive` of 0 is
+rejected). The same registration also exempts the router from the per-address
+13s swap cooldown — every hop of a route arrives at the pool as the router,
+so all router users would otherwise share one rate-limit slot per pool.
+Direct callers keep the cooldown.
 
 **Post-crossing circuit breaker.** Before any contract-routed swap, a relative
 liquidity breaker compares the live GAMM pool to what was seeded and **latches
 the pool paused** if either side falls below 25% of its seed (a drain signal):
 
 ```rust
-// packages/pool-core/src/swap.rs — H-1: returns an outcome and LATCHES the
-// pause (an earlier version returned Err, which the VM rolled back, so the
-// pause never persisted on-chain).
+// packages/pool-core/src/swap.rs — returns an outcome and LATCHES the
+// pause (an Err would be rolled back by the VM, so the pause could
+// never persist on-chain; the Ok return is what makes the write stick).
 match enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creator_denom)? {
     BreakerOutcome::Proceed => { /* dispatch the swap */ }
     BreakerOutcome::Tripped => {
@@ -443,11 +492,13 @@ match enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creat
 
 ## Other protections
 
-- **Fail-closed USD pricing** — a query error, a stale / too-fresh /
-  low-confidence price, a bad exponent, or a rate outside the
-  **$0.0001–$100/OSMO** plausibility band reverts the commit; a proposed
-  *pricing* config is **live-probed** at instantiate/propose/apply. See
-  [USD pricing](#usd-pricing-pyth).
+- **Fail-closed fee budgeting** — the only price read in the protocol is the
+  [fee-route TWAP](#the-fee-route-twap-the-only-price-read), and it fails
+  closed: a query error, a zero or unparseable price, or a price above the
+  plausibility ceiling reverts the pre-threshold commit; the route is
+  **live-probed** at factory instantiate and at every config propose/apply.
+  Post-threshold commits skip the budget entirely, so a pricing-pool outage
+  can never block trading.
 - **Reentrancy** — one shared `REENTRANCY_LOCK` wraps commit and swap;
   checked/`Uint256` arithmetic throughout; `overflow-checks = true` in release.
 - **Strict fund handling** — `must_pay` on every commit/swap rejects
@@ -461,69 +512,88 @@ match enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creat
   `ClaimFailedDistribution`) instead of reverting the batch. Stalls recover
   via admin (`RecoverPoolStuckStates`, 1h) or anyone
   (`SelfRecoverDistribution`, 7d).
-- **Rate limits & spam** — 13s per-wallet commit/swap cooldown; 5s per-caller
-  `ContinueDistribution` cooldown; 1h/address pool-creation limit + flat OSMO
-  creation fee.
+- **Rate limits & spam** — 13s per-wallet commit/swap cooldown (registered
+  router exempt); 5s per-caller `ContinueDistribution` cooldown; 1h/address
+  pool-creation limit + flat OSMO creation fee.
 - **Admin & governance** — every privileged factory entry point is
   admin-gated; all config / pool-config / upgrade flows are **48h
   propose→apply** with no early-apply and no silent overwrite of a pending
-  proposal; two-phase emergency withdraw (config-set delay, 24h mainnet
-  default) routes to the protocol wallet; `migrate` refuses semver downgrades
-  and foreign-storage (cw2 name mismatch). Put admin/migration keys behind a
-  multisig (`docs/MULTISIG.md`).
+  proposal; every pending change is publicly readable via the factory
+  `PendingChanges {}` query, and an apply **expires 7 days** after its
+  timelock elapses (re-propose required); `bluechip_denom` is **immutable**
+  on a live factory; two-phase emergency withdraw (config-set delay, 6h–7d
+  bounds, 24h default) routes to the protocol wallet; `migrate` refuses
+  semver downgrades and foreign storage (cw2 name mismatch). Put
+  admin/migration keys behind a multisig — mainnet deploys refuse to run
+  without one.
 - **Router** — every hop's pool is validated against the factory registry (and
   its declared pair against the pool's real sides) before funds move; a route
   through a pre-threshold pool is rejected up front.
 
 ---
 
-## USD pricing (Pyth)
+## The fee-route TWAP (the only price read)
+
+There is **no price oracle in the protocol** — the commit threshold is
+native-denominated, so no commit is ever "valued". The single price read
+lives in `factory/src/fee_twap.rs`, and it prices exactly one thing: the
+native budget for the ~$20 cross-denom GAMM creation-fee swap at threshold
+crossing. It is a chain-module read (`x/twap`), so there is no keeper and no
+external feed:
 
 ```rust
-// factory/src/usd_price.rs — read the Pyth OSMO/USD feed, gate it, normalize.
-let response: PriceFeedResponse = deps.querier.query_wasm_smart(
-    config.pyth_contract_addr.as_str(),
-    &PythQueryMsg::PriceFeed { id: feed_id.to_string() },
-)?;
-// → micro-USD per micro-OSMO (`rate_used`), after the gates below.
+// factory/src/fee_twap.rs — arithmetic TWAP over the trailing 600s window.
+let resp = TwapQuerier::new(&deps.querier)
+    .arithmetic_twap_to_now(
+        config.pricing_pool_id,
+        // base = fee denom, quote = native → price is native per fee unit.
+        config.fee_quote_denom.clone(),
+        config.bluechip_denom.clone(),
+        Some(osmosis_std::shim::Timestamp { seconds: start as i64, nanos: 0 }),
+    )?;
 ```
 
-Every gate **fails closed** — a commit that cannot be safely valued reverts
-rather than being mispriced:
+Every failure **fails closed** — a pre-threshold commit that cannot budget
+the fee safely reverts rather than mis-budgeting:
 
 | Gate | Rule |
 |---|---|
-| Feed id | response id must match the configured feed (case-insensitive) |
-| Publish time | no negative; no future beyond a 5s skew tolerance |
-| Staleness | age ≤ `max_pyth_staleness_seconds` (default 300s, bounds 30–600) |
-| Minimum age | age ≥ 10s, so a just-pushed price can't be consumed in the same breath |
-| Price sign | must be positive |
-| Confidence | `conf/price` ≤ `pyth_conf_threshold_bps` (default 200 = 2%, bounds 50–500) |
-| Exponent | within `[-12, -4]` |
-| Plausibility | normalized rate within `[$0.0001, $100]` per OSMO |
+| Query error | propagates; the commit reverts |
+| Zero / unparseable price | rejected |
+| Plausibility ceiling | price > 1,000 uosmo per fee unit rejected (`MAX_NATIVE_PER_FEE_UNIT` — OSMO at $0.001, ~40x below spot, so real moves have huge headroom) |
+| Rounding | budget = **ceil**(fee × price) — never undershoots by a base unit |
+| Window | 600s trailing (`FEE_TWAP_WINDOW_SECONDS`) |
 
-- **Why Pyth, not a pool TWAP** — the on-chain OSMO/USD pool substrate is thin
-  (a few thousand dollars of depth per venue), which makes a pool-TWAP oracle
-  manipulable for ~$1–3k. Pyth aggregates many CEX/DEX venues, so moving its
-  price is orders of magnitude costlier.
-- **A price keeper is REQUIRED** — Pyth on Osmosis is push-based and nobody
-  keeps OSMO/USD fresh there, so the protocol runs a standing keeper
-  (`keepers/`, `npm run price-keeper`) that pushes Hermes updates on-chain. If
-  it lapses, the staleness gate makes commits fail closed until it resumes:
-  a **liveness** dependency, not a fund risk. Supervise it and alert on lag
-  (see `RUNBOOK.md`).
-- **Bare-price responses are rejected** — a response carrying a price with no
-  feed id to verify is refused rather than trusted.
+**Why a TWAP is safe here.** The blast radius is the fee, not the raise. A
+manipulated TWAP either (a) under-budgets — the exact-out swap exceeds its
+`token_in_max`, the whole crossing reverts atomically, and it is retried
+later (liveness only, funds safe) — or (b) over-budgets — the pool side
+hard-clamps the swap's spend to its 1%-retention reserve
+(`BLUECHIP_FEE_RESERVED`), so the worst case spends protocol fee revenue,
+never committer or seed funds. Manipulating a 600s TWAP costs more than
+either outcome is worth.
 
-> The factory's `pricing_pool_id` / `usd_quote_denom` are **not** a price
-> source. They survive only as the cross-denom fee-swap route used at
-> threshold crossing to acquire a USDC-denominated GAMM creation fee.
+The factory sizes the budget against **max(configured fee, live
+x/poolmanager fee)** so config drift or a chain-governance fee change can
+never strand a crossing, and serves it via the same `CommitContext` query
+every commit already makes. Post-threshold commits pass
+`include_fee_budget: false` — they never fund a fee swap, so a pricing-pool
+outage cannot block trading. The route is live-probed at factory
+**instantiate** and at every config **propose/apply**, so a dead or
+misconfigured route is refused before it can matter.
 
-Integrators read the same conversion the pools use:
+Integrators read the same context the pools use:
 
 ```json
-{ "pool_factory_query": { "convert_native_to_usd": { "amount": "1000000" } } }
+{ "pool_factory_query": { "commit_context": {} } }
+// → { "timestamp", "bluechip_wallet", "gamm_pool_creation_fee",
+//     "fee_swap_budget_native", "pricing_pool_id", "fee_quote_denom" }
 ```
+
+> The factory's `pricing_pool_id` / `fee_quote_denom` are **not** a price
+> source for the threshold. They exist only as the cross-denom fee-swap
+> route used at threshold crossing to acquire a USDC-denominated GAMM
+> creation fee.
 
 ---
 
@@ -536,7 +606,7 @@ threshold payout:
 
 | Recipient | Tokens | % | Notes |
 |---|---|---|---|
-| Committers | 500,000 | ~41.7% | pro-rata by USD committed; airdropped in batches |
+| Committers | 500,000 | ~41.7% | pro-rata by OSMO committed; airdropped in batches |
 | Creator | 325,000 | ~27.1% | unlocked at crossing (not vested) |
 | Protocol wallet | 25,000 | ~2.1% | live-resolved recipient |
 | Pool seed | 350,000 | ~29.2% | seeds the GAMM pool (owned by no user) |
@@ -548,7 +618,7 @@ Commit (1000 OSMO)
   └─ 94% (940) → ledger (pre-threshold)  |  AMM buy (post-threshold)
 ```
 
-Committer reward: `user_tokens = (user_usd / total_usd) × 500,000`; floor-
+Committer reward: `user_tokens = (user_osmo / total_osmo) × 500,000`; floor-
 division dust is settled to the creator on the final batch. Creator tokens are
 **not vested** and creators may commit to their own pools — weigh that when
 choosing pool parameters.
@@ -558,13 +628,13 @@ choosing pool parameters.
 ## Batched distribution
 
 The crossing **queues** the 500k airdrop; it pays nobody directly. The
-protocol keeper (`keepers/`, `npm run distribution-keeper`) calls the
-permissionless `ContinueDistribution` until the ledger drains (≤40
-recipients/tx, gas-adaptive, 5s per-caller cooldown). There is no keeper
-bounty. Termination is driven by ledger-emptiness, so no extra cleanup call is
-ever needed. (This is the *distribution* keeper — distinct from the mandatory
-*price* keeper described under [USD pricing](#usd-pricing-pyth). Two standing
-jobs total.)
+protocol keeper (`keepers/`, `npm run distribution-keeper`) — the protocol's
+**only** standing off-chain job — calls the permissionless
+`ContinueDistribution` until the ledger drains (≤40 recipients/tx,
+gas-adaptive, 5s per-caller cooldown). There is no keeper bounty.
+Termination is driven by ledger-emptiness, so no extra cleanup call is ever
+needed. Nothing fails closed if the keeper lags — distributions simply wait
+until someone (anyone) calls.
 
 ```json
 { "continue_distribution": {} }
@@ -576,7 +646,7 @@ jobs total.)
 
 ```json
 { "is_fully_commited": {} }
-// "fully_committed"  |  { "in_progress": { "raised": "...", "target": "25000000000" } }
+// "fully_committed"  |  { "in_progress": { "raised": "...", "target": "500000000000" } }
 
 { "simulation": { "offer_asset": { "info": { "bluechip": { "denom": "uosmo" } }, "amount": "1000000" } } }
 // { return_amount, spread_amount, commission_amount } — quoted from the native pool
@@ -591,7 +661,8 @@ jobs total.)
 Factory: `{ "pools": { "start_after": null, "limit": 30 } }` pages the registry;
 `{ "pool_by_address": { "pool_addr": "osmo1..." } }` is the authoritative
 lookup the router uses; `{ "creator_token_info": { "pool_id": 1 } }` returns
-the denom + on-chain total supply.
+the denom + on-chain total supply; `{ "pending_changes": {} }` exposes every
+pending timelocked config / router / upgrade proposal.
 
 ---
 
@@ -599,80 +670,55 @@ the denom + on-chain total supply.
 
 | Parameter | Value | Where |
 |---|---|---|
-| Commit threshold | $25,000 (`25000000000`, 6-dec USD) | factory config |
+| Commit threshold | 500,000 OSMO (`500000000000`, 6-dec native base units; expected to be retuned over time via the 48h config flow — applies to pools created after the change) | factory config |
 | Total mint at crossing | 1,200,000 (325k/25k/350k/500k) | `THRESHOLD_PAYOUT_*_BASE_UNITS` |
 | Commit fees | 1% protocol + 5% creator | commits only |
 | GAMM swap fee (LP) | 0.3% default (0.1%–10% bounds) | `DEFAULT_LP_FEE` → pool `swap_fee` |
-| Min commit (pre / post) | $5 / $1 (ceiling $1,000) | `DEFAULT_MIN_COMMIT_USD_*` |
+| Min commit (pre / post) | 115 OSMO / 25 OSMO (ceiling 25,000 OSMO) | `DEFAULT_MIN_COMMIT_NATIVE_*` |
 | Circuit-breaker floor | 25% of seeded per-side | `BREAKER_FLOOR_PERCENT` |
-| Commit/swap rate limit | 13 s / wallet | `DEFAULT_SWAP_RATE_LIMIT_SECS` |
+| Commit/swap rate limit | 13 s / wallet (registered router exempt) | `DEFAULT_SWAP_RATE_LIMIT_SECS` |
 | Max OSMO lock per pool | config (excess → creator escrow) | `max_bluechip_lock_per_pool` |
 | Creator excess lock | 7 days (config), then claim once | `CreatorExcessLiquidity.unlock_time` |
-| Pyth staleness gate | 300 s (bounds 30–600 s) | factory config |
-| Pyth confidence gate | 200 bps (bounds 50–500) | factory config |
-| Pyth minimum age | 10 s | `MIN_PYTH_AGE_SECONDS` |
-| Rate plausibility band | $0.0001 – $100 / OSMO | `RATE_MIN` / `RATE_MAX` |
-| GAMM creation fee | live x/poolmanager param (osmosis-1: 20 Noble USDC; swapped from the OSMO reserve at crossing) | funded from the 1% reserve |
-| Admin timelock | 48 h (all propose→apply) | `ADMIN_TIMELOCK_SECONDS` |
-| Emergency-withdraw delay | 6 h – 7 d (24 h mainnet default) | factory config |
+| Fee-TWAP window | 600 s trailing | `FEE_TWAP_WINDOW_SECONDS` |
+| Fee-TWAP plausibility ceiling | 1,000 uosmo / fee base unit | `MAX_NATIVE_PER_FEE_UNIT` |
+| GAMM creation fee | live x/poolmanager param (osmosis-1: 20 alloyed USDC; swapped from the 1%-retention reserve at crossing, spend clamped to that reserve) | funded from the 1% reserve |
+| Admin timelock | 48 h (all propose→apply); apply expires 7 d after the timelock | `ADMIN_TIMELOCK_SECONDS` / `ADMIN_APPLY_WINDOW_SECONDS` |
+| Emergency-withdraw delay | 6 h – 7 d (24 h default) | factory config |
 | Distribution batch | ≤40 / tx; admin recover 1h / public 7d | `MAX_DISTRIBUTIONS_PER_TX` |
 | Creator token decimals | 6 (enforced) | `validate_creator_token_info` |
 
 ---
 
-## What was rehearsed on testnet
+## How this is validated
 
-The full protocol lifecycle was exercised on **osmo-test-5** against a
-**mock Pyth oracle** serving a fixed $10.00/OSMO. Being precise about that
-substitution, why it was necessary, and what it does and does not prove:
+Two layers, both runnable from this repo:
 
-**Exercised on-chain (real Osmosis testnet, real TokenFactory/GAMM/poolmanager):**
-five pools with 1/2/3/4/5 committers — every distribution exact pro-rata to the
-base unit (100%; 25/75; ⅓ each; 10/30/20/40; 20% each), two crossings
-deliberately overshot and refunded the excess, creator-excess escrow claimed on
-each; third-party LP join → swap volume → exit (fees realized) on all five
-GAMM pools; and the safety paths: belief-price gate, oracle staleness
-rejection, rate plausibility-ceiling rejection, minimum-commit rejection,
-no-double-cross, router registration timelock, and the two-phase
-emergency-withdraw arc (pause latch → delay → drain → post-drain commit
-refused).
+**300 workspace unit/property tests** (mock chain): every fee split, gate,
+recovery path, and the crossing-conservation property test
+(`creator-pool/src/testing/invariant_tests.rs`).
 
-**Why a mock oracle, not the live feed.** Two blockers, both measurable:
-the testnet Pyth OSMO/USD feed is not kept fresh by anyone (measured **53 hours
-stale**; the staleness gate is 300 s), so every commit would have failed closed
-before a crossing could occur; and at the real ~**$0.0317**/OSMO price even a
-reduced USD threshold needs far more OSMO than testnet faucets provide. The
-mock serves a controlled price **in the exact Pyth wire format** so the pool
-mechanics could be driven at a workable scale.
+**An 8-test end-to-end suite on the real chain modules**
+(`integration-tests/`, osmosis-test-tube): the contracts run against an
+in-process Osmosis chain binary — real tokenfactory, gamm, poolmanager, and
+twap modules, not mocks. It covers:
 
-**How the real Pyth path is nevertheless verified:**
-
-1. **Wire-format equivalence, checked against the live contract.** The real
-   testnet Pyth contract's `PriceFeed` response was fetched and matches
-   `factory/src/pyth_types.rs` field-for-field — including Pyth's asymmetric
-   JSON (`price`/`conf` as strings, `expo`/`publish_time` as numbers). The mock
-   emits that identical shape, so the deserialization path under test is the
-   production one.
-2. **Live probe against the real contract.** `instantiate` / `propose` /
-   `apply` run the full read-and-gate pipeline against the configured Pyth
-   contract and refuse a misconfigured or unreadable route — exercised against
-   the real testnet Pyth contract.
-3. **Every gate boundary is unit-tested** (`factory/src/testing/oracle_tests.rs`):
-   staleness 300 vs 301 s, minimum age 10 vs 9 s, future skew 5 vs 6 s,
-   confidence threshold ±1 bp, exponent range, feed-id mismatch and
-   case-insensitive match, and the plausibility band.
-4. **End-to-end on a real chain binary** (`integration-tests/`,
-   osmosis-test-tube): the factory performs genuine cross-contract queries
-   against a deployed mock-pyth **contract**, including the fail-closed stale
-   path.
-5. **The gates were tripped on-chain.** With the mock feeding out-of-band
-   values on osmo-test-5, a $200/OSMO price was rejected at the plausibility
-   ceiling and a backdated `publish_time` was rejected by the staleness gate —
-   i.e. the rejection logic ran on a real chain, not only in unit tests.
-
-**Not yet proven end-to-end:** a threshold crossing priced by the live mainnet
-Pyth feed. That requires the mainnet feed plus the running price keeper, and is
-the first thing to validate after deployment (see `RUNBOOK.md`).
+1. **Factory instantiate against a live TWAP route** — the fee-route probe
+   accepts a working pricing pool and refuses a dead one.
+2. **Full lifecycle** — create → commit → cross → swap, with the real
+   `MsgCreateBalancerPool`, reply protobuf decode, and TokenFactory mints.
+3. **Mainnet-shape crossing** — the pool pays a 20-USDC creation fee by
+   swapping its OSMO retention through a live pricing pool at crossing.
+4. **TWAP orientation** — a 25:1-price pricing pool proves the fee budget is
+   quoted native-per-fee-unit, not the inverse.
+5. **Third-party LP join/exit** — outside LPs join and exit the native pool;
+   the seed position stays locked.
+6. **Mid-crossing atomicity** — an injected module failure mid-crossing
+   reverts mints, ledger, fees, and funds in full.
+7. **Unroutable fee fail-closed** — an unroutable live fee denom bricks the
+   crossing with an actionable error until the route is restored, then
+   recovers.
+8. **Router end-to-end** — registration timelock, belief-price gate, and the
+   no-wedge path.
 
 ---
 
@@ -685,7 +731,7 @@ cargo fmt --all -- --check
 make optimize-all                           # deterministic wasm → artifacts/*.wasm
 ```
 
-Current suite: **creator-pool 145, factory 103, router 22, pool-core 8**
+Current suite: **creator-pool 160, factory 108, router 24, pool-core 8**
 (includes the crossing-conservation property test). Ship the factory **`prod`**
 optimizer build only (real 48h timelocks); the `integration_short_timing`
 build is for shell tests and is CI-guarded against shipping.
@@ -694,9 +740,10 @@ build is for shell tests and is CI-guarded against shipping.
 
 An **excluded** crate runs the contracts against a real in-process Osmosis
 chain via `osmosis-test-tube`, exercising what mocks can't (real
-`MsgCreateBalancerPool`, the reply protobuf decode, TokenFactory mints, and
-`MsgSwapExactAmountIn`). It needs a chain-capable toolchain + built wasm — see
-`integration-tests/README.md`. It is not built by a normal `cargo test`.
+`MsgCreateBalancerPool`, the reply protobuf decode, TokenFactory mints,
+`MsgSwapExactAmountIn`, and live `x/twap` reads). It needs a chain-capable
+toolchain + built wasm — see `integration-tests/README.md`. It is not built
+by a normal `cargo test`.
 
 ### Layout
 
@@ -704,28 +751,26 @@ chain via `osmosis-test-tube`, exercising what mocks can't (real
 factory/  creator-pool/  router/
 packages/{pool-core, pool-factory-interfaces, easy-addr}
 integration-tests/   # osmosis-test-tube e2e (excluded from workspace)
-fuzz/                # cargo-fuzz math targets (excluded)
-keepers/             # off-chain bots: price keeper (required) + distribution keeper
+keepers/             # off-chain bot: distribution keeper
 frontend/            # reference UI
-docs/                # OSMOSIS_DEPLOY.md, MULTISIG.md, FRONTEND_MIGRATION.md
+docs/                # OSMOSIS_DEPLOY.md, FRONTEND_MIGRATION.md
 deploy_osmosis.sh    # store + instantiate + verify (testnet & mainnet)
 ```
 
 ### Deploy
 
 ```bash
-./deploy_osmosis.sh osmo_testnet.env       # testnet rehearsal
+./deploy_osmosis.sh osmo_testnet.env       # testnet
 ./deploy_osmosis.sh osmosis_mainnet.env    # mainnet (wasm uploads governance-gated)
 ```
 
 The script stores the wasms, instantiates factory + router, then verifies by
-reading config back and probing `ConvertNativeToUsd` — you see the live Pyth
-rate before calling it done. **Start the price keeper first:** instantiate
-live-probes the feed and refuses a stale one. Set `ADMIN_MULTISIG` to your
-multisig — it becomes both the wasmd migrate admin and the in-contract admin,
-and mainnet deploys refuse to run without it. Ops (both keepers, pricing
-canary, governance hygiene) are in `RUNBOOK.md`; multisig in
-`docs/MULTISIG.md`.
+reading config back and probing the `CommitContext` query — you see the live
+GAMM fee coin and fee-swap budget before calling it done. There is no
+off-chain service to start before deploying; the distribution keeper is the
+only standing job, and it only matters once a pool crosses. Set
+`ADMIN_MULTISIG` to your multisig — it becomes both the wasmd migrate admin
+and the in-contract admin, and mainnet deploys refuse to run without it.
 
 ---
 

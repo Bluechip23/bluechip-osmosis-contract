@@ -13,7 +13,7 @@
 //! - `commit` / `execute_commit_logic` — the entry point + dispatcher
 //! - `commit_base_attributes`          — shared by all four response paths
 //! - `calculate_commit_fees` / `build_fee_messages`
-//! - `MIN_COMMIT_USD_*` constants
+//! - the min-commit floor checks (constants in `state.rs`)
 //!
 //! and re-exports `execute_continue_distribution` so the pool's entry
 //! points don't need to know about the submodule structure.
@@ -41,7 +41,7 @@ use crate::msg::CommitFeeInfo;
 use crate::state::{
     PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
     POOL_ANALYTICS, POOL_INFO, POOL_PAUSED, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
-    THRESHOLD_PROCESSING, USD_RAISED_FROM_COMMIT,
+    THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
 };
 
 use crate::swap_helper::get_commit_context;
@@ -51,9 +51,9 @@ use pre_threshold::process_pre_threshold_commit;
 use threshold_crossing::{process_threshold_crossing_with_excess, process_threshold_hit_exact};
 
 // Minimum commit-value floors are per-pool state. Defaults are
-// `crate::state::DEFAULT_MIN_COMMIT_USD_{PRE,POST}_THRESHOLD` and the
-// active values are stored on `CommitLimitInfo.min_commit_usd_pre_threshold`
-// / `min_commit_usd_post_threshold`. The floor still limits pre-threshold
+// `crate::state::DEFAULT_MIN_COMMIT_NATIVE_{PRE,POST}_THRESHOLD` and the
+// active values are stored on `CommitLimitInfo.min_commit_native_pre_threshold`
+// / `min_commit_native_post_threshold`. The floor still limits pre-threshold
 // ledger bloat (an attacker can cross the threshold with their own
 // money, but not via thousands of micro-entries that balloon the
 // distribution queue); post-threshold commits stay looser since they're
@@ -193,12 +193,10 @@ fn execute_commit_logic(
         return Err(ContractError::ZeroAmount {});
     }
 
-    // Value the GROSS (pre-fee) commit in USD once at entry and thread
-    // the same rate through every conversion in this handler. The rate
-    // comes from the factory's CommitContext query, backed by the
-    // configured Pyth native/USD feed (staleness/confidence/expo gated,
-    // fail-closed) — one query per commit, and no mid-tx drift because the
-    // threshold split below reuses `usd_rate` rather than re-querying.
+    // A commit's value toward the threshold IS its GROSS (pre-fee) native
+    // amount — the threshold is native-denominated and no oracle exists
+    // anywhere in the protocol. The factory's CommitContext query supplies
+    // the live context a commit still needs (one query per commit):
     //
     // The same response carries the factory's LIVE bluechip
     // protocol-wallet, used for both the per-commit fee transfer and the
@@ -211,39 +209,36 @@ fn execute_commit_logic(
     // and the 25k-token threshold-cross reward to the old (potentially
     // compromised) wallet indefinitely. Mirrors the live-query pattern
     // on the emergency-drain recipient (pool-core::admin).
-    let commit_ctx = get_commit_context(deps.as_ref(), &pool_info.factory_addr, asset.amount)?;
-    let commit_value = commit_ctx.amount;
-    let usd_rate = commit_ctx.rate_used;
+    // Load IS_THRESHOLD_HIT BEFORE the context query: post-threshold
+    // commits never fund a fee swap, so they ask the factory to skip the
+    // TWAP valuation — a pricing-pool outage then cannot block
+    // trading-phase commits (pre-threshold commits stay fail-closed).
+    let threshold_already_hit = IS_THRESHOLD_HIT.load(deps.storage)?;
+    let commit_ctx = get_commit_context(
+        deps.as_ref(),
+        &pool_info.factory_addr,
+        !threshold_already_hit,
+    )?;
+    let commit_value = asset.amount;
     let live_bluechip_wallet = commit_ctx.bluechip_wallet;
     // Live GAMM creation-fee context riding the same response: the fee
     // coin the crossing must cover (possibly non-native-denominated —
-    // osmosis-1 charges USDC) plus the pricing route used to swap into
-    // it. Threaded into the reserve sizing below and both crossing
-    // handlers. `None`/zero values fall back to the instantiate-time
-    // reserve semantics (pre-upgrade factory).
+    // osmosis-1 charges alloyed USDC), the pricing route used to swap into
+    // it, and — when the fee is non-native — the TWAP-valued native budget
+    // for that swap. Threaded into the reserve sizing below and both
+    // crossing handlers. `None`/zero values fall back to the
+    // instantiate-time reserve semantics.
     let gamm_fee_cfg = commit_ctx.gamm_pool_creation_fee;
+    let fee_swap_budget = commit_ctx.fee_swap_budget_native;
     let pricing_pool_id = commit_ctx.pricing_pool_id;
-    let usd_quote_denom = commit_ctx.usd_quote_denom;
-    if usd_rate.is_zero() || commit_value.is_zero() {
-        return Err(ContractError::InvalidOraclePrice {});
-    }
-    // Defense-in-depth ceiling on the factory-delegated rate. The
-    // factory already gates this against a tighter plausibility band, so it
-    // never fires in normal operation; it firewalls a factory bug / a
-    // mis-configured Pyth feed / a wrong-decimals value from pushing an
-    // absurd valuation into this pool's threshold and distribution math.
-    // See `swap_helper::POOL_RATE_MAX`.
-    if usd_rate > Uint128::new(crate::swap_helper::POOL_RATE_MAX) {
-        return Err(ContractError::InvalidOraclePrice {});
-    }
-    // Load IS_THRESHOLD_HIT once and thread it through both the minimum-
-    // commit check here and the main branching below (used later as
-    // `threshold_already_hit`).
-    let threshold_already_hit = IS_THRESHOLD_HIT.load(deps.storage)?;
+    let fee_quote_denom = commit_ctx.fee_quote_denom;
+    // `threshold_already_hit` (loaded above, before the context query) is
+    // threaded through both the minimum-commit check here and the main
+    // branching below.
     let min_commit = if threshold_already_hit {
-        commit_config.min_commit_usd_post_threshold
+        commit_config.min_commit_native_post_threshold
     } else {
-        commit_config.min_commit_usd_pre_threshold
+        commit_config.min_commit_native_pre_threshold
     };
     if commit_value < min_commit {
         let phase: &'static str = if threshold_already_hit {
@@ -329,7 +324,8 @@ fn execute_commit_logic(
                     commit_fee_bluechip_amt,
                     gamm_fee_cfg.as_ref(),
                     &bluechip_denom,
-                    usd_rate,
+                    &fee_quote_denom,
+                    fee_swap_budget,
                 )?
             };
 
@@ -353,10 +349,10 @@ fn execute_commit_logic(
             // `threshold_already_hit` was loaded above alongside the
             // minimum-commit check — reuse it here instead of re-reading.
             let response = if !threshold_already_hit {
-                let current_raised = USD_RAISED_FROM_COMMIT.load(deps.storage)?;
+                let current_raised = GROSS_NATIVE_COMMITTED.load(deps.storage)?;
                 let new_total = current_raised.checked_add(commit_value)?;
 
-                if new_total >= commit_config.commit_amount_for_threshold_usd {
+                if new_total >= commit_config.commit_amount_for_threshold_native {
                     LAST_THRESHOLD_ATTEMPT.save(deps.storage, &env.block.time)?;
 
                     // THRESHOLD_PROCESSING is set to `true` immediately
@@ -396,7 +392,7 @@ fn execute_commit_logic(
                     let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
 
                     let value_to_threshold = commit_config
-                        .commit_amount_for_threshold_usd
+                        .commit_amount_for_threshold_native
                         .checked_sub(current_raised)
                         .unwrap_or(Uint128::zero());
 
@@ -411,7 +407,7 @@ fn execute_commit_logic(
                             amount_after_fees,
                             commit_value,
                             value_to_threshold,
-                            usd_rate,
+                            fee_swap_budget,
                             &pool_specs,
                             &pool_info,
                             &commit_config,
@@ -420,7 +416,7 @@ fn execute_commit_logic(
                             &live_bluechip_wallet,
                             gamm_fee_cfg.as_ref(),
                             pricing_pool_id,
-                            &usd_quote_denom,
+                            &fee_quote_denom,
                             messages,
                             belief_price,
                             max_spread,
@@ -446,10 +442,10 @@ fn execute_commit_logic(
                             &threshold_payout,
                             &fee_info,
                             &live_bluechip_wallet,
-                            usd_rate,
+                            fee_swap_budget,
                             gamm_fee_cfg.as_ref(),
                             pricing_pool_id,
-                            &usd_quote_denom,
+                            &fee_quote_denom,
                             messages,
                             &analytics,
                         )?
@@ -465,7 +461,7 @@ fn execute_commit_logic(
                         // contract bank balance from this commit
                         // (see pre_threshold.rs).
                         amount_after_fees,
-                        // Already-computed USD_RAISED_FROM_COMMIT +
+                        // Already-computed GROSS_NATIVE_COMMITTED +
                         // commit_value, so the handler saves the new
                         // total without re-reading the item.
                         new_total,
@@ -525,11 +521,11 @@ fn execute_commit_logic(
 /// Target resolution (cross-denom aware):
 /// - live fee coin in the NATIVE denom (osmo-test-5: 1 OSMO) — the coin's
 ///   amount, exactly the pre-cross-denom behavior;
-/// - live fee coin in another denom (osmosis-1: 20 USDC) — the fee's
-///   native value at the commit's captured oracle rate plus the same
+/// - live fee coin in another denom (osmosis-1: 20 alloyed USDC) — the
+///   factory's TWAP-valued native budget for the fee swap plus the same
 ///   `FEE_SWAP_MARGIN_BPS` the crossing budgets for its exact-out fee
 ///   swap, so the retained native always covers that swap's worst case.
-///   The target drifts with the rate across commits; `reserved` only
+///   The target drifts with the TWAP across commits; `reserved` only
 ///   ever grows toward it and the crossing self-corrects any residual
 ///   mismatch (shortfall → smaller seed, surplus → remitted), so drift
 ///   is bounded and harmless;
@@ -537,21 +533,47 @@ fn execute_commit_logic(
 ///   `CREATION_FEE_RESERVE_TARGET` (legacy semantics).
 ///
 /// Once `reserved >= target` the room is zero, `to_reserve == 0`, and the
-/// full fee flows to the wallet exactly as before this fix.
+/// full fee flows to the wallet.
 pub(crate) fn reserve_bluechip_fee(
     storage: &mut dyn cosmwasm_std::Storage,
     commit_fee_bluechip: Uint128,
     fee_cfg: Option<&cosmwasm_std::Coin>,
     bluechip_denom: &str,
-    usd_rate: Uint128,
+    fee_quote_denom: &str,
+    fee_swap_budget: Option<Uint128>,
 ) -> Result<Uint128, ContractError> {
     use crate::commit::threshold_payout::FEE_SWAP_MARGIN_BPS;
     use crate::state::{BLUECHIP_FEE_RESERVED, CREATION_FEE_RESERVE_TARGET};
     let target = match fee_cfg {
         Some(fee) if fee.denom == bluechip_denom => fee.amount,
-        Some(fee) => crate::swap_helper::usd_to_native_at_rate(fee.amount, usd_rate)?
+        // Quote-denominated fee: the factory supplies the TWAP-valued native
+        // budget in the same CommitContext response. Fail closed if it is
+        // missing — silently under-reserving would brick the crossing later
+        // instead of surfacing the factory misconfiguration on this commit.
+        Some(fee) if fee.denom == fee_quote_denom => fee_swap_budget
+            .ok_or_else(|| {
+                ContractError::Std(cosmwasm_std::StdError::generic_err(format!(
+                    "factory returned a non-native gamm fee ({}) without a fee-swap budget",
+                    fee.denom
+                )))
+            })?
             .multiply_ratio(10_000u128 + FEE_SWAP_MARGIN_BPS, 10_000u128)
             .checked_add(Uint128::one())?,
+        // Any other denom is unroutable at crossing (same check the
+        // crossing itself makes) — fail the commit HERE with the same
+        // actionable error rather than banking funds into a pool that
+        // cannot cross until the fee params are fixed.
+        Some(fee) => {
+            return Err(ContractError::InvalidThresholdParams {
+                msg: format!(
+                    "pool-creation fee is denominated in '{}', which is neither the native \
+                     denom ('{}') nor the pricing quote denom ('{}'); update the factory's \
+                     gamm_pool_creation_fee / pricing config so the crossing can acquire \
+                     the fee coin",
+                    fee.denom, bluechip_denom, fee_quote_denom
+                ),
+            });
+        }
         None => CREATION_FEE_RESERVE_TARGET
             .may_load(storage)?
             .unwrap_or_default(),

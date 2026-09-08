@@ -2,7 +2,7 @@
 //!
 //! Commit logic lives in [`crate::commit`], admin operations in [`crate::admin`].
 //!
-//! Phase-2: the internal AMM + LP system is gone. Swaps and post-threshold
+//! The pool runs no internal AMM. Swaps and post-threshold
 //! commits route through the NATIVE Osmosis pool via `MsgSwapExactAmountIn`
 //! and forward the output in a reply; the pool is seeded at threshold
 //! crossing via `MsgCreateBalancerPool` whose reply records the native
@@ -28,7 +28,7 @@ use crate::state::{
     POOL_ANALYTICS, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
     REPLY_ID_CREATE_POOL, REPLY_ID_DISTRIBUTION_MINT_BASE, REPLY_ID_FACTORY_NOTIFY_INITIAL,
     REPLY_ID_FACTORY_NOTIFY_RETRY, REPLY_ID_SWAP_FORWARD, THRESHOLD_PAYOUT_AMOUNTS,
-    USD_RAISED_FROM_COMMIT,
+    GROSS_NATIVE_COMMITTED,
 };
 use crate::swap_helper::simple_swap;
 use cosmwasm_std::{
@@ -118,8 +118,8 @@ pub fn instantiate(
     // 6-decimal scaling instead of the raw `factory/{addr}/{sub}` micro
     // denom. Dispatched as a `reply_on_error` SubMsg (swallowed in `reply`)
     // so a metadata edge case can never revert pool creation — the metadata
-    // is display-only. Skipped entirely when the symbol is empty (legacy
-    // create messages predating the threaded token fields).
+    // is display-only. Skipped entirely when the symbol is empty (a
+    // create message may omit the optional token fields).
     let set_metadata: Option<SubMsg> = if msg.token_symbol.trim().is_empty() {
         None
     } else {
@@ -170,18 +170,18 @@ pub fn instantiate(
     };
 
     let commit_config = CommitLimitInfo {
-        commit_amount_for_threshold_usd: msg.commit_threshold_limit_usd,
+        commit_amount_for_threshold_native: msg.commit_threshold_limit_native,
         max_bluechip_lock_per_pool: msg.max_bluechip_lock_per_pool,
         creator_excess_liquidity_lock_days: msg.creator_excess_liquidity_lock_days,
-        min_commit_usd_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD,
-        min_commit_usd_post_threshold: crate::state::DEFAULT_MIN_COMMIT_USD_POST_THRESHOLD,
+        min_commit_native_pre_threshold: crate::state::DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD,
+        min_commit_native_post_threshold: crate::state::DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD,
     };
 
     let pool_state = PoolState {
         pool_contract_address: env.contract.address.clone(),
     };
 
-    USD_RAISED_FROM_COMMIT.save(deps.storage, &Uint128::zero())?;
+    GROSS_NATIVE_COMMITTED.save(deps.storage, &Uint128::zero())?;
     COMMITFEEINFO.save(deps.storage, &msg.commit_fee_info)?;
     NATIVE_RAISED_FROM_COMMIT.save(deps.storage, &Uint128::zero())?;
     // Pin the gamm creation-fee reserve target from the factory-
@@ -305,6 +305,7 @@ pub fn execute(
             // are already bounded. Any other null-belief caller is rejected.
             // Fail-closed: if no router is registered, every null-belief swap
             // is refused.
+            let mut sender_is_registered_router = false;
             if belief_price.is_none() {
                 let factory_addr = POOL_INFO.load(deps.storage)?.factory_addr;
                 let registered =
@@ -312,6 +313,11 @@ pub fn execute(
                 if registered.as_ref() != Some(&info.sender) {
                     return Err(ContractError::BeliefPriceRequired {});
                 }
+                // Verified against the live factory registration above —
+                // carried down so pool-core can waive the per-address swap
+                // cooldown for router-relayed traffic (all router users
+                // would otherwise share one rate-limit slot per pool).
+                sender_is_registered_router = true;
             }
             let sender_addr = info.sender.clone();
             let to_addr: Option<Addr> = to
@@ -329,6 +335,7 @@ pub fn execute(
                 to_addr,
                 transaction_deadline,
                 None,
+                sender_is_registered_router,
             )
         }
 
@@ -366,37 +373,37 @@ fn execute_update_creator_config_from_factory(
     info: MessageInfo,
     update: crate::msg::PoolConfigUpdate,
 ) -> Result<Response, ContractError> {
-    use crate::state::MAX_MIN_COMMIT_USD;
+    use crate::state::MAX_MIN_COMMIT_NATIVE;
 
     let pool_info = POOL_INFO.load(deps.storage)?;
     if info.sender != pool_info.factory_addr {
         return Err(ContractError::Unauthorized {});
     }
 
-    let pre = update.min_commit_usd_pre_threshold;
-    let post = update.min_commit_usd_post_threshold;
+    let pre = update.min_commit_native_pre_threshold;
+    let post = update.min_commit_native_post_threshold;
 
     if pre.is_some() || post.is_some() {
         let mut commit_config = COMMIT_LIMIT_INFO.load(deps.storage)?;
         if let Some(v) = pre {
-            if v.is_zero() || v > MAX_MIN_COMMIT_USD {
+            if v.is_zero() || v > MAX_MIN_COMMIT_NATIVE {
                 return Err(ContractError::InvalidCommitFloor {
-                    field: "min_commit_usd_pre_threshold",
+                    field: "min_commit_native_pre_threshold",
                     got: v,
-                    max: MAX_MIN_COMMIT_USD,
+                    max: MAX_MIN_COMMIT_NATIVE,
                 });
             }
-            commit_config.min_commit_usd_pre_threshold = v;
+            commit_config.min_commit_native_pre_threshold = v;
         }
         if let Some(v) = post {
-            if v.is_zero() || v > MAX_MIN_COMMIT_USD {
+            if v.is_zero() || v > MAX_MIN_COMMIT_NATIVE {
                 return Err(ContractError::InvalidCommitFloor {
-                    field: "min_commit_usd_post_threshold",
+                    field: "min_commit_native_post_threshold",
                     got: v,
-                    max: MAX_MIN_COMMIT_USD,
+                    max: MAX_MIN_COMMIT_NATIVE,
                 });
             }
-            commit_config.min_commit_usd_post_threshold = v;
+            commit_config.min_commit_native_post_threshold = v;
         }
         COMMIT_LIMIT_INFO.save(deps.storage, &commit_config)?;
     }

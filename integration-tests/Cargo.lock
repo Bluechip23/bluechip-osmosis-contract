@@ -1271,7 +1271,6 @@ dependencies = [
  "cosmwasm-std",
  "creator-pool",
  "factory",
- "mock-pyth",
  "osmosis-test-tube",
  "pool-factory-interfaces",
  "prost 0.13.5",
@@ -1397,15 +1396,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mock-pyth"
-version = "1.0.0"
-dependencies = [
- "cosmwasm-schema",
- "cosmwasm-std",
- "cw-storage-plus",
 ]
 
 [[package]]

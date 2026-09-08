@@ -8,9 +8,8 @@ use cosmwasm_std::{from_json, Addr, DepsMut, Env, Reply, Response};
 
 // pool_creation_reply.rs
 //
-// Phase-2: the pool no longer takes a position NFT (the internal LP system
-// was removed), and the creator token is a native TokenFactory denom the
-// pool owns. The reply chain therefore collapses to a single step:
+// The creator token is a native TokenFactory denom the pool owns, so the
+// reply chain is a single step:
 //   create (instantiate pool) -> finalize_pool (register).
 //
 // The step uses `SubMsg::reply_on_success`; a failing submessage bypasses

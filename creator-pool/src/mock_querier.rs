@@ -44,9 +44,12 @@ pub struct PoolMockQuerier {
     /// `estimated_out = token_in_amount * estimate_num / estimate_den`.
     estimate_num: Uint128,
     estimate_den: Uint128,
-    /// When `Some(rate)`, factory USD-valuation queries are answered at
-    /// `rate` micro-USD per micro-native (1_000_000 = $1/token).
-    factory_rate: Option<Uint128>,
+    /// When true, `CommitContext` factory queries are answered with the
+    /// configured context fields below.
+    factory_context_enabled: bool,
+    /// Native fee-swap budget carried in the `CommitContext` response
+    /// (`None` when the fee is native-denominated).
+    fee_swap_budget_native: Option<Uint128>,
     /// Live bluechip wallet returned in the `CommitContext` response.
     bluechip_wallet: Addr,
     /// Live GAMM creation-fee context returned in the `CommitContext`
@@ -56,7 +59,7 @@ pub struct PoolMockQuerier {
     /// [`set_gamm_fee_context`].
     gamm_pool_creation_fee: Option<Coin>,
     pricing_pool_id: u64,
-    usd_quote_denom: String,
+    fee_quote_denom: String,
     /// Per-side liquidity returned for the poolmanager
     /// `TotalPoolLiquidity` query. Defaults to a healthy (well-above-floor)
     /// pair on the standard fixture denoms so swaps aren't spuriously paused;
@@ -86,11 +89,12 @@ impl PoolMockQuerier {
             base,
             estimate_num: Uint128::one(),
             estimate_den: Uint128::one(),
-            factory_rate: None,
+            factory_context_enabled: false,
+            fee_swap_budget_native: None,
             bluechip_wallet: Addr::unchecked("bluechip_treasury"),
             gamm_pool_creation_fee: None,
             pricing_pool_id: 0,
-            usd_quote_denom: String::new(),
+            fee_quote_denom: String::new(),
             // Healthy default: far above any plausible 25%-of-seed floor for
             // the standard fixture denoms. Matches `fixtures::CREATOR_DENOM`
             // (kept as a literal so this test-querier has no cross-module dep).
@@ -122,11 +126,20 @@ impl PoolMockQuerier {
         self.estimate_den = Uint128::new(den);
     }
 
-    /// Install the factory USD oracle at `rate` micro-USD per micro-native,
-    /// returning `bluechip_wallet` as the live protocol wallet.
-    pub fn set_factory_oracle(&mut self, rate: Uint128, bluechip_wallet: &str) {
-        self.factory_rate = Some(rate);
+    /// Enable the factory `CommitContext` responder, returning
+    /// `bluechip_wallet` as the live protocol wallet. (The old USD-oracle
+    /// rate parameter is gone with the oracle: commits are valued in
+    /// native units directly.)
+    pub fn set_factory_context(&mut self, bluechip_wallet: &str) {
+        self.factory_context_enabled = true;
         self.bluechip_wallet = Addr::unchecked(bluechip_wallet);
+    }
+
+    /// Set the native fee-swap budget the `CommitContext` response carries
+    /// (models the factory's TWAP valuation of a non-native gamm fee).
+    #[allow(dead_code)]
+    pub fn set_fee_swap_budget(&mut self, budget: Uint128) {
+        self.fee_swap_budget_native = Some(budget);
     }
 
     /// Configure the live GAMM creation-fee context the `CommitContext`
@@ -134,10 +147,10 @@ impl PoolMockQuerier {
     /// pricing pool id, and the USD quote denom. Mimics an upgraded
     /// factory whose chain charges `fee` at pool creation.
     #[allow(dead_code)]
-    pub fn set_gamm_fee_context(&mut self, fee: Coin, pricing_pool_id: u64, usd_quote_denom: &str) {
+    pub fn set_gamm_fee_context(&mut self, fee: Coin, pricing_pool_id: u64, fee_quote_denom: &str) {
         self.gamm_pool_creation_fee = Some(fee);
         self.pricing_pool_id = pricing_pool_id;
-        self.usd_quote_denom = usd_quote_denom.to_string();
+        self.fee_quote_denom = fee_quote_denom.to_string();
     }
 
     /// Seed / overwrite a bank balance on the wrapped base querier.
@@ -201,44 +214,22 @@ impl PoolMockQuerier {
                     };
                     return SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()));
                 }
-                if let Some(rate) = self.factory_rate {
-                    let usd_at_rate = |amount: Uint128| {
-                        amount
-                            .checked_mul(rate)
-                            .unwrap()
-                            .checked_div(Uint128::new(1_000_000))
-                            .unwrap()
-                    };
-                    match from_json(msg) {
-                        Ok(WrapperProbe::PoolFactoryQuery(
-                            pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd { amount },
-                        )) => {
-                            let resp = pool_factory_interfaces::ConversionResponse {
-                                amount: usd_at_rate(amount),
-                                rate_used: rate,
-                                timestamp: 0,
-                            };
-                            return SystemResult::Ok(ContractResult::Ok(
-                                to_json_binary(&resp).unwrap(),
-                            ));
-                        }
-                        Ok(WrapperProbe::PoolFactoryQuery(
-                            pool_factory_interfaces::FactoryQueryMsg::CommitContext { amount },
-                        )) => {
-                            let resp = pool_factory_interfaces::CommitContextResponse {
-                                amount: usd_at_rate(amount),
-                                rate_used: rate,
-                                timestamp: 0,
-                                bluechip_wallet: self.bluechip_wallet.clone(),
-                                gamm_pool_creation_fee: self.gamm_pool_creation_fee.clone(),
-                                pricing_pool_id: self.pricing_pool_id,
-                                usd_quote_denom: self.usd_quote_denom.clone(),
-                            };
-                            return SystemResult::Ok(ContractResult::Ok(
-                                to_json_binary(&resp).unwrap(),
-                            ));
-                        }
-                        _ => {}
+                if self.factory_context_enabled {
+                    if let Ok(WrapperProbe::PoolFactoryQuery(
+                        pool_factory_interfaces::FactoryQueryMsg::CommitContext { .. },
+                    )) = from_json(msg)
+                    {
+                        let resp = pool_factory_interfaces::CommitContextResponse {
+                            timestamp: 0,
+                            bluechip_wallet: self.bluechip_wallet.clone(),
+                            gamm_pool_creation_fee: self.gamm_pool_creation_fee.clone(),
+                            fee_swap_budget_native: self.fee_swap_budget_native,
+                            pricing_pool_id: self.pricing_pool_id,
+                            fee_quote_denom: self.fee_quote_denom.clone(),
+                        };
+                        return SystemResult::Ok(ContractResult::Ok(
+                            to_json_binary(&resp).unwrap(),
+                        ));
                     }
                 }
                 SystemResult::Err(SystemError::InvalidRequest {

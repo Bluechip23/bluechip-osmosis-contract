@@ -24,16 +24,11 @@ use osmosis_test_tube::{Account, Bank, Module, OsmosisTestApp, SigningAccount, W
 pub const UOSMO: &str = "uosmo";
 pub const UUSDC: &str = "uusdc";
 
-/// $25,000, 6-dec USD — same threshold the lifecycle suite uses.
-pub const THRESHOLD_USD: u128 = 25_000_000_000;
+/// 25,000 native base units (6-dec) — same threshold the lifecycle suite
+/// uses. Native-denominated: a commit's value toward it IS its uosmo amount.
+pub const THRESHOLD_NATIVE: u128 = 25_000_000_000;
 /// Osmosis default pool-creation fee: 1000 OSMO.
 pub const GAMM_CREATE_FEE: u128 = 1_000_000_000;
-/// The (mock) Pyth OSMO/USD feed id used across the harness.
-pub const OSMO_USD_FEED: &str =
-    "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6";
-/// Seconds to age a freshly-pushed Pyth price past the factory's
-/// `MIN_PYTH_AGE_SECONDS` (10s) floor before it can be consumed.
-pub const PYTH_AGE_BUMP: u64 = 15;
 
 pub fn read_wasm(name: &str) -> Vec<u8> {
     let path = format!("{}/../artifacts/{}", env!("CARGO_MANIFEST_DIR"), name);
@@ -57,99 +52,19 @@ pub fn store_factory_and_pool(wasm: &Wasm<OsmosisTestApp>, signer: &SigningAccou
     (factory_code_id, pool_code_id)
 }
 
-/// Store the mock Pyth oracle wasm and return its code id.
-pub fn store_mock_pyth(wasm: &Wasm<OsmosisTestApp>, signer: &SigningAccount) -> u64 {
-    wasm.store_code(&read_wasm("mock_pyth.wasm"), None, signer)
-        .unwrap()
-        .data
-        .code_id
-}
 
-/// Instantiate the mock Pyth oracle and return its address.
-pub fn instantiate_mock_pyth(
-    wasm: &Wasm<OsmosisTestApp>,
-    code_id: u64,
-    admin: &SigningAccount,
-) -> String {
-    wasm.instantiate(
-        code_id,
-        &mock_pyth::InstantiateMsg {},
-        Some(&admin.address()),
-        Some("mock-pyth"),
-        &[],
-        admin,
-    )
-    .unwrap()
-    .data
-    .address
-}
 
-/// Push an OSMO/USD price of `usd_micro` micro-USD (expo -6, so
-/// `usd_micro == rate_used`) to the mock Pyth, stamped at the current
-/// block time, then advance the chain `PYTH_AGE_BUMP` seconds so it clears
-/// the factory's MIN_PYTH_AGE floor. Call right before any commit so the
-/// price is fresh (age 15s) at valuation time.
-pub fn refresh_pyth(
-    app: &OsmosisTestApp,
-    wasm: &Wasm<OsmosisTestApp>,
-    pyth_addr: &str,
-    signer: &SigningAccount,
-    usd_micro: i64,
-) {
-    wasm.execute(
-        pyth_addr,
-        &mock_pyth::ExecuteMsg::SetPrice {
-            price_id: OSMO_USD_FEED.to_string(),
-            price: usd_micro,
-            expo: -6,
-            conf: 0,
-        },
-        &[],
-        signer,
-    )
-    .unwrap();
-    app.increase_time(PYTH_AGE_BUMP);
-}
-
-/// Set a full explicit Pyth reading (price/expo/conf/publish_time) for the
-/// fail-closed E2E cases (staleness / future-skew / wide-confidence).
-pub fn set_pyth_at(
-    wasm: &Wasm<OsmosisTestApp>,
-    pyth_addr: &str,
-    signer: &SigningAccount,
-    price: i64,
-    expo: i32,
-    conf: u64,
-    publish_time: i64,
-) {
-    wasm.execute(
-        pyth_addr,
-        &mock_pyth::ExecuteMsg::SetPriceAt {
-            price_id: OSMO_USD_FEED.to_string(),
-            price,
-            expo,
-            conf,
-            publish_time,
-        },
-        &[],
-        signer,
-    )
-    .unwrap();
-}
-
-/// Factory config wired to the (mock) Pyth oracle at `pyth_addr`, valuing
-/// the native asset via the OSMO/USD feed. `pricing_pool_id` survives only
-/// as the cross-denom fee-swap execution route.
+/// Factory config with the NATIVE-denominated threshold (no oracle).
+/// `pricing_pool_id` is only the cross-denom fee-swap route.
 pub fn factory_init(
     admin: &str,
     pricing_pool_id: u64,
     pool_code_id: u64,
     gamm_pool_creation_fee: Coin,
-    pyth_addr: &str,
 ) -> FactoryInstantiate {
     FactoryInstantiate {
         factory_admin_address: cosmwasm_std::Addr::unchecked(admin),
-        commit_threshold_limit_usd: Uint128::new(THRESHOLD_USD),
+        commit_threshold_limit_native: Uint128::new(THRESHOLD_NATIVE),
         cw20_token_contract_id: pool_code_id,
         cw721_nft_contract_id: pool_code_id,
         create_pool_wasm_contract_id: pool_code_id,
@@ -160,15 +75,11 @@ pub fn factory_init(
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: UOSMO.to_string(),
         pricing_pool_id,
-        usd_quote_denom: UUSDC.to_string(),
+        fee_quote_denom: UUSDC.to_string(),
         pool_creation_fee: Uint128::zero(),
         gamm_pool_creation_fee,
         threshold_payout_amounts: ThresholdPayoutAmounts::default(),
         emergency_withdraw_delay_seconds: 86_400,
-        pyth_contract_addr: pyth_addr.to_string(),
-        pyth_native_usd_feed_id: OSMO_USD_FEED.to_string(),
-        max_pyth_staleness_seconds: 600,
-        pyth_conf_threshold_bps: 200,
     }
 }
 
@@ -270,22 +181,6 @@ pub fn tt_balance(app: &OsmosisTestApp, address: &str, denom: &str) -> Uint128 {
 }
 
 
-/// The factory's live native→USD conversion for `amount` base units —
-/// the EXACT query every commit's valuation runs through.
-pub fn convert_native_to_usd(
-    wasm: &Wasm<OsmosisTestApp>,
-    factory_addr: &str,
-    amount: u128,
-) -> Result<pool_factory_interfaces::ConversionResponse, osmosis_test_tube::RunnerError> {
-    wasm.query(
-        factory_addr,
-        &factory::query::QueryMsg::PoolFactoryQuery(
-            pool_factory_interfaces::FactoryQueryMsg::ConvertNativeToUsd {
-                amount: Uint128::new(amount),
-            },
-        ),
-    )
-}
 
 /// Drain a pool's post-crossing distribution completely (batched,
 /// rate-limited on-chain at 5s per call).

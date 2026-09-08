@@ -152,7 +152,7 @@ pub fn process_distribution_batch(
                 let reward = calculate_committer_reward(
                     *usd_paid,
                     dist_state.total_to_distribute,
-                    dist_state.total_committed_usd,
+                    dist_state.total_committed_native,
                 )?;
 
                 if !reward.is_zero() {
@@ -195,7 +195,7 @@ pub fn process_distribution_batch(
                 // pool's `total_to_distribute` is fully accounted for and
                 // no portion of the threshold-payout schedule is left
                 // uncirculated. Reasoning: each per-user reward is
-                // `floor(usd_paid * total_to_distribute / total_committed_usd)`,
+                // `floor(usd_paid * total_to_distribute / total_committed_native)`,
                 // so the sum can be up to (N - 1) base units short. The
                 // creator is the natural recipient — they have the most
                 // reputational exposure if the protocol ever leaves
@@ -236,7 +236,7 @@ pub fn process_distribution_batch(
                 let updated_state = DistributionState {
                     is_distributing: true,
                     total_to_distribute: dist_state.total_to_distribute,
-                    total_committed_usd: dist_state.total_committed_usd,
+                    total_committed_native: dist_state.total_committed_native,
                     last_processed_key: last_processed,
                     distributions_remaining: new_remaining,
                     estimated_gas_per_distribution: dist_state.estimated_gas_per_distribution,
@@ -318,16 +318,16 @@ pub fn calculate_effective_batch_size(dist_state: &DistributionState) -> u32 {
 fn calculate_committer_reward(
     usd_paid: Uint128,
     total_to_distribute: Uint128,
-    total_committed_usd: Uint128,
+    total_committed_native: Uint128,
 ) -> StdResult<Uint128> {
-    if total_committed_usd.is_zero() {
+    if total_committed_native.is_zero() {
         return Ok(Uint128::zero());
     }
 
     let reward = Uint128::try_from(
         Uint256::from(usd_paid)
             .checked_mul(Uint256::from(total_to_distribute))?
-            .checked_div(Uint256::from(total_committed_usd))?,
+            .checked_div(Uint256::from(total_committed_native))?,
     )?;
 
     Ok(reward)

@@ -29,24 +29,25 @@ echo ""
 
 echo "=== factory config ==="
 query_smart "$FACTORY_ADDR" '{"factory":{}}' | jq '{
-    bluechip_denom:             .factory.bluechip_denom,
-    pricing_pool_id:            .factory.pricing_pool_id,
-    usd_quote_denom:            .factory.usd_quote_denom,
-    twap_window_seconds:        .factory.twap_window_seconds,
-    commit_threshold_limit_usd: .factory.commit_threshold_limit_usd,
-    pool_creation_fee:          .factory.pool_creation_fee,
+    bluechip_denom:                .factory.bluechip_denom,
+    pricing_pool_id:               .factory.pricing_pool_id,
+    fee_quote_denom:               .factory.fee_quote_denom,
+    commit_threshold_limit_native: .factory.commit_threshold_limit_native,
+    gamm_pool_creation_fee:        .factory.gamm_pool_creation_fee,
+    pool_creation_fee:             .factory.pool_creation_fee,
     emergency_withdraw_delay_seconds: .factory.emergency_withdraw_delay_seconds,
-    bluechip_wallet_address:    .factory.bluechip_wallet_address
+    bluechip_wallet_address:       .factory.bluechip_wallet_address
 }' 2>/dev/null || echo "(query failed)"
 
 echo ""
-echo "=== pricing probe (ConvertNativeToUsd 1 OSMO) ==="
+echo "=== fee-route probe (CommitContext) ==="
 PROBE="$(query_smart "$FACTORY_ADDR" \
-    '{"pool_factory_query":{"convert_native_to_usd":{"amount":"1000000"}}}')"
-if USD="$(echo "$PROBE" | jq -re '.amount' 2>/dev/null)"; then
-    echo "OK: 1 OSMO ≈ \$$(awk -v u="$USD" 'BEGIN{printf "%.4f", u/1e6}') USD"
+    '{"pool_factory_query":{"commit_context":{}}}')"
+if echo "$PROBE" | jq -e '.bluechip_wallet' >/dev/null 2>&1; then
+    echo "$PROBE" | jq '{gamm_pool_creation_fee, fee_swap_budget_native}'
+    echo "OK — crossings can budget the gamm creation fee"
 else
-    echo "FAILING — commits fail closed until this works: $PROBE"
+    echo "FAILING — pre-threshold commits fail closed until this works: $PROBE"
 fi
 
 if [ -n "${ROUTER_ADDR:-}" ]; then

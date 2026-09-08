@@ -222,6 +222,7 @@ pub fn execute_apply_pool_upgrade(
             effective_after: upgrade.effective_after,
         });
     }
+    crate::execute::config::ensure_apply_window(&env, upgrade.effective_after)?;
 
     // Must not have started yet
     if upgrade.upgraded_count > 0 {

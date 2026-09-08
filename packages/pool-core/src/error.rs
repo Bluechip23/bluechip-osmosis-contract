@@ -92,9 +92,6 @@ pub enum ContractError {
     #[error("Invalid bluechip amount: expected {expected}, actual {actual}")]
     InvalidNativeAmount { expected: Uint128, actual: Uint128 },
 
-    #[error("Oracle price is invalid (zero or negative)")]
-    InvalidOraclePrice {},
-
     #[error("the pool is missing needed liquidity to carry out transaction")]
     InsufficientLiquidity {},
 
@@ -245,7 +242,7 @@ pub enum ContractError {
     #[error("Invalid pair shape: {reason}")]
     InvalidPairShape { reason: String },
 
-    #[error("Commit too small: ${got} USD (minimum ${min} USD {phase})")]
+    #[error("Commit too small: {got} native base units attached (minimum {min} {phase})")]
     CommitTooSmall {
         got: Uint128,
         min: Uint128,

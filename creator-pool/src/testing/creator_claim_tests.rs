@@ -216,7 +216,7 @@ mod reply_handler_tests {
     #[test]
     fn reply_initial_notify_err_does_not_touch_crossing_state() {
         use crate::state::{
-            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, USD_RAISED_FROM_COMMIT,
+            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, GROSS_NATIVE_COMMITTED,
         };
         use crate::testing::fixtures::setup_pool_post_threshold;
         use cosmwasm_std::Uint128;
@@ -230,7 +230,7 @@ mod reply_handler_tests {
 
         let snap_pool_state = POOL_STATE.load(&deps.storage).unwrap();
         let snap_is_threshold_hit = IS_THRESHOLD_HIT.load(&deps.storage).unwrap();
-        let snap_usd_raised = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
+        let snap_usd_raised = GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap();
         let snap_native_raised = NATIVE_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
         assert!(!PENDING_FACTORY_NOTIFY
             .may_load(&deps.storage)
@@ -254,7 +254,7 @@ mod reply_handler_tests {
             snap_is_threshold_hit
         );
         assert_eq!(
-            USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(),
+            GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap(),
             snap_usd_raised
         );
         assert_eq!(
@@ -266,7 +266,7 @@ mod reply_handler_tests {
     #[test]
     fn reply_retry_err_does_not_touch_crossing_state() {
         use crate::state::{
-            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, USD_RAISED_FROM_COMMIT,
+            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, GROSS_NATIVE_COMMITTED,
         };
         use crate::testing::fixtures::setup_pool_post_threshold;
         use cosmwasm_std::Uint128;
@@ -282,7 +282,7 @@ mod reply_handler_tests {
 
         let snap_pool_state = POOL_STATE.load(&deps.storage).unwrap();
         let snap_is_threshold_hit = IS_THRESHOLD_HIT.load(&deps.storage).unwrap();
-        let snap_usd_raised = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
+        let snap_usd_raised = GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap();
         let snap_native_raised = NATIVE_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
 
         let r = synthetic_reply(REPLY_ID_FACTORY_NOTIFY_RETRY, false, Some("still failing"));
@@ -296,7 +296,7 @@ mod reply_handler_tests {
             snap_is_threshold_hit
         );
         assert_eq!(
-            USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(),
+            GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap(),
             snap_usd_raised
         );
         assert_eq!(
@@ -308,7 +308,7 @@ mod reply_handler_tests {
     #[test]
     fn reply_retry_ok_does_not_touch_crossing_state() {
         use crate::state::{
-            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, USD_RAISED_FROM_COMMIT,
+            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, GROSS_NATIVE_COMMITTED,
         };
         use crate::testing::fixtures::setup_pool_post_threshold;
         use cosmwasm_std::Uint128;
@@ -324,7 +324,7 @@ mod reply_handler_tests {
 
         let snap_pool_state = POOL_STATE.load(&deps.storage).unwrap();
         let snap_is_threshold_hit = IS_THRESHOLD_HIT.load(&deps.storage).unwrap();
-        let snap_usd_raised = USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
+        let snap_usd_raised = GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap();
         let snap_native_raised = NATIVE_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
 
         let r = synthetic_reply(REPLY_ID_FACTORY_NOTIFY_RETRY, true, None);
@@ -337,7 +337,7 @@ mod reply_handler_tests {
             snap_is_threshold_hit
         );
         assert_eq!(
-            USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(),
+            GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap(),
             snap_usd_raised
         );
         assert_eq!(

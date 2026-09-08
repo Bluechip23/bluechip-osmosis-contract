@@ -145,9 +145,9 @@ fn execute_native_swap(
         return Err(StdError::generic_err("pool is in commit phase"));
     }
 
-    // Post-migration both the bluechip side AND the creator side are native
-    // bank denoms, so a creator-token offer now arrives here as attached
-    // funds + `SimpleSwap` (previously it came in via a CW20 `Receive`).
+    // Both the bluechip side AND the creator side are native bank
+    // denoms, so a creator-token offer arrives here as attached
+    // funds + `SimpleSwap`.
     let denom = match &offer_asset.info {
         TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom.clone(),
     };
@@ -343,9 +343,8 @@ fn build_transfer_msg(
     if amount.is_zero() {
         return Err(StdError::generic_err("zero return amount"));
     }
-    // Both sides are native bank denoms now, so the ask output is always a
-    // `BankMsg::Send` of the ask denom (previously the `CreatorToken` arm
-    // built a CW20 `Transfer`).
+    // Both sides are native bank denoms, so the ask output is always a
+    // `BankMsg::Send` of the ask denom.
     match asset {
         TokenType::Native { denom } | TokenType::CreatorToken { denom } => {
             Ok(CosmosMsg::Bank(BankMsg::Send {

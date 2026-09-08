@@ -227,7 +227,7 @@ fn recover_distribution(
             || dist_state.consecutive_failures >= MAX_CONSECUTIVE_DISTRIBUTION_FAILURES
         {
             // CARRY-OVER 1 — the empty-vs-non-empty decision is an O(1) probe
-            // (`next().is_none()`), not the old O(N) `keys(..).count()` scan.
+            // (`next().is_none()`), never an O(N) `keys(..).count()` scan.
             // Completion/removal semantics are unchanged: an empty ledger
             // means the distribution finished, so DISTRIBUTION_STATE is
             // removed; otherwise the cursor is restarted. The `remaining`
@@ -248,7 +248,7 @@ fn recover_distribution(
                 let restarted = DistributionState {
                     is_distributing: true,
                     total_to_distribute: dist_state.total_to_distribute,
-                    total_committed_usd: dist_state.total_committed_usd,
+                    total_committed_native: dist_state.total_committed_native,
                     last_processed_key: None,
                     distributions_remaining: count,
                     estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -374,7 +374,7 @@ pub fn execute_self_recover_distribution(
         let restarted = DistributionState {
             is_distributing: true,
             total_to_distribute: dist_state.total_to_distribute,
-            total_committed_usd: dist_state.total_committed_usd,
+            total_committed_native: dist_state.total_committed_native,
             last_processed_key: None,
             distributions_remaining: count,
             estimated_gas_per_distribution: DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
@@ -432,18 +432,28 @@ pub fn execute_claim_failed_distribution(
     info: MessageInfo,
     recipient: Option<String>,
 ) -> Result<Response, ContractError> {
-    ensure_not_drained(deps.storage)?;
-
-    // Pause gate. This is a distribution-recovery MINT path: it
-    // dispatches a creator-token mint through the same
-    // `build_distribution_mint_submsg` harness as the bulk distribution
-    // loop. A `POOL_PAUSED` admin (or auto-low-liquidity) pause must halt it
-    // exactly like `execute_continue_distribution` already does — otherwise a
-    // paused pool could keep minting via this recovery path while an admin
-    // investigates. Reuses `PoolPausedLowLiquidity` for consistency with the
-    // commit / swap / continue-distribution pause gates. Pause is reversible,
-    // so the claim becomes available again once the admin unpauses.
-    if POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false) {
+    // Deliberately NOT gated on `ensure_not_drained`, mirroring
+    // `ClaimCreatorExcessLiquidity`: a FAILED_MINTS entry is a
+    // committer-owned MINT entitlement whose amount was fixed by the
+    // ledger before any incident — paying it never touches the swept bank
+    // balance, so an emergency drain (a terminal action that leaves the
+    // pool paused forever) must not permanently confiscate it.
+    //
+    // Pause gate (reversible investigations only). This is a
+    // distribution-recovery MINT path: it dispatches a creator-token mint
+    // through the same `build_distribution_mint_submsg` harness as the
+    // bulk distribution loop, so a `POOL_PAUSED` admin (or
+    // auto-low-liquidity) pause halts it exactly like
+    // `execute_continue_distribution` — otherwise a paused pool could
+    // keep minting via this recovery path while an admin investigates.
+    // EXCEPT after a drain: the drain latches the pause permanently, and
+    // honoring it here would turn "paused for investigation" into
+    // "airdrop forfeited forever". Post-drain, the ledger-bounded claim
+    // stays reachable.
+    let drained = crate::state::EMERGENCY_DRAINED
+        .may_load(deps.storage)?
+        .unwrap_or(false);
+    if !drained && POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::PoolPausedLowLiquidity {});
     }
 

@@ -1,13 +1,12 @@
 //! Shared state — every storage Item, struct, and constant that both
 //! pool kinds read or write.
 //!
-//! Phase-2 note: the pool no longer runs an INTERNAL constant-product AMM.
-//! At threshold-crossing it seeds a native Osmosis GAMM balancer pool and
-//! holds the `gamm/pool/{id}` LP shares permanently. Consequently the old
-//! reserve/liquidity-position/fee-growth machinery is gone: there are no
-//! `reserve0/reserve1`, no LP positions, no internal fee accounting.
-//! `POOL_STATE` shrinks to the pool's own address, and the native pool id
-//! learned from the `MsgCreateBalancerPool` reply lives in `POOL_ID`.
+//! The pool runs no internal AMM. At threshold-crossing it seeds a native
+//! Osmosis GAMM balancer pool and holds the `gamm/pool/{id}` LP shares
+//! permanently: there are no local reserves, LP positions, or internal fee
+//! accounting. `POOL_STATE` holds the pool's own address, and the native
+//! pool id learned from the `MsgCreateBalancerPool` reply lives in
+//! `POOL_ID`.
 //!
 //! The creator-pool crate glob-re-exports this module from its own
 //! `state.rs` so existing `use crate::state::X;` call sites keep
@@ -64,9 +63,9 @@ impl Default for PoolAnalytics {
     }
 }
 
-/// Record written on completed emergency drain (Phase 2). Kept for the
-/// simplified native-pool emergency-withdraw path; `amount0/amount1`
-/// capture whatever the drain swept to the bluechip wallet.
+/// Record written on completed emergency drain (Phase 2); `amount0/amount1`
+/// capture whatever the drain swept to the bluechip wallet. Forensic
+/// record only — never read by contract logic.
 #[cw_serde]
 pub struct EmergencyWithdrawalInfo {
     pub withdrawn_at: u64,
@@ -76,12 +75,8 @@ pub struct EmergencyWithdrawalInfo {
     pub total_liquidity_at_withdrawal: Uint128,
 }
 
-/// Mutable pool state.
-///
-/// Phase-2: shrunk to the pool's own contract address. The internal AMM's
-/// reserves, cumulative-price accumulators, and total-liquidity counter
-/// are gone — pricing and depth live on the native Osmosis pool now, keyed
-/// by [`POOL_ID`].
+/// Mutable pool state: just the pool's own contract address. Pricing and
+/// depth live on the native Osmosis pool, keyed by [`POOL_ID`].
 #[cw_serde]
 pub struct PoolState {
     pub pool_contract_address: Addr,
@@ -139,9 +134,6 @@ impl PoolDetails {
 
 /// Core state items read by the swap / commit hot paths. Bundled so
 /// handlers that touch more than one can `load` once.
-///
-/// Phase-2: `fees` is gone (no internal fee accounting) and `state` no
-/// longer carries reserves — swaps route through the native pool.
 pub struct PoolCtx {
     pub info: PoolInfo,
     pub state: PoolState,
@@ -278,10 +270,9 @@ pub const POOL_KIND_COMMIT: &str = "commit";
 /// seeded per-side liquidity ([`SEED_LIQUIDITY`]). If EITHER side of the
 /// live native pool drops below this percentage of what was seeded, the
 /// next routed swap trips the breaker: it sets `POOL_PAUSED` +
-/// `POOL_PAUSED_AUTO` and rejects with a low-liquidity pause error. This
-/// replaces the retired absolute `MINIMUM_LIQUIDITY` guard, which is
-/// meaningless once reserves live on the native pool rather than in local
-/// state. Manual admin `Unpause` clears both pause flags as it does today.
+/// `POOL_PAUSED_AUTO` and rejects with a low-liquidity pause error.
+/// Relative-to-seed so the floor scales with each pool's raise size.
+/// Manual admin `Unpause` clears both pause flags.
 pub const BREAKER_FLOOR_PERCENT: u128 = 25;
 
 /// Recovery window for `RecoverPoolStuckStates::StuckThreshold`.

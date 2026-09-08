@@ -50,10 +50,10 @@ pub fn update_commit_info(
                     committing.total_paid_bluechip = committing
                         .total_paid_bluechip
                         .checked_add(bluechip_amount)?;
-                    committing.total_paid_usd =
-                        committing.total_paid_usd.checked_add(usd_amount)?;
+                    committing.total_paid_native =
+                        committing.total_paid_native.checked_add(usd_amount)?;
                     committing.last_payment_bluechip = bluechip_amount;
-                    committing.last_payment_usd = usd_amount;
+                    committing.last_payment_native = usd_amount;
                     committing.last_committed = timestamp;
                     Ok(committing)
                 }
@@ -64,10 +64,10 @@ pub fn update_commit_info(
                     pool_contract_address: pool_contract_address.clone(),
                     committer: sender.clone(),
                     total_paid_bluechip: bluechip_amount,
-                    total_paid_usd: usd_amount,
+                    total_paid_native: usd_amount,
                     last_committed: timestamp,
                     last_payment_bluechip: bluechip_amount,
-                    last_payment_usd: usd_amount,
+                    last_payment_native: usd_amount,
                 }),
             }
         },

@@ -8,8 +8,8 @@
 #
 # Stores the five wasms (factory, creator_pool, router, cw20_base,
 # cw721_base), instantiates the factory and the router, then verifies
-# the deploy by reading the factory config back and probing
-# ConvertNativeToUsd so the live x/twap rate is visible.
+# the deploy by reading the factory config back and probing the
+# CommitContext query so the live fee-route state is visible.
 #
 # Store modes (env var STORE_MODE, default "direct"):
 #   direct  -> `wasm store` each artifact. Permissionless on osmo-test-5;
@@ -140,15 +140,14 @@ checkpoint() {
 }
 
 # ---- Pre-flight: pricing pool sanity (warn-only) --------------------
-# The factory refuses pricing_pool_id 0 but cannot verify at instantiate
-# time that the pool actually trades NATIVE_DENOM/USD_QUOTE_DENOM — a
-# wrong id surfaces later as a failed ConvertNativeToUsd probe. Check
-# the denoms up front where the CLI supports it.
+# The factory live-probes the fee route (an x/twap read over
+# pricing_pool_id) at instantiate, but checking the pool's denoms up
+# front where the CLI supports it gives a clearer error earlier.
 if POOL_JSON="$(query_json poolmanager pool "$PRICING_POOL_ID" 2>/dev/null)"; then
-    if ! echo "$POOL_JSON" | grep -q "$USD_QUOTE_DENOM" \
+    if ! echo "$POOL_JSON" | grep -q "$FEE_QUOTE_DENOM" \
         || ! echo "$POOL_JSON" | grep -q "$NATIVE_DENOM"; then
         echo "WARNING: pool $PRICING_POOL_ID does not appear to trade" >&2
-        echo "         $NATIVE_DENOM / $USD_QUOTE_DENOM. The post-deploy" >&2
+        echo "         $NATIVE_DENOM / $FEE_QUOTE_DENOM. The post-deploy" >&2
         echo "         pricing probe will likely fail; commits fail closed" >&2
         echo "         until the pricing route is fixed." >&2
         echo "" >&2
@@ -231,53 +230,24 @@ else
     #   osmo-test-5: 1000000 uosmo (native-denominated, paid directly)
     #   osmosis-1:   20000000 Noble-USDC ibc/… (the pool swaps its native
     #                retention into the fee coin via the pricing pool)
-    # The denom must be NATIVE_DENOM or USD_QUOTE_DENOM (validated at
+    # The denom must be NATIVE_DENOM or FEE_QUOTE_DENOM (validated at
     # instantiate; anything else is unroutable at crossing).
     GAMM_POOL_CREATION_FEE="${GAMM_POOL_CREATION_FEE:-0}"
     GAMM_POOL_CREATION_FEE_DENOM="${GAMM_POOL_CREATION_FEE_DENOM:-$NATIVE_DENOM}"
 
-    # ---- Pyth oracle (USD pricing) ---------------------------------
-    # USD valuation of every commit comes from the Pyth OSMO/USD feed —
-    # NOT an on-chain pool TWAP (the OSMO/USD pool substrate is too thin
-    # to price safely; see MAINNET_LIQUIDITY_RECON.md / ORACLE_PYTH_TRANSITION.md).
-    # `pricing_pool_id` / `usd_quote_denom` survive only as the cross-denom
-    # fee-swap route at threshold crossing.
-    #
-    # REQUIRED env (see osmo_testnet.env): PYTH_CONTRACT_ADDR (the chain's
-    # Pyth CW contract) + PYTH_NATIVE_USD_FEED_ID (64-hex OSMO/USD feed id).
-    # Optional gates: PYTH_MAX_STALENESS_SECONDS (default 300, range 30..600),
-    # PYTH_CONF_THRESHOLD_BPS (default 200, range 50..500).
-    #
-    # OPERATIONAL NOTE: Pyth on Osmosis is push-based and the OSMO/USD feed
-    # is NOT kept fresh by the ecosystem — you MUST run a price keeper
-    # (Hermes -> UpdatePriceFeeds) or the staleness gate fails every commit
-    # closed. The instantiate live-probe below reads the feed; if the keeper
-    # is not yet pushing, instantiate will refuse (feed stale) — start the
-    # keeper first.
-    if [ -z "${PYTH_CONTRACT_ADDR:-}" ] || [ -z "${PYTH_NATIVE_USD_FEED_ID:-}" ]; then
-        echo "ERROR: PYTH_CONTRACT_ADDR and PYTH_NATIVE_USD_FEED_ID must be set" >&2
-        echo "       (the Pyth CW contract + the 64-hex OSMO/USD feed id)." >&2
-        exit 1
-    fi
-    PYTH_MAX_STALENESS_SECONDS="${PYTH_MAX_STALENESS_SECONDS:-300}"
-    PYTH_CONF_THRESHOLD_BPS="${PYTH_CONF_THRESHOLD_BPS:-200}"
-    if ! echo "$PYTH_NATIVE_USD_FEED_ID" | grep -Eq '^[0-9a-fA-F]{64}$'; then
-        echo "ERROR: PYTH_NATIVE_USD_FEED_ID must be 64 hex chars (no 0x), got:" >&2
-        echo "       $PYTH_NATIVE_USD_FEED_ID" >&2
-        exit 1
-    fi
-
+    # The commit threshold is NATIVE-denominated (base units of
+    # NATIVE_DENOM; 500000000000 = 500,000 OSMO). There is no price
+    # oracle: a commit's value toward the threshold IS its attached
+    # native amount. The only price read in the protocol is the
+    # fee-route TWAP over PRICING_POOL_ID, used solely to budget the
+    # cross-denom gamm creation-fee swap at crossing.
     FACTORY_INIT="$(jq -nc \
-        --arg pyth_addr        "$PYTH_CONTRACT_ADDR" \
-        --arg pyth_feed        "$PYTH_NATIVE_USD_FEED_ID" \
-        --arg pyth_staleness   "$PYTH_MAX_STALENESS_SECONDS" \
-        --arg pyth_conf_bps    "$PYTH_CONF_THRESHOLD_BPS" \
         --arg admin            "$ADMIN_ADDR_TO_USE" \
         --arg wallet           "$PROTOCOL_WALLET" \
         --arg native_denom     "$NATIVE_DENOM" \
-        --arg usd_quote        "$USD_QUOTE_DENOM" \
+        --arg fee_quote        "$FEE_QUOTE_DENOM" \
         --arg pricing_pool     "$PRICING_POOL_ID" \
-        --arg threshold_usd    "$COMMIT_THRESHOLD_LIMIT_USD" \
+        --arg threshold_native "$COMMIT_THRESHOLD_LIMIT_NATIVE" \
         --arg fee_bc           "$COMMIT_FEE_BLUECHIP" \
         --arg fee_cr           "$COMMIT_FEE_CREATOR" \
         --arg max_lock         "$MAX_BLUECHIP_LOCK_PER_POOL" \
@@ -293,9 +263,9 @@ else
             factory_admin_address:              $admin,
             bluechip_wallet_address:            $wallet,
             bluechip_denom:                     $native_denom,
-            usd_quote_denom:                    $usd_quote,
+            fee_quote_denom:                    $fee_quote,
             pricing_pool_id:                    ($pricing_pool    | tonumber),
-            commit_threshold_limit_usd:         $threshold_usd,
+            commit_threshold_limit_native:      $threshold_native,
             commit_fee_bluechip:                $fee_bc,
             commit_fee_creator:                 $fee_cr,
             max_bluechip_lock_per_pool:         $max_lock,
@@ -305,15 +275,11 @@ else
             emergency_withdraw_delay_seconds:   ($emergency_delay | tonumber),
             cw20_token_contract_id:             ($cw20_id         | tonumber),
             cw721_nft_contract_id:              ($cw721_id        | tonumber),
-            create_pool_wasm_contract_id:       ($pool_id         | tonumber),
-            pyth_contract_addr:                 $pyth_addr,
-            pyth_native_usd_feed_id:            $pyth_feed,
-            max_pyth_staleness_seconds:         ($pyth_staleness  | tonumber),
-            pyth_conf_threshold_bps:            ($pyth_conf_bps   | tonumber)
+            create_pool_wasm_contract_id:       ($pool_id         | tonumber)
         }')"
 
     # Show the operator the EXACT payload before anything is broadcast.
-    echo "--- FactoryInstantiate payload (Pyth oracle) ---"
+    echo "--- FactoryInstantiate payload ---"
     echo "$FACTORY_INIT" | jq .
     echo ""
 
@@ -363,37 +329,31 @@ echo "=================================================="
 echo "--- factory config readback ---"
 if CONFIG="$(query_smart "$FACTORY_ADDR" '{"factory":{}}')"; then
     echo "$CONFIG" | jq '{
-        bluechip_denom:             .factory.bluechip_denom,
-        pricing_pool_id:            .factory.pricing_pool_id,
-        usd_quote_denom:            .factory.usd_quote_denom,
-        twap_window_seconds:        .factory.twap_window_seconds,
-        commit_threshold_limit_usd: .factory.commit_threshold_limit_usd,
-        pool_creation_fee:          .factory.pool_creation_fee,
-        bluechip_wallet_address:    .factory.bluechip_wallet_address,
-        pyth_contract_addr:         .factory.pyth_contract_addr,
-        pyth_native_usd_feed_id:    .factory.pyth_native_usd_feed_id,
-        max_pyth_staleness_seconds: .factory.max_pyth_staleness_seconds,
-        pyth_conf_threshold_bps:    .factory.pyth_conf_threshold_bps
+        bluechip_denom:                .factory.bluechip_denom,
+        pricing_pool_id:               .factory.pricing_pool_id,
+        fee_quote_denom:               .factory.fee_quote_denom,
+        commit_threshold_limit_native: .factory.commit_threshold_limit_native,
+        gamm_pool_creation_fee:        .factory.gamm_pool_creation_fee,
+        pool_creation_fee:             .factory.pool_creation_fee,
+        bluechip_wallet_address:       .factory.bluechip_wallet_address
     }' 2>/dev/null || echo "$CONFIG"
 else
     echo "WARNING: factory config query failed" >&2
 fi
 
 echo ""
-echo "--- live Pyth pricing probe: ConvertNativeToUsd(1 OSMO) ---"
-PROBE_MSG='{"pool_factory_query":{"convert_native_to_usd":{"amount":"1000000"}}}'
-if PROBE="$(query_smart "$FACTORY_ADDR" "$PROBE_MSG")" \
-    && USD="$(echo "$PROBE" | jq -re '.amount' 2>/dev/null)"; then
-    USD_HUMAN="$(awk -v u="$USD" 'BEGIN { printf "%.4f", u/1000000 }')"
-    echo "1 OSMO ≈ \$$USD_HUMAN USD (rate_used=$(echo "$PROBE" | jq -r '.rate_used'))"
-    echo "pricing route OK — commits will value correctly"
+echo "--- live fee-route probe: CommitContext ---"
+PROBE_MSG='{"pool_factory_query":{"commit_context":{}}}'
+if PROBE="$(query_smart "$FACTORY_ADDR" "$PROBE_MSG")"; then
+    echo "$PROBE" | jq '{gamm_pool_creation_fee, fee_swap_budget_native}' 2>/dev/null \
+        || echo "$PROBE"
+    echo "fee route OK — crossings can budget the gamm creation fee"
 else
-    echo "WARNING: pricing probe FAILED. Commits fail closed until this works." >&2
-    echo "         Likely causes: the Pyth price keeper is not pushing (feed" >&2
-    echo "         STALE — start the Hermes → UpdatePriceFeeds keeper), a wrong" >&2
-    echo "         PYTH_CONTRACT_ADDR / PYTH_NATIVE_USD_FEED_ID, or a" >&2
-    echo "         wide-confidence reading. Fix via the 48h ProposeConfigUpdate" >&2
-    echo "         flow (or restart the keeper) and re-run this probe." >&2
+    echo "WARNING: CommitContext probe FAILED. Pre-threshold commits fail" >&2
+    echo "         closed until this works. Likely cause: PRICING_POOL_ID" >&2
+    echo "         does not trade NATIVE_DENOM/FEE_QUOTE_DENOM or has no" >&2
+    echo "         TWAP history yet. Fix via the 48h ProposeConfigUpdate" >&2
+    echo "         flow and re-run this probe." >&2
     echo "         raw: ${PROBE:-<no response>}" >&2
 fi
 
@@ -416,5 +376,5 @@ echo ""
 echo "NEXT:"
 echo "  scripts/status.sh                        # health overview"
 echo "  scripts/create_commit_pool.sh 'My Token' MYTOK"
-echo "  scripts/cross_threshold.sh <pool_addr>   # commit past the USD threshold"
+echo "  scripts/cross_threshold.sh <pool_addr>   # commit past the threshold"
 echo "  scripts/run_lifecycle_test.sh            # full automated lifecycle"

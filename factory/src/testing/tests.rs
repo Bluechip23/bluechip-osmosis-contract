@@ -44,7 +44,7 @@ fn create_default_instantiate_msg() -> FactoryInstantiate {
     FactoryInstantiate {
         factory_admin_address: admin_addr(),
         cw721_nft_contract_id: 58,
-        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        commit_threshold_limit_native: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: ubluechip_addr(),
@@ -54,7 +54,7 @@ fn create_default_instantiate_msg() -> FactoryInstantiate {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -62,10 +62,6 @@ fn create_default_instantiate_msg() -> FactoryInstantiate {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     }
 }
 
@@ -113,7 +109,7 @@ fn proper_initialization() {
     let msg = FactoryInstantiate {
         factory_admin_address: the_admin.clone(),
         cw721_nft_contract_id: 58,
-        commit_threshold_limit_usd: Uint128::new(100),
+        commit_threshold_limit_native: Uint128::new(100),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: ubluechip_addr(),
@@ -123,7 +119,7 @@ fn proper_initialization() {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -131,10 +127,6 @@ fn proper_initialization() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     };
 
     let env = mock_env();
@@ -170,7 +162,7 @@ fn create_pair() {
     let msg = FactoryInstantiate {
         factory_admin_address: the_admin.clone(),
         cw721_nft_contract_id: 58,
-        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        commit_threshold_limit_native: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: ubluechip_addr(),
@@ -180,7 +172,7 @@ fn create_pair() {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -188,10 +180,6 @@ fn create_pair() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     };
 
     let env = mock_env();
@@ -306,7 +294,7 @@ fn test_create_pair_with_custom_params() {
     let msg = FactoryInstantiate {
         factory_admin_address: admin_addr(),
         cw721_nft_contract_id: 58,
-        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        commit_threshold_limit_native: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: ubluechip_addr(),
@@ -316,7 +304,7 @@ fn test_create_pair_with_custom_params() {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -324,10 +312,6 @@ fn test_create_pair_with_custom_params() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     };
 
     let env = mock_env();
@@ -528,7 +512,7 @@ fn test_complete_pool_creation_flow() {
     let msg = FactoryInstantiate {
         factory_admin_address: admin_addr(),
         cw721_nft_contract_id: 58,
-        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        commit_threshold_limit_native: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: ubluechip_addr(),
@@ -538,7 +522,7 @@ fn test_complete_pool_creation_flow() {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -546,10 +530,6 @@ fn test_complete_pool_creation_flow() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     };
 
     let env = mock_env();
@@ -671,7 +651,7 @@ fn test_config() {
     let config = FactoryInstantiate {
         factory_admin_address: Addr::unchecked("admin1..."),
         cw721_nft_contract_id: 58,
-        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        commit_threshold_limit_native: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 1,
         create_pool_wasm_contract_id: 1,
         bluechip_wallet_address: Addr::unchecked("bluechip1..."),
@@ -681,7 +661,7 @@ fn test_config() {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -689,10 +669,6 @@ fn test_config() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     };
 
     assert_eq!(config.factory_admin_address, Addr::unchecked("admin1..."));
@@ -715,7 +691,7 @@ fn test_reply_handling() {
     let msg = FactoryInstantiate {
         factory_admin_address: the_admin.clone(),
         cw721_nft_contract_id: 58,
-        commit_threshold_limit_usd: Uint128::new(100),
+        commit_threshold_limit_native: Uint128::new(100),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: ubluechip_addr(),
@@ -725,7 +701,7 @@ fn test_reply_handling() {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -733,10 +709,6 @@ fn test_reply_handling() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     };
 
     let env = mock_env();
@@ -1355,7 +1327,7 @@ fn create_pair_sets_marketing_admin_to_creator() {
     let msg = FactoryInstantiate {
         factory_admin_address: the_admin.clone(),
         cw721_nft_contract_id: 58,
-        commit_threshold_limit_usd: Uint128::new(25_000_000_000),
+        commit_threshold_limit_native: Uint128::new(25_000_000_000),
         cw20_token_contract_id: 10,
         create_pool_wasm_contract_id: 11,
         bluechip_wallet_address: ubluechip_addr(),
@@ -1365,7 +1337,7 @@ fn create_pair_sets_marketing_admin_to_creator() {
         creator_excess_liquidity_lock_days: 7,
         bluechip_denom: "ubluechip".to_string(),
         pricing_pool_id: 1,
-        usd_quote_denom: "uusdc".to_string(),
+        fee_quote_denom: "uusdc".to_string(),
         pool_creation_fee: cosmwasm_std::Uint128::new(1_000_000),
         gamm_pool_creation_fee: cosmwasm_std::Coin {
             denom: String::new(),
@@ -1373,10 +1345,6 @@ fn create_pair_sets_marketing_admin_to_creator() {
         },
         threshold_payout_amounts: Default::default(),
         emergency_withdraw_delay_seconds: 86_400,
-            pyth_contract_addr: "pyth_oracle".to_string(),
-            pyth_native_usd_feed_id: "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6".to_string(),
-            max_pyth_staleness_seconds: 300,
-            pyth_conf_threshold_bps: 200,
     };
     instantiate(
         deps.as_mut(),
@@ -1451,7 +1419,7 @@ fn pools_query_paginates_registry_in_pool_id_order() {
                     denom: "ubluechip".to_string(),
                 },
                 TokenType::CreatorToken {
-                    denom: String::from(format!("token_{pool_id}")),
+                    denom: format!("token_{pool_id}"),
                 },
             ],
             creator_pool_addr: Addr::unchecked(format!("pool_{pool_id}")),
@@ -1501,9 +1469,9 @@ fn deploy_script_instantiate_json_deserializes() {
         "factory_admin_address": "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
         "bluechip_wallet_address": "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
         "bluechip_denom": "uosmo",
-        "usd_quote_denom": "ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894505B876BA6E4",
+        "fee_quote_denom": "ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894505B876BA6E4",
         "pricing_pool_id": 1464,
-        "commit_threshold_limit_usd": "25000000000",
+        "commit_threshold_limit_native": "25000000000",
         "commit_fee_bluechip": "0.01",
         "commit_fee_creator": "0.05",
         "max_bluechip_lock_per_pool": "25000000000",
@@ -1513,65 +1481,17 @@ fn deploy_script_instantiate_json_deserializes() {
         "emergency_withdraw_delay_seconds": 86400,
         "cw20_token_contract_id": 1,
         "cw721_nft_contract_id": 2,
-        "create_pool_wasm_contract_id": 3,
-        "pyth_contract_addr": "osmo13ge29x4e2s63a8ytz2px8gurtyznmue4a69n5275692v3qn3ks8q7cwck7",
-        "pyth_native_usd_feed_id": "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6",
-        "max_pyth_staleness_seconds": 300,
-        "pyth_conf_threshold_bps": 200
+        "create_pool_wasm_contract_id": 3
     }"#;
     let msg: FactoryInstantiate =
         cosmwasm_std::from_json(json.as_bytes()).expect("deploy script JSON must deserialize");
     assert_eq!(msg.bluechip_denom, "uosmo");
     assert_eq!(msg.pricing_pool_id, 1464);
-    assert_eq!(msg.commit_threshold_limit_usd, Uint128::new(25_000_000_000));
+    assert_eq!(msg.commit_threshold_limit_native, Uint128::new(25_000_000_000));
     assert_eq!(msg.gamm_pool_creation_fee.amount, Uint128::new(1_000_000));
-    // Pyth oracle fields deserialize as configured.
-    assert_eq!(
-        msg.pyth_native_usd_feed_id,
-        "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6"
-    );
-    assert_eq!(msg.max_pyth_staleness_seconds, 300);
-    assert_eq!(msg.pyth_conf_threshold_bps, 200);
     // Omitted-with-default field must land on the canonical payout split.
     msg.threshold_payout_amounts
         .validate()
         .expect("defaulted threshold_payout_amounts must be canonical");
 }
 
-/// The Pyth oracle fields are `#[serde(default)]`, so a payload that omits
-/// `max_pyth_staleness_seconds` / `pyth_conf_threshold_bps` still
-/// deserializes — filling the documented defaults (300s / 200 bps). The
-/// two required fields (contract addr + feed id) must still be present.
-#[test]
-fn deploy_script_instantiate_json_defaults_pyth_gate_fields() {
-    let json = r#"{
-        "factory_admin_address": "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
-        "bluechip_wallet_address": "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
-        "bluechip_denom": "uosmo",
-        "usd_quote_denom": "ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894505B876BA6E4",
-        "pricing_pool_id": 1464,
-        "commit_threshold_limit_usd": "20000000",
-        "commit_fee_bluechip": "0.01",
-        "commit_fee_creator": "0.05",
-        "max_bluechip_lock_per_pool": "30000000000",
-        "creator_excess_liquidity_lock_days": 7,
-        "pool_creation_fee": "0",
-        "gamm_pool_creation_fee": {"denom": "uosmo", "amount": "1000000"},
-        "emergency_withdraw_delay_seconds": 86400,
-        "cw20_token_contract_id": 1,
-        "cw721_nft_contract_id": 2,
-        "create_pool_wasm_contract_id": 3,
-        "pyth_contract_addr": "osmo13ge29x4e2s63a8ytz2px8gurtyznmue4a69n5275692v3qn3ks8q7cwck7",
-        "pyth_native_usd_feed_id": "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6"
-    }"#;
-    let msg: FactoryInstantiate = cosmwasm_std::from_json(json.as_bytes())
-        .expect("deploy script JSON (defaulted pyth gates) must deserialize");
-    assert_eq!(
-        msg.max_pyth_staleness_seconds,
-        crate::usd_price::DEFAULT_MAX_PYTH_STALENESS_SECONDS
-    );
-    assert_eq!(
-        msg.pyth_conf_threshold_bps,
-        crate::usd_price::PYTH_CONF_THRESHOLD_BPS_DEFAULT
-    );
-}

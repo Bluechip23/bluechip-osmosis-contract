@@ -73,15 +73,13 @@ fn mid_crossing_module_failure_reverts_mints_ledger_fees_and_funds() {
         .unwrap()
         .data
         .pool_id;
-    app.increase_time(400);
+    app.increase_time(700);
 
     // Live chain fee: $2,000 USDC — twice what the pricing pool holds.
     set_pool_creation_fee(&app, UUSDC, 2_000_000_000);
 
     let wasm = Wasm::new(&app);
     let (factory_code_id, pool_code_id) = store_factory_and_pool(&wasm, &admin);
-    let pyth = instantiate_mock_pyth(&wasm, store_mock_pyth(&wasm, &admin), &admin);
-    refresh_pyth(&app, &wasm, &pyth, &admin, 1_000_000);
     let factory_addr = instantiate_factory(
         &wasm,
         factory_code_id,
@@ -92,7 +90,6 @@ fn mid_crossing_module_failure_reverts_mints_ledger_fees_and_funds() {
             // Factory config mirrors the chain fee (denom == usd_quote, so
             // config validation accepts it and reserve sizing engages).
             Coin::new(2_000_000_000u128, UUSDC),
-            &pyth,
         ),
         &admin,
     );
@@ -260,12 +257,10 @@ fn unroutable_live_fee_denom_bricks_crossing_until_restored() {
         .unwrap()
         .data
         .pool_id;
-    app.increase_time(400);
+    app.increase_time(700);
 
     let wasm = Wasm::new(&app);
     let (factory_code_id, pool_code_id) = store_factory_and_pool(&wasm, &admin);
-    let pyth = instantiate_mock_pyth(&wasm, store_mock_pyth(&wasm, &admin), &admin);
-    refresh_pyth(&app, &wasm, &pyth, &admin, 1_000_000);
     let factory_addr = instantiate_factory(
         &wasm,
         factory_code_id,
@@ -274,7 +269,6 @@ fn unroutable_live_fee_denom_bricks_crossing_until_restored() {
             pricing_pool_id,
             pool_code_id,
             Coin::new(GAMM_CREATE_FEE, UOSMO),
-            &pyth,
         ),
         &admin,
     );

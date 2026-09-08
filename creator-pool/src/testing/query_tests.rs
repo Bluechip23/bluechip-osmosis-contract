@@ -12,7 +12,7 @@ use crate::msg::{
 use crate::query::query;
 use crate::state::{
     Committing, CreatorExcessLiquidity, COMMIT_INFO, CREATOR_EXCESS_POSITION, THRESHOLD_CROSSED_AT,
-    USD_RAISED_FROM_COMMIT,
+    GROSS_NATIVE_COMMITTED,
 };
 use crate::testing::fixtures::{setup_pool_post_threshold, setup_pool_storage};
 
@@ -135,11 +135,11 @@ fn test_query_committing_info_exists() {
             &Committing {
                 pool_contract_address: Addr::unchecked("pool_contract"),
                 committer: user.clone(),
-                total_paid_usd: Uint128::new(5_000_000_000),
+                total_paid_native: Uint128::new(5_000_000_000),
                 total_paid_bluechip: Uint128::new(5_000_000_000),
                 last_committed: Timestamp::from_seconds(1_600_000_000),
                 last_payment_bluechip: Uint128::new(1_000_000_000),
-                last_payment_usd: Uint128::new(1_000_000_000),
+                last_payment_native: Uint128::new(1_000_000_000),
             },
         )
         .unwrap();
@@ -153,7 +153,7 @@ fn test_query_committing_info_exists() {
 
     assert!(info.is_some());
     let info = info.unwrap();
-    assert_eq!(info.total_paid_usd, Uint128::new(5_000_000_000));
+    assert_eq!(info.total_paid_native, Uint128::new(5_000_000_000));
     assert_eq!(info.total_paid_bluechip, Uint128::new(5_000_000_000));
 }
 
@@ -185,11 +185,11 @@ fn test_query_last_committed_exists() {
             &Committing {
                 pool_contract_address: Addr::unchecked("pool_contract"),
                 committer: user.clone(),
-                total_paid_usd: Uint128::new(5_000_000_000),
+                total_paid_native: Uint128::new(5_000_000_000),
                 total_paid_bluechip: Uint128::new(5_000_000_000),
                 last_committed: Timestamp::from_seconds(1_600_000_000),
                 last_payment_bluechip: Uint128::new(1_000_000_000),
-                last_payment_usd: Uint128::new(1_000_000_000),
+                last_payment_native: Uint128::new(1_000_000_000),
             },
         )
         .unwrap();
@@ -207,7 +207,7 @@ fn test_query_last_committed_exists() {
         Some(Timestamp::from_seconds(1_600_000_000))
     );
     assert_eq!(resp.last_payment_bluechip, Some(Uint128::new(1_000_000_000)));
-    assert_eq!(resp.last_payment_usd, Some(Uint128::new(1_000_000_000)));
+    assert_eq!(resp.last_payment_native, Some(Uint128::new(1_000_000_000)));
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn test_query_is_fully_commited_in_progress() {
     let mut deps = mock_dependencies();
     setup_pool_storage(&mut deps);
 
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(10_000_000_000))
         .unwrap();
 

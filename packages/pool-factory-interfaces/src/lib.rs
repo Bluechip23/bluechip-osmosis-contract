@@ -44,17 +44,6 @@ pub struct RegisteredPoolResponse {
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum FactoryQueryMsg {
-    /// Values `amount` (base units of the chain's native asset, e.g.
-    /// uosmo) in USD micro-units (6 decimals). Backed by the Pyth
-    /// native/USD price feed read from the factory-configured Pyth
-    /// contract, gated for staleness/confidence/expo and fail-closed. A
-    /// standing price keeper must keep that feed fresh on-chain. Pools call
-    /// this once per commit to value the deposit against the
-    /// USD-denominated threshold. Fails (and therefore the commit fails
-    /// closed) if the price query errors or a gate rejects the price.
-    #[returns(ConversionResponse)]
-    ConvertNativeToUsd { amount: Uint128 },
-
     /// Returns the chain-side emergency-withdraw delay (seconds between
     /// `Phase 1: initiate` and `Phase 2: drain` on each pool's
     /// `EmergencyWithdraw` flow). Pools query this at initiate time so
@@ -77,17 +66,29 @@ pub enum FactoryQueryMsg {
     #[returns(BluechipWalletResponse)]
     BluechipWalletAddress {},
 
-    /// Everything a pool needs to process one commit, in a single
-    /// query: the `ConvertNativeToUsd` valuation of `amount` plus the
-    /// factory's current `bluechip_wallet_address`. Commits need both —
-    /// the USD value for the threshold accounting and the live wallet
-    /// for the protocol-fee transfer (and threshold-cross reward mint) —
-    /// so bundling them halves the cross-contract round-trips on the
-    /// hottest user path. Fails closed like `ConvertNativeToUsd`: a
-    /// commit cannot proceed without a valuation, and the wallet rides
-    /// on the same response so it needs no separate fail-soft fallback.
+    /// Everything a pool needs to process one commit, in a single query.
+    /// The commit threshold is NATIVE-denominated (base units of the chain's
+    /// native asset), so no price valuation happens here — a commit's value
+    /// toward the threshold IS its attached native amount. The query supplies
+    /// the live factory context a commit still needs: the current
+    /// `bluechip_wallet_address` (so wallet rotations apply to every pool
+    /// without a snapshot), the chain's GAMM pool-creation fee, and — when
+    /// that fee is denominated in a non-native denom (osmosis-1 charges
+    /// alloyed USDC) — the native budget for acquiring it, valued at the
+    /// pricing pool's arithmetic TWAP. The TWAP is an on-chain chain-module
+    /// read (no keeper, no external oracle); it bounds only the ~fee-sized
+    /// swap at crossing, never the threshold itself.
+    ///
+    /// `include_fee_budget`: `Some(false)` skips the TWAP valuation —
+    /// pools pass it on POST-threshold commits, which never fund a fee
+    /// swap, so a pricing-pool TWAP outage cannot block trading-phase
+    /// commits. Omitted/`None` means `true` (fail-safe: an older caller
+    /// still gets the fail-closed budget).
     #[returns(CommitContextResponse)]
-    CommitContext { amount: Uint128 },
+    CommitContext {
+        #[serde(default)]
+        include_fee_budget: Option<bool>,
+    },
 
     /// Returns the factory's registered multi-hop router address, if any.
     /// Pools query this on a `SimpleSwap` that omits `belief_price`:
@@ -139,55 +140,40 @@ pub struct RegisteredRouterResponse {
     pub router: Option<Addr>,
 }
 
-/// Response to `CommitContext`: the `ConvertNativeToUsd` valuation
-/// fields (see [`ConversionResponse`] for their semantics) plus the
-/// factory's live `bluechip_wallet_address`, plus the live GAMM
-/// creation-fee context the crossing needs.
-///
-/// The three fee/route fields follow the same live-query philosophy as
-/// `bluechip_wallet`: they ride the query every commit already makes,
-/// so pools always see the CURRENT factory config (admin-tunable via
-/// the 48h `ProposeConfigUpdate` flow) instead of an instantiate-time
-/// snapshot. They exist because on some chains (osmosis-1) the
-/// `x/poolmanager` pool-creation fee is denominated in a NON-native
-/// denom (20 USDC as of 2026-07): the pool retains its 1% commit fee
-/// in the native denom and must swap it into the fee denom at
-/// crossing, which requires knowing the fee coin and a route
-/// (`pricing_pool_id` trades native/`usd_quote_denom` by definition).
-/// All three are `#[serde(default)]` so a pre-upgrade factory's
-/// response still parses (pools then fall back to the instantiate-time
-/// reserve target and native-denom fee semantics).
+/// Response to `CommitContext`. All fields are LIVE factory state (the
+/// admin-tunable values ride the query every commit already makes, so pools
+/// never act on an instantiate-time snapshot).
 #[cw_serde]
 pub struct CommitContextResponse {
-    pub amount: Uint128,
-    pub rate_used: Uint128,
+    /// Block time the context was assembled at (the current block).
     pub timestamp: u64,
+    /// The factory's current `bluechip_wallet_address` — protocol-fee
+    /// recipient and threshold-cross reward target.
     pub bluechip_wallet: Addr,
-    /// Factory's configured `gamm_pool_creation_fee` (denom + amount).
-    /// `None` ⇒ factory predates the field or fee collection disabled.
+    /// Factory's configured `gamm_pool_creation_fee` (denom + amount) — the
+    /// fee `x/poolmanager` auto-charges when the crossing creates the native
+    /// GAMM pool. `None` ⇒ fee collection disabled.
     #[serde(default)]
     pub gamm_pool_creation_fee: Option<Coin>,
+    /// Native base units budgeted to ACQUIRE `gamm_pool_creation_fee` via the
+    /// pricing pool when the fee denom is non-native: `fee.amount` valued at
+    /// the pricing pool's arithmetic TWAP over the factory's trailing window,
+    /// WITHOUT margin (the pool applies its own swap margin on top). `None`
+    /// when the fee is native-denominated (pay directly, no swap) or fee
+    /// collection is disabled. Fail-closed: if the TWAP read errors the whole
+    /// query errors and the commit reverts rather than mis-budgeting.
+    #[serde(default)]
+    pub fee_swap_budget_native: Option<Uint128>,
     /// Factory's cross-denom fee-swap pool (trades the native denom against
-    /// `usd_quote_denom` to acquire the gamm creation fee at crossing; not a
-    /// price source). `0` ⇒ unknown (pre-upgrade factory).
+    /// `fee_quote_denom` to acquire the gamm creation fee at crossing; NOT a
+    /// price source for the threshold). `0` ⇒ unused (native-denominated fee).
     #[serde(default)]
     pub pricing_pool_id: u64,
-    /// The USD-stable quote denom on the pricing pool. Empty ⇒ unknown.
+    /// The non-native quote denom on the pricing pool (the denom the gamm
+    /// creation fee is charged in on chains where it is non-native). Empty ⇒
+    /// unused.
     #[serde(default)]
-    pub usd_quote_denom: String,
-}
-
-/// Result of a native→USD valuation. `rate_used` is the price in
-/// micro-USD per micro-native (6-decimal fixed point: `1_000_000` means
-/// $1.00 per native token), so callers can convert back
-/// (`native = usd * 1_000_000 / rate_used`) at EXACTLY the rate the
-/// valuation used — no mid-tx drift. `timestamp` is the block time the
-/// valuation was performed at (the current block).
-#[cw_serde]
-pub struct ConversionResponse {
-    pub amount: Uint128,
-    pub rate_used: Uint128,
-    pub timestamp: u64,
+    pub fee_quote_denom: String,
 }
 
 #[cw_serde]

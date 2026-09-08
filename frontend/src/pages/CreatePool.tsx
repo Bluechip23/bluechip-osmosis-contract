@@ -54,7 +54,7 @@ const CreatePoolPage: React.FC = () => {
                         IMPORTANT: DO NOT LOSE AS WE WILL NOT BE ABLE TO RECOVER YOUR WALLET IF YOU LOSE IT!
                     </Typography>
                     <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        The pool requires $25,000 USD in commits (paid in OSMO) to activate
+                        The pool requires 500,000 OSMO in commits to activate
                     </Typography>
                     <Typography component="li" variant="body2" color="text.secondary" sx={{ mb: 1 }}>
                         You will receive a 5% fee from every COMMIT transaction

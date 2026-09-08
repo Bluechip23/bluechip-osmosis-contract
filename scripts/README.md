@@ -33,7 +33,7 @@ scripts/run_lifecycle_test.sh                # full automated rehearsal
 |---|---|
 | `../deploy_osmosis.sh <env>` | store the 5 wasms, instantiate factory + router, verify (config readback + live x/twap probe). Resumable via the state file; handles mainnet gov-mode code IDs too |
 | `create_commit_pool.sh <name> <symbol>` | factory.Create; logs the new pool to `commit_pools.txt` |
-| `cross_threshold.sh <pool> [amount]` | commit OSMO past the USD threshold (auto-sized at the live x/twap rate) |
+| `cross_threshold.sh <pool> [amount]` | commit OSMO past the native threshold (auto-sized from the remaining gap) |
 | `continue_distribution.sh <pool>` | flush the post-threshold committer payout batches |
 | `swap.sh <pool> native\|token <amt>` | AMM swap either direction (simulates first) |
 | `liquidity.sh deposit\|shares\|remove` | LP on the NATIVE GAMM pool (MsgJoinPool/MsgExitPool; discovers the pool id via the contract's `native_pool_id` query) |
@@ -44,11 +44,12 @@ scripts/run_lifecycle_test.sh                # full automated rehearsal
 
 ## Testnet tips
 
-- Drop `COMMIT_THRESHOLD_LIMIT_USD` in `osmo_testnet.env` to a few
-  hundred dollars **before deploying** so a threshold cross is cheap.
-- `PRICING_POOL_ID` must point at a real OSMO/USD-stable pool with
-  enough TWAP history for `TWAP_WINDOW_SECONDS`; the deploy's pricing
-  probe tells you immediately if the route is broken.
+- Drop `COMMIT_THRESHOLD_LIMIT_NATIVE` in `osmo_testnet.env` to a few
+  hundred OSMO **before deploying** so a threshold cross is cheap (it
+  must stay above the contract's 115-OSMO pre-threshold minimum commit).
+- `PRICING_POOL_ID` must point at a real OSMO/stable pool with at least
+  10 minutes of TWAP history; the deploy's fee-route probe tells you
+  immediately if the route is broken.
 - Pool creation is limited to 1/hour/address on the prod factory
   build. For rapid-fire testing deploy with
   `FACTORY_WASM_FILE=factory-integration.wasm ./deploy_osmosis.sh`

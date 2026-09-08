@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =====================================================================
 # cross_threshold.sh — commit enough OSMO into a commit pool to cross
-#                      its USD threshold (seeds the AMM + mints the
+#                      its threshold (seeds the AMM + mints the
 #                      creator-token supply + starts distribution)
 # =====================================================================
 # usage: scripts/cross_threshold.sh <pool_addr> [native-amount-micro]
@@ -9,15 +9,15 @@
 #   <pool_addr>            Commit pool address (commit_pools.txt col 2).
 #   [native-amount-micro]  Optional. NATIVE_DENOM to commit in one tx,
 #                          base units (6 decimals). When omitted the
-#                          script auto-sizes: it reads the pool's
-#                          remaining USD gap from IsFullyCommited and
-#                          converts it at the live x/twap rate + 2%.
+#                          script auto-sizes: the remaining gap from
+#                          IsFullyCommited IS the amount to attach —
+#                          the threshold is native-denominated.
 #
 # How the crossing works on-chain:
-#   1. The pool values the attached OSMO in USD via the factory's
-#      ConvertNativeToUsd (x/twap over the configured pricing pool).
-#   2. Cumulative USD raised is compared against the pool's pinned
-#      commit_threshold_limit_usd.
+#   1. A commit's value toward the threshold IS its attached OSMO
+#      (no conversion, no oracle).
+#   2. Cumulative OSMO raised is compared against the pool's pinned
+#      commit_threshold_limit_native.
 #   3. The crossing commit triggers the threshold payout — mints the
 #      creator-token supply, seeds the AMM reserves, and queues the
 #      committer distribution ledger. NOBODY is paid in the crossing
@@ -25,7 +25,8 @@
 #      flush the gas-budgeted batches.
 #
 # Constraints honored:
-#   - min pre-threshold commit is $5 (DEFAULT_MIN_COMMIT_USD_PRE_THRESHOLD)
+#   - the crossing commit must meet the pre-threshold minimum
+#     (production: 115 OSMO)
 #   - one commit per wallet per 13s (DEFAULT_SWAP_RATE_LIMIT_SECS)
 # =====================================================================
 set -euo pipefail
@@ -73,26 +74,14 @@ if [ -z "$TARGET" ]; then
     exit 1
 fi
 
-REMAINING_USD=$(( TARGET - RAISED ))
+REMAINING=$(( TARGET - RAISED ))
 echo "pool:            $POOL_ADDR"
-echo "usd raised:      $(awk -v u="$RAISED" 'BEGIN{printf "%.2f", u/1e6}') / $(awk -v u="$TARGET" 'BEGIN{printf "%.2f", u/1e6}') USD"
-
-# ---- Auto-size the commit at the live x/twap rate --------------------
-PROBE="$(query_smart "$FACTORY_ADDR" \
-    '{"pool_factory_query":{"convert_native_to_usd":{"amount":"1000000"}}}')"
-USD_PER_OSMO="$(echo "$PROBE" | jq -r '.amount // empty' 2>/dev/null || true)"
-if [ -z "$USD_PER_OSMO" ] || [ "$USD_PER_OSMO" = "0" ]; then
-    echo "error: pricing probe failed — commits fail closed until the factory's" >&2
-    echo "       x/twap route works. raw: $PROBE" >&2
-    exit 1
-fi
-echo "x/twap rate:     1 OSMO ≈ \$$(awk -v u="$USD_PER_OSMO" 'BEGIN{printf "%.4f", u/1e6}') USD"
+echo "raised:          $(awk -v u="$RAISED" 'BEGIN{printf "%.2f", u/1e6}') / $(awk -v u="$TARGET" 'BEGIN{printf "%.2f", u/1e6}') OSMO"
 
 if [ -z "$AMOUNT" ]; then
-    # remaining_usd / usd_per_uosmo, +2% headroom for TWAP drift between
-    # the probe and the commit landing.
-    AMOUNT="$(awk -v rem="$REMAINING_USD" -v rate="$USD_PER_OSMO" \
-        'BEGIN { printf "%.0f", (rem / rate) * 1000000 * 1.02 + 1 }')"
+    # The threshold is native-denominated: the remaining gap IS the
+    # amount to attach — value toward the threshold = attached OSMO.
+    AMOUNT="$REMAINING"
 fi
 echo "committing:      $AMOUNT $NATIVE_DENOM"
 echo ""

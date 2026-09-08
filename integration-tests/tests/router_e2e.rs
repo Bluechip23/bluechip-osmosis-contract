@@ -85,12 +85,10 @@ fn router_timelock_belief_gate_and_no_wedge_end_to_end() {
         .unwrap()
         .data
         .pool_id;
-    app.increase_time(400);
+    app.increase_time(700);
 
     let wasm = Wasm::new(&app);
     let (factory_code_id, pool_code_id) = store_factory_and_pool(&wasm, &admin);
-    let pyth = instantiate_mock_pyth(&wasm, store_mock_pyth(&wasm, &admin), &admin);
-    refresh_pyth(&app, &wasm, &pyth, &admin, 1_000_000);
     let router_code_id = wasm
         .store_code(&read_wasm("router.wasm"), None, &admin)
         .unwrap()
@@ -105,7 +103,6 @@ fn router_timelock_belief_gate_and_no_wedge_end_to_end() {
             pricing_pool_id,
             pool_code_id,
             Coin::new(GAMM_CREATE_FEE, UOSMO),
-            &pyth,
         ),
         &admin,
     );
@@ -426,5 +423,37 @@ fn router_timelock_belief_gate_and_no_wedge_end_to_end() {
     assert!(
         balance(&bank, &crosser_a.address(), &denom_b) > b_before,
         "post-revert route delivered creatorB tokens"
+    );
+
+    // --- (8) No shared rate-limit slot: a DIFFERENT user routes through
+    // the SAME pool_b immediately (no clock advance) after step (7)'s hop
+    // just touched it. Every router hop arrives with sender = router, so
+    // without the registered-router exemption from the 13s per-address
+    // swap cooldown, all router users would share ONE slot per pool and
+    // this griefable sequence would revert with TooFrequentCommits. ---
+    let b_before = balance(&bank, &crosser_b.address(), &denom_b);
+    wasm.execute(
+        &router_addr,
+        &router::msg::ExecuteMsg::ExecuteMultiHop {
+            operations: vec![SwapOperation {
+                pool_addr: pool_b.clone(),
+                offer_asset_info: TokenType::Native {
+                    denom: UOSMO.to_string(),
+                },
+                ask_asset_info: TokenType::CreatorToken {
+                    denom: denom_b.clone(),
+                },
+            }],
+            minimum_receive: Uint128::new(1),
+            deadline: None,
+            recipient: None,
+        },
+        &[Coin::new(1_000_000_000u128, UOSMO)],
+        &crosser_b,
+    )
+    .expect("second user's route through the same pool inside the 13s window must succeed");
+    assert!(
+        balance(&bank, &crosser_b.address(), &denom_b) > b_before,
+        "back-to-back router users both got filled"
     );
 }

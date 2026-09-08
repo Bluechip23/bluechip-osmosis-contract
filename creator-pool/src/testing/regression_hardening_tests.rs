@@ -29,11 +29,11 @@ use crate::msg::ExecuteMsg;
 use crate::state::{
     DistributionState, COMMITFEEINFO, COMMIT_LEDGER, DISTRIBUTION_STATE, IS_THRESHOLD_HIT,
     PENDING_MINT_REPLIES, POOL_ID, POOL_INFO, REPLY_ID_CREATE_POOL,
-    REPLY_ID_FACTORY_NOTIFY_INITIAL, USD_RAISED_FROM_COMMIT,
+    REPLY_ID_FACTORY_NOTIFY_INITIAL, GROSS_NATIVE_COMMITTED,
 };
 use crate::testing::fixtures::{
     mock_dependencies_with_balance, setup_pool_post_threshold, setup_pool_storage,
-    with_factory_oracle,
+    with_factory_context,
 };
 
 // ===========================================================================
@@ -64,11 +64,11 @@ fn distribution_conserves_supply_across_whale_and_dust_committers() {
         ("whale", 3),
     ];
     // Invariant the crossing guarantees and distribution relies on:
-    // sum(ledger) == total_committed_usd.
+    // sum(ledger) == total_committed_native.
     assert_eq!(
         committers.iter().map(|(_, u)| *u).sum::<u128>(),
         TOTAL_COMMITTED_USD,
-        "test setup: ledger USD must sum to total_committed_usd"
+        "test setup: ledger USD must sum to total_committed_native"
     );
 
     for (name, usd) in committers.iter() {
@@ -86,7 +86,7 @@ fn distribution_conserves_supply_across_whale_and_dust_committers() {
             &DistributionState {
                 is_distributing: true,
                 total_to_distribute: Uint128::new(TOTAL_TO_DISTRIBUTE),
-                total_committed_usd: Uint128::new(TOTAL_COMMITTED_USD),
+                total_committed_native: Uint128::new(TOTAL_COMMITTED_USD),
                 last_processed_key: None,
                 distributions_remaining: committers.len() as u32,
                 estimated_gas_per_distribution: 50,
@@ -164,12 +164,12 @@ fn distribution_conserves_supply_across_whale_and_dust_committers() {
 
 // ===========================================================================
 // F-check: the crossing records only the THRESHOLD PORTION for the crosser,
-//          so sum(COMMIT_LEDGER) == commit_amount_for_threshold_usd.
+//          so sum(COMMIT_LEDGER) == commit_amount_for_threshold_native.
 // ===========================================================================
 //
 // Attack defended: if the crossing recorded the crosser's FULL commit_value
 // (instead of `value_to_threshold`), sum(ledger) would exceed
-// total_committed_usd, and distribution's pro-rata (sum of usd*total/committed)
+// total_committed_native, and distribution's pro-rata (sum of usd*total/committed)
 // could then exceed `total_to_distribute` — an over-mint. Pin the invariant
 // with a PRIOR committer present so the sum is non-trivial.
 #[test]
@@ -180,7 +180,7 @@ fn overshoot_crossing_keeps_ledger_sum_equal_to_threshold() {
     }]);
     setup_pool_storage(&mut deps);
     // rate 1e6 == $1 per native micro-unit (native micros == usd micros).
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
     let env = mock_env();
 
     // Prior pre-threshold committer: $10k of the $25k target.
@@ -247,7 +247,7 @@ fn overshoot_crossing_keeps_ledger_sum_equal_to_threshold() {
 
     assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
     let threshold = Uint128::new(25_000_000_000);
-    assert_eq!(USD_RAISED_FROM_COMMIT.load(&deps.storage).unwrap(), threshold);
+    assert_eq!(GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap(), threshold);
 
     // The crosser's ledger entry is exactly value_to_threshold ($15k), and
     // the WHOLE ledger sums to the threshold — the ceiling distribution can
@@ -286,10 +286,10 @@ fn overshoot_crossing_refunds_exact_post_fee_excess_to_crosser() {
     setup_pool_storage(&mut deps);
     // Start $24,999 raised so a $5 commit crosses the $25k threshold with $4
     // of excess.
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_999_000_000))
         .unwrap();
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
     let env = mock_env();
 
     let commit_amount = Uint128::new(5_000_000); // $5 gross
@@ -377,10 +377,10 @@ fn crossing_dispatches_seed_mints_before_pool_creation_and_notify_last() {
         amount: Uint128::new(100_000_000_000),
     }]);
     setup_pool_storage(&mut deps);
-    USD_RAISED_FROM_COMMIT
+    GROSS_NATIVE_COMMITTED
         .save(&mut deps.storage, &Uint128::new(24_999_000_000))
         .unwrap();
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
+    with_factory_context(&mut deps);
     let env = mock_env();
 
     let commit_amount = Uint128::new(5_000_000);
@@ -566,7 +566,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
     deps.querier
-        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+        .set_factory_context("bluechip_treasury");
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -585,7 +585,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
     deps.querier
-        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+        .set_factory_context("bluechip_treasury");
     let res = execute(
         deps.as_mut(),
         mock_env(),
@@ -607,7 +607,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
     deps.querier
-        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+        .set_factory_context("bluechip_treasury");
     let with_belief = ExecuteMsg::SimpleSwap {
         offer_asset: TokenInfo {
             info: TokenType::Native {
@@ -643,7 +643,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
     deps.querier
-        .set_factory_oracle(Uint128::new(1_000_000), "bluechip_treasury");
+        .set_factory_context("bluechip_treasury");
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -668,6 +668,94 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
 }
 
 // ===========================================================================
+// The registered router is exempt from the per-address swap cooldown.
+// ===========================================================================
+//
+// Attack defended (griefing): every router hop arrives at a pool with
+// `sender = router`, so ALL router users would share ONE 13s rate-limit
+// slot per pool — a dust-cost bot swapping through each popular pool every
+// 13s would lock the router out of them indefinitely, and any multi-hop
+// route touching a pool twice would always fail. The exemption is safe:
+// the per-address cooldown is rotatable by any direct caller with multiple
+// keys, while router hops stay bounded by the 5% spread cap, the breaker,
+// and the router's end-to-end minimum_receive.
+#[test]
+fn registered_router_is_exempt_from_swap_rate_limit() {
+    use crate::mock_querier::mock_deps_estimate;
+
+    let swap_amount = Uint128::new(100_000_000);
+    let offer = || ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: None,
+        max_spread: None,
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let funds = vec![Coin {
+        denom: "ubluechip".to_string(),
+        amount: swap_amount,
+    }];
+
+    let mut deps = mock_deps_estimate(&funds);
+    setup_pool_post_threshold(&mut deps);
+    deps.querier.set_factory_context("bluechip_treasury");
+
+    // Two router-relayed swaps in the SAME block (two different end
+    // users behind the router): both must dispatch.
+    for attempt in 0..2 {
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&Addr::unchecked("registered_router"), &funds),
+            offer(),
+        )
+        .unwrap_or_else(|e| {
+            panic!("router swap #{attempt} within the cooldown must succeed, got {e:?}")
+        });
+    }
+
+    // A DIRECT caller (belief supplied) is still rate-limited: the second
+    // same-block swap trips the 13s cooldown.
+    let with_belief = || ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: Some(cosmwasm_std::Decimal::percent(200)),
+        max_spread: None,
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&Addr::unchecked("direct_caller"), &funds),
+        with_belief(),
+    )
+    .expect("first direct swap succeeds");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&Addr::unchecked("direct_caller"), &funds),
+        with_belief(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::TooFrequentCommits { .. }),
+        "direct callers keep the per-address cooldown, got {err:?}"
+    );
+}
+
+// ===========================================================================
 // Pool-side sanity CEILING on the factory-delegated oracle rate.
 // ===========================================================================
 //
@@ -678,65 +766,3 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
 // above POOL_RATE_MAX ($10,000/native). This test asserts the SAME commit is
 // rejected above the ceiling and accepted at a normal rate — so the rejection
 // is the ceiling, not an unrelated failure.
-#[test]
-fn commit_rejects_oracle_rate_above_pool_ceiling() {
-    let commit_amount = Uint128::new(5_000_000);
-    let msg = || ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: commit_amount,
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-    let info = || {
-        message_info(
-            &Addr::unchecked("committer"),
-            &[Coin {
-                denom: "ubluechip".to_string(),
-                amount: commit_amount,
-            }],
-        )
-    };
-
-    // Above the ceiling ($10,000/native == rate 10_000_000_000; use +1) →
-    // rejected as an invalid oracle price BEFORE any funds are banked.
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(1_000_000_000),
-    }]);
-    setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(10_000 * 1_000_000 + 1));
-    let err = execute(deps.as_mut(), mock_env(), info(), msg()).unwrap_err();
-    assert!(
-        matches!(err, ContractError::InvalidOraclePrice {}),
-        "a rate above the pool ceiling must be rejected; got {err:?}"
-    );
-    assert!(
-        COMMIT_LEDGER
-            .may_load(&deps.storage, &Addr::unchecked("committer"))
-            .unwrap()
-            .is_none(),
-        "no ledger entry may be written when the oracle rate is rejected"
-    );
-
-    // Same commit at a normal $1 rate → accepted (pre-threshold funding),
-    // proving the rejection above is the ceiling and nothing else.
-    let mut deps = mock_dependencies_with_balance(&[Coin {
-        denom: "ubluechip".to_string(),
-        amount: Uint128::new(1_000_000_000),
-    }]);
-    setup_pool_storage(&mut deps);
-    with_factory_oracle(&mut deps, Uint128::new(1_000_000));
-    execute(deps.as_mut(), mock_env(), info(), msg()).expect("a normal-rate commit must succeed");
-    assert!(
-        COMMIT_LEDGER
-            .may_load(&deps.storage, &Addr::unchecked("committer"))
-            .unwrap()
-            .is_some(),
-        "a normal-rate commit must record the committer"
-    );
-}

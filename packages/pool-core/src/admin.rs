@@ -1,11 +1,8 @@
 //! Shared admin handlers: pause/unpause, cancel-emergency-withdraw,
 //! factory config updates, and the two-phase emergency withdraw split.
 //!
-//! Phase-2 note: the internal AMM (reserves + LP positions + fee reserves)
-//! is gone. The per-position emergency-claim escrow it backed
-//! (`ClaimEmergencyShare` / `SweepUnclaimedEmergencyShares` /
-//! `EmergencyDrainSnapshot`) was removed with it. Emergency withdraw is now
-//! a simple two-phase pause+timelock followed by a drain that sweeps the
+//! Emergency withdraw is
+//! a two-phase pause+timelock followed by a drain that sweeps the
 //! pool's held `gamm/pool/{id}` LP shares (and any residual bluechip /
 //! creator-token bank balance) to the bluechip wallet — EXCLUDING the
 //! time-locked creator-excess earmark, which is preserved so the creator
@@ -129,9 +126,9 @@ pub fn execute_emergency_withdraw_initiate(
 // Emergency Withdraw — Phase 2: core drain
 // ---------------------------------------------------------------------------
 
-/// Drains the pool after the Phase-1 timelock elapses.
+/// Drains the pool after the Phase-1 timelock elapses (Phase 2).
 ///
-/// Phase-2 semantics: the pool holds `gamm/pool/{id}` LP shares (its seed
+/// The pool holds `gamm/pool/{id}` LP shares (its seed
 /// liquidity on the native Osmosis pool) plus whatever residual bluechip /
 /// creator-token bank balance remains. This drain sweeps the LP shares AND
 /// the residual bank balances of both pool denoms to the (live-queried)

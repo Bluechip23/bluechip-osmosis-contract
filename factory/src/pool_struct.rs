@@ -24,23 +24,23 @@ pub struct PoolConfigUpdate {
     pub lp_fee: Option<Decimal>,
     pub min_commit_interval: Option<u64>,
     /// Per-pool override for the pre-threshold minimum commit value
-    /// (USD, 6 decimals).
-    /// Bounds: `0 < v <= POOL_CONFIG_MAX_MIN_COMMIT_USD`. Mirrors the
-    /// pool-side `PoolConfigUpdate.min_commit_usd_pre_threshold`.
+    /// (native base units, 6 decimals).
+    /// Bounds: `0 < v <= POOL_CONFIG_MAX_MIN_COMMIT_NATIVE`. Mirrors the
+    /// pool-side `PoolConfigUpdate.min_commit_native_pre_threshold`.
     /// `#[serde(default)]` keeps pre-this-field clients wire-compatible.
     #[serde(default)]
-    pub min_commit_usd_pre_threshold: Option<Uint128>,
+    pub min_commit_native_pre_threshold: Option<Uint128>,
     /// Per-pool override for the post-threshold minimum commit value
-    /// (USD, 6 decimals).
-    /// Same shape and bounds as `min_commit_usd_pre_threshold` above.
+    /// (native base units, 6 decimals).
+    /// Same shape and bounds as `min_commit_native_pre_threshold` above.
     #[serde(default)]
-    pub min_commit_usd_post_threshold: Option<Uint128>,
+    pub min_commit_native_post_threshold: Option<Uint128>,
     // There is deliberately no per-pool price-source override (mirrors
     // `pool_core::msg::PoolConfigUpdate`). Such a knob would be an
     // admin-compromise vector — a malicious source could return
-    // arbitrary USD valuations, letting a tiny commit register as a full
-    // threshold cross. USD pricing is factory-global by design
-    // (`factory::usd_price`).
+    // arbitrary valuations, letting a tiny commit register as a full
+    // threshold cross. The threshold denomination is factory-global by
+    // design.
 }
 
 /// Inclusive upper bound on `min_commit_interval` (seconds). Mirrors the pool
@@ -48,12 +48,14 @@ pub struct PoolConfigUpdate {
 /// per-address commit cooldown), matching pool-side acceptance.
 pub const POOL_CONFIG_MIN_COMMIT_INTERVAL_MAX_SECONDS: u64 = 86_400;
 
-/// Inclusive upper bound on either commit-floor knob ($1000, 6 decimals).
-/// Mirrors the pool side's `MAX_MIN_COMMIT_USD` in
-/// `creator-pool::state`. Both ends bounds-check; the propose-time
-/// gate exists so an out-of-range value fails fast rather than after
-/// 48h timelock.
-pub const POOL_CONFIG_MAX_MIN_COMMIT_USD: Uint128 = Uint128::new(1_000_000_000);
+/// Inclusive upper bound on either commit-floor knob (25,000 OSMO, 6
+/// decimals — 5% of the 500k-OSMO threshold). Mirrors the pool side's
+/// `MAX_MIN_COMMIT_NATIVE` in `creator-pool::state`; keep the two in
+/// lockstep or floors in the gap become unreachable (factory propose gate
+/// rejects what the pool apply gate would accept). Both ends bounds-check;
+/// the propose-time gate exists so an out-of-range value fails fast rather
+/// than after the 48h timelock.
+pub const POOL_CONFIG_MAX_MIN_COMMIT_NATIVE: Uint128 = Uint128::new(25_000_000_000);
 
 impl PoolConfigUpdate {
     /// Validate the update at propose time so a misconfigured value fails
@@ -89,12 +91,12 @@ impl PoolConfigUpdate {
         }
         for (name, maybe) in [
             (
-                "min_commit_usd_pre_threshold",
-                self.min_commit_usd_pre_threshold,
+                "min_commit_native_pre_threshold",
+                self.min_commit_native_pre_threshold,
             ),
             (
-                "min_commit_usd_post_threshold",
-                self.min_commit_usd_post_threshold,
+                "min_commit_native_post_threshold",
+                self.min_commit_native_post_threshold,
             ),
         ] {
             if let Some(v) = maybe {
@@ -104,10 +106,10 @@ impl PoolConfigUpdate {
                         name
                     )));
                 }
-                if v > POOL_CONFIG_MAX_MIN_COMMIT_USD {
+                if v > POOL_CONFIG_MAX_MIN_COMMIT_NATIVE {
                     return Err(StdError::generic_err(format!(
                         "{} {} exceeds maximum {}; pool will reject at apply time",
-                        name, v, POOL_CONFIG_MAX_MIN_COMMIT_USD
+                        name, v, POOL_CONFIG_MAX_MIN_COMMIT_NATIVE
                     )));
                 }
             }

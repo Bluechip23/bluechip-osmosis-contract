@@ -1,12 +1,12 @@
 // Human-readable explanations for the contract's fail-closed rejections.
 //
-// Commits are valued in USD against the pool's threshold using the Pyth
-// OSMO/USD price, which the factory reads on-chain behind staleness,
-// minimum-age and confidence gates. When a gate rejects the price the whole
-// commit reverts rather than pricing the deposit wrong — the user's funds are
-// never at risk, but the raw contract error ("Pyth price is stale: age 400s
-// exceeds max 300s") reads like a failure on their end. Map the known cases to
-// plain language plus what to do next.
+// The commit threshold is OSMO-denominated — a commit's value toward the
+// threshold is simply the attached OSMO, with no oracle anywhere. The only
+// price read is a fail-closed on-chain TWAP that budgets the ~20 USDC
+// pool-creation fee swap at threshold crossing; when it rejects, the whole
+// commit reverts rather than mis-budgeting — the user's funds are never at
+// risk, but the raw contract error reads like a failure on their end. Map
+// the known cases to plain language plus what to do next.
 
 export interface ExplainedError {
     /** Short sentence shown to the user. */
@@ -17,45 +17,31 @@ export interface ExplainedError {
 
 const RULES: Array<{ match: RegExp; message: string; transient: boolean }> = [
     {
-        // Staleness gate: the price keeper has lapsed or the feed stopped updating.
-        match: /price is stale|stale:? age|exceeds max \d+s/i,
+        // Fee-route TWAP failed or the price tripped the sanity ceiling:
+        // the crossing can't budget the pool-creation fee swap right now.
+        match: /fee-swap TWAP|plausibility ceiling|TWAP price is zero|failed live TWAP probe/i,
         message:
-            'Pricing is temporarily unavailable — the on-chain OSMO/USD price is stale, ' +
-            'so the pool refuses to value your commit rather than risk mispricing it. ' +
-            'Your funds were not moved. Please try again in a few minutes.',
+            'The fee-pricing route is temporarily unavailable, so the pool refuses to ' +
+            'proceed rather than mis-budget its network fee. Your funds were not moved. ' +
+            'Please try again in a few minutes.',
         transient: true,
     },
     {
-        // Minimum-age gate: price was just pushed; needs to age before it can be used.
-        match: /too fresh/i,
+        // Crossing reserve not yet funded for the fee swap.
+        match: /creation-fee reserve is empty/i,
         message:
-            'The price feed was just updated and needs a moment to settle before it can ' +
-            'be used. Your funds were not moved. Please try again in about 15 seconds.',
+            'The pool cannot fund its network fee for the crossing yet. Your funds were ' +
+            'not moved. A larger commit funds it automatically — or try again after more ' +
+            'commits come in.',
         transient: true,
     },
     {
-        // Confidence gate: market too dispersed to trust right now.
-        match: /confidence interval too wide/i,
+        // Chain fee denom unroutable: operator/governance attention needed.
+        match: /neither the native denom|without a fee-swap budget/i,
         message:
-            'Pricing is paused because the market price is currently too volatile to quote ' +
-            'confidently. Your funds were not moved. Please try again shortly.',
-        transient: true,
-    },
-    {
-        // Plausibility band / sanity ceiling: misconfiguration, not user-fixable.
-        match: /plausibility (ceiling|floor)|InvalidOraclePrice/i,
-        message:
-            'Pricing failed a safety check and the commit was rejected. Your funds were ' +
-            'not moved. This needs operator attention — please report it.',
+            'The network\'s pool-creation fee is temporarily unpayable by this pool. Your ' +
+            'funds were not moved. This needs operator attention — please report it.',
         transient: false,
-    },
-    {
-        // Oracle unreachable / not configured.
-        match: /Pyth pricing is not configured|live Pyth probe|missing price data|no feed id/i,
-        message:
-            'The price oracle is unreachable, so the pool cannot value your commit. Your ' +
-            'funds were not moved. Please try again later or report this if it persists.',
-        transient: true,
     },
     {
         // Minimum commit size.

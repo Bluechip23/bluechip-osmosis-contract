@@ -51,3 +51,13 @@ injective/
 
 # Vite dev build cache (generated)
 frontend/.vite/
+
+# Internal working documents (forum drafts, audit material, ops runbooks,
+# stale proposal JSONs) — not part of the public repository
+/internal/
+
+# Local assistant settings
+/.claude/
+
+# Timestamped state-file backups
+/commit_pools.txt.*

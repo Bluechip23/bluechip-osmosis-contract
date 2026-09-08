@@ -19,10 +19,11 @@ chain-native:
 - **Swaps route through `x/poolmanager`** (`MsgSwapExactAmountIn`)
   with a slippage floor derived from the on-chain estimate and the
   caller's `belief_price`.
-- The commit threshold is **USD-denominated**: commits are made in
-  OSMO and valued via Osmosis's chain-native `x/twap` module over the
-  configured OSMO/USDC pool (`pricing_pool_id`) — no keepers, no Pyth,
-  no bespoke oracle.
+- The commit threshold is **OSMO-denominated**: a commit's value
+  toward the threshold is simply its attached OSMO. There is no price
+  oracle anywhere in the protocol — the only price read is a chain-native
+  `x/twap` query over `pricing_pool_id`, used solely to budget the
+  ~20 USDC GAMM pool-creation fee swap at threshold crossing.
 
 One compiled artifact set works on both testnet and mainnet — only the
 instantiate config differs.
@@ -88,15 +89,15 @@ scripts/run_lifecycle_test.sh
 ```
 
 The lifecycle script exercises the whole surface automatically:
-create a commit pool, small commit (USD accounting), cross the
+create a commit pool, small commit (raise accounting), cross the
 threshold, verify the native GAMM pool seeded, drain the distribution
 (TokenFactory payout), swap both directions, join + exit the native
 pool, and route through the router (see `scripts/README.md`). Drop
-`COMMIT_THRESHOLD_LIMIT_USD` to a few hundred dollars (or less) in
-`osmo_testnet.env` so a crossing is cheap to trigger. The testnet
-`PRICING_POOL_ID` must point at a real OSMO/USD-stable pool with
-enough TWAP history to cover the window. Reference run 2026-07-18:
-11/11 pass against factory code 13256 / pool 314 pricing.
+`COMMIT_THRESHOLD_LIMIT_NATIVE` to a few hundred OSMO in
+`osmo_testnet.env` so a crossing is cheap to trigger (it must stay
+above the 115-OSMO pre-threshold minimum commit). The testnet
+`PRICING_POOL_ID` must point at a real OSMO/stable pool with at
+least 10 minutes of TWAP history.
 
 ### 4. Governance proposal (draft)
 
@@ -131,12 +132,11 @@ address-permission route:
 > tokenfactory/gamm/poolmanager/twap modules; security review docs
 > in-repo.
 >
-> **What this protocol does NOT do:** no external price feeds or
-> keeper-updated oracles (USD valuation uses the chain's own x/twap
-> module over the main OSMO/USDC pool), no bridged assets, no
-> privileged mint of OSMO — pools only hold OSMO + TokenFactory
-> denoms they administer, and every admin mutation is behind a 48h
-> timelock.
+> **What this protocol does NOT do:** no external price feeds, no
+> keeper-updated oracles, no USD conversion anywhere (the threshold is
+> OSMO-denominated), no bridged assets, no privileged mint of OSMO —
+> pools only hold OSMO + TokenFactory denoms they administer, and every
+> admin mutation is behind a 48h timelock.
 
 For the per-contract route instead, generate the combined gov v1
 proposal (one vote stores the three wasms, gzip-compressed, hashes and
@@ -186,9 +186,8 @@ not upload fresh copies).
 
 | Knob | Meaning | Testnet suggestion | Mainnet decision |
 |---|---|---|---|
-| `COMMIT_THRESHOLD_LIMIT_USD` | USD (6-dec) a pool must raise to open | $20–$200 | $25,000 = `25000000000` |
-| `PRICING_POOL_ID` / `USD_QUOTE_DENOM` | x/twap pricing pool for OSMO→USD | pool 314 (uosmo/USDC-ibc) | the deepest OSMO/USDC pool on osmosis-1 (verify id + denom) |
-| `TWAP_WINDOW_SECONDS` | TWAP lookback (manipulation-cost window) | 600 | 600 |
+| `COMMIT_THRESHOLD_LIMIT_NATIVE` | OSMO (6-dec base units) a pool must raise to open | 250 OSMO = `250000000` | 500,000 OSMO = `500000000000` |
+| `PRICING_POOL_ID` / `FEE_QUOTE_DENOM` | fee-route pool: budgets the cross-denom gamm creation-fee swap at crossing (600s TWAP; not a price source for commits) | pool 314 (uosmo/USDC-ibc) | the deepest OSMO/allUSDC pool on osmosis-1 (verify id + denom) |
 | `POOL_CREATION_FEE` | flat uosmo anti-spam fee on Create | 1 OSMO | 1–10 OSMO |
 | `GAMM_POOL_CREATION_FEE` (+`_DENOM`) | the fee COIN x/gamm charges at crossing, funded from the 1% commit-fee retention (never the creator); the pool settles against the LIVE fee and, when the denom is the USD quote (osmosis-1: **20 Noble USDC**), swaps its native retention into the fee coin via the pricing pool | 1 OSMO (`uosmo`) | match `osmosisd q poolmanager params` — 20 USDC as of 2026-07 |
 | `COMMIT_FEE_BLUECHIP` / `COMMIT_FEE_CREATOR` | per-commit fee split | 1% / 5% | your call |

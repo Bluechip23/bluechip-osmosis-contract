@@ -5,8 +5,8 @@
 //! - `ExecuteMsg::ExecuteMultiHop` for all routes (the user attaches the
 //! first-hop offer as funds). Both the bluechip side and the creator
 //! TokenFactory denom are native bank coins, so there is a single
-//! native entry point — the old CW20 `Receive` path was removed with
-//! the creator-token migration.
+//! native entry point; the CW20 `Receive` variant exists only for wire
+//! compatibility and rejects every call.
 //! - `ExecuteMsg::UpdateConfig` for admin rotation
 //! - Two internal variants (`ExecuteSwapOperation`, `AssertReceived`)
 //! that the router invokes on itself; both reject any caller other

@@ -105,7 +105,7 @@ export interface DistributionStateResponse {
     is_stalled: boolean;
     consecutive_failures: number;
     total_to_distribute: string;
-    total_committed_usd: string;
+    total_committed_native: string;
     distributed_so_far: string;
 }
 
