@@ -69,6 +69,9 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
                     return parseInt(a.last_committed) - parseInt(b.last_committed);
                 });
 
+                // total_paid_usd / total_paid_bluechip are micro-units
+                // (6 decimals) — convert to whole dollars / OSMO once here
+                // so every figure below shares the threshold's unit.
                 let cumulative = 0;
                 let bluechipTotal = 0;
                 const data = sortedCommits.map((commit) => {
@@ -97,7 +100,9 @@ const CommitTracker: React.FC<CommitTrackerProps> = ({ client, address, contract
         }
     };
 
-    const displayTotal = totalRaised > 1000000 ? totalRaised / 1000000 : totalRaised;
+    // totalRaised is already in whole dollars (converted at fetch time),
+    // matching the threshold's unit.
+    const displayTotal = totalRaised;
     const progress = Math.min((displayTotal / threshold) * 100, 100);
 
     return (

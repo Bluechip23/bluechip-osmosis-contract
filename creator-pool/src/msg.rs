@@ -170,10 +170,13 @@ pub enum QueryMsg {
     // elapsed since the last batch advanced).
     #[returns(Option<DistributionStateResponse>)]
     DistributionState {},
-    // Creator-earnings rollup for dashboards: the claimable clip-slice
-    // fee pot (emptied by `ExecuteMsg::ClaimCreatorFees`), the locked
+    // Creator-earnings rollup for dashboards: the locked
     // excess-liquidity claim if one exists (with a `claimable_now` flag
-    // computed against block time), and threshold-crossing context.
+    // computed against block time, emptied by
+    // `ExecuteMsg::ClaimCreatorExcessLiquidity`) and threshold-crossing
+    // context. (The old per-commit fee pot and `ClaimCreatorFees` no
+    // longer exist — creator fees are transferred directly at commit
+    // time.)
     // Everything here is already public state — this just saves
     // explorers a raw-storage crawl and gives the creator wallet one
     // call to render an earnings panel.

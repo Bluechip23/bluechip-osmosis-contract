@@ -366,7 +366,15 @@ async function handleSubscribe() {
             window.bluechipAddress,
             BLUECHIP_CONFIG.poolAddress,
             msg,
-            { amount: [], gas: "600000" },
+            // Osmosis enforces a non-zero base fee — never send an empty fee
+            // amount (0.025uosmo per gas is the registry average). A
+            // pre-threshold commit can be the one that crosses the
+            // threshold, which creates the native pool in the same tx —
+            // budget gas for it.
+            {
+                amount: [{ denom: "uosmo", amount: isThresholdCrossed ? "20000" : "75000" }],
+                gas: isThresholdCrossed ? "800000" : "3000000"
+            },
             "Commit",
             funds
         );
@@ -500,7 +508,7 @@ async function handleBuy() {
             window.bluechipAddress,
             BLUECHIP_CONFIG.poolAddress,
             msg,
-            { amount: [], gas: "500000" },
+            { amount: [{ denom: "uosmo", amount: "12500" }], gas: "500000" },
             "Buy Token",
             funds
         );
@@ -645,7 +653,7 @@ async function handleSell() {
             window.bluechipAddress,
             BLUECHIP_CONFIG.poolAddress,   // the pool contract, NOT a token contract
             msg,
-            { amount: [], gas: "500000" },
+            { amount: [{ denom: "uosmo", amount: "12500" }], gas: "500000" },
             "Sell Token",
             funds
         );
@@ -727,7 +735,7 @@ async function crossTokenSwap(fromDenom, fromPool, toDenom, toPool, amountMicro,
                 recipient:       null
             }
         },
-        { amount: [], gas: "900000" },
+        { amount: [{ denom: "uosmo", amount: "22500" }], gas: "900000" },
         "Cross-Token Swap",
         [{ denom: fromDenom, amount: amountMicro }]
     );
@@ -917,7 +925,7 @@ async function handleCreatePool() {
             window.bluechipAddress,
             BLUECHIP_CONFIG.factoryAddress,
             msg,
-            { amount: [], gas: "2000000" },
+            { amount: [{ denom: "uosmo", amount: "75000" }], gas: "3000000" },
             memo,
             funds
         );

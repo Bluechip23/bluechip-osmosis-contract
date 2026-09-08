@@ -3,6 +3,7 @@ import { Card, CardContent, Typography, TextField, Button, Box, Alert, IconButto
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { SigningCosmWasmClient } from '@cosmjs/cosmwasm-stargate';
 import { DEFAULT_CHAIN_CONFIG } from '../types/FrontendTypes';
+import { stdFee } from '../lib/fees';
 
 // Factory contract address - configured during deployment.
 const FACTORY_ADDRESS = DEFAULT_CHAIN_CONFIG.factoryAddress;
@@ -89,7 +90,7 @@ const CreatePool = ({ client, address }: CreatePoolProps) => {
                 address,
                 FACTORY_ADDRESS,
                 createMsg,
-                { amount: [], gas },
+                stdFee(gas),
                 'Create',
                 funds,
             );

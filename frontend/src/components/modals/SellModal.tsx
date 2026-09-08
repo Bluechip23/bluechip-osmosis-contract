@@ -16,6 +16,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CloseIcon from '@mui/icons-material/Close';
 import { TokenModalProps, hasBalance, toMicroUnits, formatTokenAmount } from '../../types/FrontendTypes';
 import { explainContractError } from '../../lib/contractErrors';
+import { stdFee } from '../../lib/fees';
 
 const SellModal: React.FC<TokenModalProps> = ({
     open,
@@ -100,7 +101,7 @@ const SellModal: React.FC<TokenModalProps> = ({
                 address,
                 token.poolAddress,
                 msg,
-                { amount: [], gas: '500000' },
+                stdFee(500000),
                 'Sell Token',
                 [{ denom: token.tokenDenom, amount: amountInMicroUnits }]
             );

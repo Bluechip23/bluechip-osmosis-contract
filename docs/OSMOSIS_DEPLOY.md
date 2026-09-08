@@ -70,8 +70,9 @@ sha256sum artifacts/*.wasm   # hashes go in the gov proposal
 ### 2. Local end-to-end gate (osmosis-test-tube)
 
 Before spending anything on-chain, run the integration harness — it
-executes the real `tokenfactory` / `gamm` / `poolmanager` / `twap`
-modules in-process and covers create → cross (native pool seed) →
+executes the real `tokenfactory` / `gamm` / `poolmanager` modules
+in-process (with a mock Pyth contract supplying the USD price feed)
+and covers create → cross (native pool seed) →
 distribute → swap → third-party `MsgJoinPool`/`MsgExitPool`:
 
 ```bash
@@ -111,8 +112,8 @@ address-permission route:
 > Osmosis-native modules. Creators launch a token as a TokenFactory
 > denom paired against OSMO in a two-phase pool. Supporters commit
 > OSMO; when a pool's cumulative committed value crosses its USD
-> threshold (valued via the chain's x/twap over the main OSMO/USDC
-> pool) it mints the fixed 1.2M-token supply, seeds a native GAMM
+> threshold (valued via the Pyth OSMO/USD feed, read fail-closed with
+> staleness and confidence gates) it mints the fixed 1.2M-token supply, seeds a native GAMM
 > balancer pool, and distributes tokens to committers pro-rata.
 > Post-threshold, the pool is a standard Osmosis GAMM market: swaps
 > route through x/poolmanager and liquidity is added/removed with
@@ -129,8 +130,8 @@ address-permission route:
 > cosmwasm/optimizer 0.16.0; artifact sha256 hashes: <hashes>.
 > Test suite: full unit/integration coverage plus an
 > osmosis-test-tube end-to-end harness that exercises the real
-> tokenfactory/gamm/poolmanager/twap modules; security review docs
-> in-repo.
+> tokenfactory/gamm/poolmanager modules (with a mock Pyth contract
+> for the USD price feed); security review docs in-repo.
 >
 > **What this protocol does NOT do:** no external price feeds, no
 > keeper-updated oracles, no USD conversion anywhere (the threshold is
