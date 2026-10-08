@@ -377,15 +377,25 @@ pinned by a property test in
 
 ## Threshold overshoot (the crossing commit is capped)
 
-The crossing commit only counts what's needed to reach the target; the entire
-post-fee **excess is refunded** to the committer in the same tx — you cannot
-over-raise the recorded total:
+The crossing commit only counts what's needed to reach the target. The 1% + 5%
+commit fees are charged on that **threshold portion only**; the gross
+**excess is refunded** fee-free to the committer in the same tx — you cannot
+over-raise the recorded total, and overshooting costs nothing extra. The one
+bounded exception: if the gamm creation-fee reserve is still short at
+crossing, up to 1% of the excess is retained toward it (never more than the
+remaining room), which keeps the "retry with a larger commit" rescue for an
+under-funded reserve cheap.
 
 ```rust
+// creator-pool/src/commit.rs (dispatcher): fees on the gap only
+let fee_base = if crossing_with_excess { value_to_threshold } else { amount };
+let gross_excess = amount.checked_sub(fee_base)?;
+// ... up to commit_fee_bluechip × gross_excess may be retained toward the reserve
+let excess_refund = gross_excess.checked_sub(excess_retained)?;
+
 // creator-pool/src/commit/threshold_crossing.rs
-let effective_bluechip_excess = amount_after_fees.checked_sub(threshold_portion_after_fees)?;
-if !effective_bluechip_excess.is_zero() {
-    messages.push(get_bank_transfer_to_msg(&sender, &bluechip_denom, effective_bluechip_excess)?);
+if !excess_refund.is_zero() {
+    messages.push(get_bank_transfer_to_msg(&sender, &bluechip_denom, excess_refund)?);
 }
 ```
 

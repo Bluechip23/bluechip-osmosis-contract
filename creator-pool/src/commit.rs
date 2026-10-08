@@ -287,13 +287,53 @@ fn execute_commit_logic(
                 return Err(ContractError::MismatchAmount {});
             }
 
+            // Pre-threshold bookkeeping is resolved BEFORE the fee split so
+            // the fee base can be sized correctly: on a commit that carries
+            // the pool over its threshold with room to spare, only the
+            // portion that fills the gap is a real contribution. The excess
+            // is refunded in the same transaction, so it must not bear the
+            // 1% + 5% commit fees — charging them would make a 10,000 OSMO
+            // commit against a 100 OSMO gap cost 600 OSMO in fees for a 100
+            // OSMO contribution. `pre` is `None` post-threshold.
+            let pre: Option<(Uint128, Uint128, Uint128)> = if !threshold_already_hit {
+                let current_raised = GROSS_NATIVE_COMMITTED.load(deps.storage)?;
+                let new_total = current_raised.checked_add(commit_value)?;
+                let value_to_threshold = commit_config
+                    .commit_amount_for_threshold_native
+                    .checked_sub(current_raised)
+                    .unwrap_or(Uint128::zero());
+                Some((current_raised, new_total, value_to_threshold))
+            } else {
+                None
+            };
+            let crossing_with_excess = matches!(
+                pre,
+                Some((_, new_total, value_to_threshold))
+                    if new_total >= commit_config.commit_amount_for_threshold_native
+                        && commit_value > value_to_threshold
+                        && !value_to_threshold.is_zero()
+            );
+            // Fee-bearing portion of the commit: the threshold gap on a
+            // crossing-with-excess commit, the whole amount otherwise.
+            let fee_base = if crossing_with_excess {
+                pre.map(|(_, _, v)| v).unwrap_or(amount)
+            } else {
+                amount
+            };
+            // Gross (pre-fee) excess over the threshold gap; zero on every
+            // non-crossing path and on an exact hit.
+            let gross_excess = amount.checked_sub(fee_base)?;
+
             let (commit_fee_bluechip_amt, commit_fee_creator_amt) =
-                calculate_commit_fees(amount, &fee_info)?;
+                calculate_commit_fees(fee_base, &fee_info)?;
             let total_fees = commit_fee_bluechip_amt.checked_add(commit_fee_creator_amt)?;
-            if total_fees >= amount {
+            if total_fees >= fee_base {
                 return Err(ContractError::InvalidFee {});
             }
-            let amount_after_fees = amount.checked_sub(total_fees)?;
+            // Net contribution entering the pool's bank balance: on a
+            // crossing-with-excess commit this is the net THRESHOLD PORTION
+            // (the excess is refunded, see below); elsewhere the net commit.
+            let amount_after_fees = fee_base.checked_sub(total_fees)?;
             if amount_after_fees.is_zero() {
                 return Err(ContractError::InvalidFee {});
             }
@@ -334,6 +374,40 @@ fn execute_commit_logic(
                 )?
             };
 
+            // Creation-fee reserve top-up from the crossing EXCESS. The
+            // excess bears no commit fee (it is refunded), with one bounded
+            // exception: if the gamm creation-fee reserve is still short at
+            // crossing time, up to `commit_fee_bluechip` (1%) of the gross
+            // excess is retained toward it — never more than the remaining
+            // room, and never bank-sent to the wallet. This keeps the
+            // "retry with a larger commit" rescue for an under-funded
+            // reserve alive (the crosser's retention lands before the fee
+            // swap runs), while capping what the crosser gives up on the
+            // excess at 1% in the worst case and zero in the normal case
+            // where earlier commits already filled the reserve. Whatever
+            // the reserve does not take is refunded with the rest of the
+            // excess. `gross_excess` is non-zero only on the
+            // crossing-with-excess path, which is always pre-threshold.
+            let excess_retained = if gross_excess.is_zero() {
+                Uint128::zero()
+            } else {
+                let (excess_retention_cap, _) = calculate_commit_fees(gross_excess, &fee_info)?;
+                if excess_retention_cap.is_zero() {
+                    Uint128::zero()
+                } else {
+                    let not_needed = reserve_bluechip_fee(
+                        deps.storage,
+                        excess_retention_cap,
+                        gamm_fee_cfg.as_ref(),
+                        &bluechip_denom,
+                        &fee_quote_denom,
+                        fee_swap_budget,
+                    )?;
+                    excess_retention_cap.checked_sub(not_needed)?
+                }
+            };
+            let excess_refund = gross_excess.checked_sub(excess_retained)?;
+
             let messages = build_fee_messages(
                 &fee_info,
                 &live_bluechip_wallet,
@@ -353,10 +427,7 @@ fn execute_commit_logic(
 
             // `threshold_already_hit` was loaded above alongside the
             // minimum-commit check — reuse it here instead of re-reading.
-            let response = if !threshold_already_hit {
-                let current_raised = GROSS_NATIVE_COMMITTED.load(deps.storage)?;
-                let new_total = current_raised.checked_add(commit_value)?;
-
+            let response = if let Some((_current_raised, new_total, value_to_threshold)) = pre {
                 if new_total >= commit_config.commit_amount_for_threshold_native {
                     LAST_THRESHOLD_ATTEMPT.save(deps.storage, &env.block.time)?;
 
@@ -396,21 +467,18 @@ fn execute_commit_logic(
                     // reads they don't use.
                     let threshold_payout = THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
 
-                    let value_to_threshold = commit_config
-                        .commit_amount_for_threshold_native
-                        .checked_sub(current_raised)
-                        .unwrap_or(Uint128::zero());
-
-                    if commit_value > value_to_threshold && value_to_threshold > Uint128::zero() {
-                        // Split commit: part goes to threshold, excess becomes swap
+                    if crossing_with_excess {
+                        // Split commit: the threshold portion (net of fees)
+                        // is contributed; the gross excess is refunded,
+                        // less any creation-fee reserve retention.
                         process_threshold_crossing_with_excess(
                             deps,
                             env,
                             sender,
                             &asset,
-                            amount,
                             amount_after_fees,
-                            commit_value,
+                            excess_refund,
+                            excess_retained,
                             value_to_threshold,
                             fee_swap_budget,
                             &pool_specs,

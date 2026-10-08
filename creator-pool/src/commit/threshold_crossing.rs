@@ -2,14 +2,19 @@
 //! the pool over its `commit_amount_for_threshold_native` target.
 //!
 //! Responsibilities (in order):
-//! 1. Split the incoming commit into a threshold portion (up to the
-//!    remaining target) and an excess portion.
+//! 1. The dispatcher (`super::execute_commit_logic`) has already split the
+//!    incoming commit into a threshold portion (exactly the remaining gap)
+//!    and a gross excess, and charged the 1% + 5% commit fees on the
+//!    THRESHOLD PORTION ONLY. The excess bears no commit fee; the one
+//!    bounded exception is a creation-fee reserve top-up of at most the
+//!    bluechip-fee rate of the excess, taken only while the reserve is
+//!    still short (see `reserve_bluechip_fee`).
 //! 2. Credit the threshold portion to `COMMIT_LEDGER` +
 //!    `GROSS_NATIVE_COMMITTED` / `NATIVE_RAISED_FROM_COMMIT`, then run the
 //!    payout: mint the splits, schedule the distribution airdrop, and emit
 //!    the `MsgCreateBalancerPool` SubMsg that seeds the NATIVE pool.
-//! 3. REFUND the entire post-fee bluechip excess to the crosser via
-//!    `BankMsg::Send` — there is no inline swap (the native pool
+//! 3. REFUND the gross excess (less any reserve retention) to the crosser
+//!    via `BankMsg::Send` — there is no inline swap (the native pool
 //!    doesn't exist yet within this tx; third-party trading happens on the
 //!    native pool once seeded).
 //! 4. Update commit analytics and clear `THRESHOLD_PROCESSING`.
@@ -35,9 +40,17 @@ pub(crate) fn process_threshold_crossing_with_excess(
     env: Env,
     sender: Addr,
     asset: &TokenInfo,
-    amount: Uint128,
-    amount_after_fees: Uint128,
-    _commit_value: Uint128,
+    // Net-of-fees THRESHOLD PORTION (the dispatcher charged the commit fees
+    // on the gap only). This is exactly what enters the pool's bank balance
+    // from this commit.
+    threshold_portion_after_fees: Uint128,
+    // Gross excess over the gap that goes back to the crosser.
+    excess_refund: Uint128,
+    // Part of the gross excess retained toward the gamm creation-fee
+    // reserve (zero whenever the reserve was already full). For attributes
+    // only — the dispatcher has already recorded it in
+    // `BLUECHIP_FEE_RESERVED`.
+    excess_retained: Uint128,
     value_to_threshold: Uint128,
     fee_swap_budget: Option<Uint128>,
     pool_specs: &PoolSpecs,
@@ -63,18 +76,15 @@ pub(crate) fn process_threshold_crossing_with_excess(
 
     // The threshold gap is native-denominated — same units as the commit
     // itself — so the split needs no conversion: the portion of this commit
-    // that fills the gap IS the gap.
+    // that fills the gap IS the gap. Sanity: gap + refund + retention must
+    // reconstruct the gross commit exactly.
     let bluechip_to_threshold = value_to_threshold;
-    let _bluechip_excess = asset.amount.checked_sub(bluechip_to_threshold)?;
-
-    let threshold_portion_after_fees = if amount.is_zero() {
-        Uint128::zero()
-    } else {
-        amount_after_fees.multiply_ratio(bluechip_to_threshold, amount)
-    };
-    // The entire post-fee excess is refunded to the crosser (no inline
-    // swap). Third-party trades happen on the native pool after seeding.
-    let effective_bluechip_excess = amount_after_fees.checked_sub(threshold_portion_after_fees)?;
+    let reconstructed = bluechip_to_threshold
+        .checked_add(excess_refund)?
+        .checked_add(excess_retained)?;
+    if reconstructed != asset.amount {
+        return Err(ContractError::ThresholdPayoutCorruption);
+    }
 
     // Update commit ledger with only the threshold portion, bumping the
     // O(1) distinct-committer counter if the crosser is new. The
@@ -108,21 +118,19 @@ pub(crate) fn process_threshold_crossing_with_excess(
     )?;
     messages.extend(payout_msgs.other_msgs);
 
-    // Refund the entire post-fee excess to the crosser.
-    let mut refunded_excess = Uint128::zero();
-    if !effective_bluechip_excess.is_zero() {
+    // Refund the gross excess (less any reserve retention) to the crosser.
+    if !excess_refund.is_zero() {
         let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
         messages.push(get_bank_transfer_to_msg(
             &sender,
             &bluechip_denom,
-            effective_bluechip_excess,
+            excess_refund,
         )?);
-        refunded_excess = effective_bluechip_excess;
     }
 
     // Commit-info records the threshold portion only (the excess was
-    // refunded). Fees on the whole commit were already transferred out by
-    // the dispatcher's `build_fee_messages`.
+    // refunded). Fees on the threshold portion were already transferred
+    // out by the dispatcher's `build_fee_messages`.
     update_commit_info(
         deps.storage,
         &sender,
@@ -161,7 +169,11 @@ pub(crate) fn process_threshold_crossing_with_excess(
             "threshold_amount_bluechip",
             bluechip_to_threshold.to_string(),
         )
-        .add_attribute("bluechip_excess_refunded", refunded_excess.to_string()))
+        .add_attribute("bluechip_excess_refunded", excess_refund.to_string())
+        .add_attribute(
+            "bluechip_excess_retained_for_creation_fee",
+            excess_retained.to_string(),
+        ))
 }
 
 /// Threshold-hit-exact handler — commit hits the target precisely (no
