@@ -1737,16 +1737,12 @@ mod native_raised_net_semantics_tests {
             .expect("phase attr must exist");
         assert_eq!(phase.value, "threshold_crossing");
 
-        // Compute expected NET threshold portion. The handler computes:
-        // amount_after_fees = amount - total_fees
-        // = 10_000_000 - (1% + 5%) * 10_000_000
-        // = 10_000_000 - 600_000 = 9_400_000.
-        // bluechip_to_threshold = usd_to_bluechip_at_rate(usd_to_threshold=$5,
-        // rate=1_000_000)
-        // = $5 * 1e6 / 1_000_000 = 5_000_000 ubluechip.
-        // threshold_portion_after_fees =
-        // amount_after_fees * bluechip_to_threshold / amount
-        // = 9_400_000 * 5_000_000 / 10_000_000 = 4_700_000.
+        // Compute expected NET threshold portion. The dispatcher charges
+        // the commit fees on the threshold portion only:
+        // bluechip_to_threshold = 5_000_000 (the $5 gap).
+        // threshold_portion_after_fees = 5_000_000 - (1% + 5%) * 5_000_000
+        // = 5_000_000 - 300_000 = 4_700_000.
+        // The gross excess (5_000_000) is refunded fee-free.
         // NATIVE_RAISED = 24_995_000_000 + 4_700_000 = 24_999_700_000.
         let total = NATIVE_RAISED_FROM_COMMIT.load(&deps.storage).unwrap();
         assert_eq!(

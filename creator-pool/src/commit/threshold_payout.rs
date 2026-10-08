@@ -369,14 +369,17 @@ pub fn trigger_threshold_payout(
                 // NOTE the cure carefully: when the remaining gap to the
                 // threshold is below the pre-threshold minimum commit,
                 // non-crossing top-up commits are impossible — but a
-                // LARGER crossing commit still works, because its own 1%
-                // retention lands in the reserve before this code runs.
+                // LARGER crossing commit still works, because up to 1% of
+                // its gross excess is retained toward the reserve before
+                // this code runs (the rest of the excess is refunded, fee
+                // free — see `execute_commit_logic`).
                 return Err(ContractError::InvalidThresholdParams {
                     msg: format!(
                         "creation-fee reserve is empty but the live pool-creation fee is \
                          non-native ({}); the crossing cannot fund the fee swap yet — \
-                         retry with a larger commit (its 1% retention funds the reserve \
-                         in the same transaction) or after further pre-threshold commits",
+                         retry with a larger commit (up to 1% of its excess tops up the \
+                         reserve in the same transaction; the rest is refunded) or after \
+                         further pre-threshold commits",
                         fee.denom
                     ),
                 });

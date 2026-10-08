@@ -317,13 +317,15 @@ fn overshoot_crossing_refunds_exact_post_fee_excess_to_crosser() {
     )
     .unwrap();
 
-    // Hand-derivation:
-    //   fees        = 1% + 5% of 5_000_000 = 50_000 + 250_000 = 300_000
-    //   after_fees  = 4_700_000
-    //   to_threshold(native) = usd_to_native($1) = 1_000_000
-    //   threshold_after_fees = 4_700_000 * 1_000_000 / 5_000_000 = 940_000
-    //   excess_after_fees    = 4_700_000 - 940_000            = 3_760_000
-    const EXPECTED_REFUND: u128 = 3_760_000;
+    // Hand-derivation (fees are charged on the THRESHOLD PORTION only; the
+    // gross excess is refunded fee-free, and the creation-fee reserve
+    // target is zero in this fixture so nothing is retained from it):
+    //   to_threshold(native)   = 1_000_000 (the $1 gap)
+    //   fees on threshold part = 1% + 5% of 1_000_000 = 10_000 + 50_000 = 60_000
+    //   threshold_after_fees   = 940_000
+    //   gross_excess           = 5_000_000 - 1_000_000 = 4_000_000
+    //   refund                 = 4_000_000 (nothing retained: reserve room = 0)
+    const EXPECTED_REFUND: u128 = 4_000_000;
 
     let refund_attr = res
         .attributes
@@ -335,8 +337,32 @@ fn overshoot_crossing_refunds_exact_post_fee_excess_to_crosser() {
     assert_eq!(
         refund_attr,
         EXPECTED_REFUND.to_string(),
-        "refund attribute must equal the exact post-fee excess"
+        "refund attribute must equal the exact gross excess (fee-free)"
     );
+    // Nothing was retained toward the creation-fee reserve (target is zero).
+    let retained_attr = res
+        .attributes
+        .iter()
+        .find(|a| a.key == "bluechip_excess_retained_for_creation_fee")
+        .unwrap()
+        .value
+        .clone();
+    assert_eq!(retained_attr, "0");
+    // The commit fees were charged on the threshold portion only: the
+    // bluechip wallet receives 1% of 1_000_000 and the creator 5% of it.
+    let fee_to = |addr: &str| -> Uint128 {
+        res.messages
+            .iter()
+            .find_map(|m| match &m.msg {
+                CosmosMsg::Bank(BankMsg::Send { to_address, amount }) if to_address == addr => {
+                    Some(amount[0].amount)
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(fee_to("bluechip_treasury"), Uint128::new(10_000));
+    assert_eq!(fee_to("creator_wallet"), Uint128::new(50_000));
 
     // And the actual BankMsg to the crosser must carry exactly that coin.
     let refund_coin = res
@@ -766,3 +792,173 @@ fn registered_router_is_exempt_from_swap_rate_limit() {
 // above POOL_RATE_MAX ($10,000/native). This test asserts the SAME commit is
 // rejected above the ceiling and accepted at a normal rate — so the rejection
 // is the ceiling, not an unrelated failure.
+
+// ===========================================================================
+// F-check: crossing EXCESS is fee-free, with at most the bluechip-fee rate
+//          of it retained toward a still-short creation-fee reserve.
+// ===========================================================================
+//
+// Commit fees (1% + 5%) are charged on the threshold portion only. The
+// gross excess is refunded, except that up to 1% of it may be retained
+// toward the gamm creation-fee reserve when the reserve is short at
+// crossing time — never more than the remaining room. This is what keeps
+// the "retry with a larger commit" rescue for an under-funded reserve
+// alive while making it ~6x cheaper than charging full fees on the excess.
+#[test]
+fn overshoot_crossing_retains_at_most_fee_rate_of_excess_toward_short_reserve() {
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(100_000_000_000),
+    }]);
+    setup_pool_storage(&mut deps);
+    // Native-denominated creation-fee target of 100_000, nothing reserved
+    // yet: the reserve has 100_000 of room at crossing.
+    crate::state::CREATION_FEE_RESERVE_TARGET
+        .save(&mut deps.storage, &Uint128::new(100_000))
+        .unwrap();
+    crate::state::BLUECHIP_FEE_RESERVED
+        .save(&mut deps.storage, &Uint128::zero())
+        .unwrap();
+    GROSS_NATIVE_COMMITTED
+        .save(&mut deps.storage, &Uint128::new(24_999_000_000))
+        .unwrap();
+    with_factory_context(&mut deps);
+    let env = mock_env();
+
+    // 5_000_000 commit against a 1_000_000 gap → 4_000_000 gross excess.
+    let commit_amount = Uint128::new(5_000_000);
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(
+            &Addr::unchecked("whale"),
+            &[Coin {
+                denom: "ubluechip".to_string(),
+                amount: commit_amount,
+            }],
+        ),
+        ExecuteMsg::Commit {
+            asset: TokenInfo {
+                info: TokenType::Native {
+                    denom: "ubluechip".to_string(),
+                },
+                amount: commit_amount,
+            },
+            transaction_deadline: None,
+            belief_price: None,
+            max_spread: None,
+        },
+    )
+    .unwrap();
+
+    // Hand-derivation:
+    //   threshold portion 1% fee = 10_000 → all retained (room 100_000 → 90_000)
+    //   excess retention cap     = 1% of 4_000_000 = 40_000 ≤ room → retained
+    //   reserved after           = 50_000
+    //   refund                   = 4_000_000 - 40_000 = 3_960_000
+    let attr = |key: &str| -> String {
+        res.attributes
+            .iter()
+            .find(|a| a.key == key)
+            .unwrap_or_else(|| panic!("missing attribute {key}"))
+            .value
+            .clone()
+    };
+    assert_eq!(attr("bluechip_excess_refunded"), "3960000");
+    assert_eq!(attr("bluechip_excess_retained_for_creation_fee"), "40000");
+    // The crossing consumes the reserve (BLUECHIP_FEE_RESERVED is re-pinned
+    // to the charged fee), so verify the retention through the fund flow
+    // instead: no bluechip fee reached the wallet (all 10_000 was retained)
+    // and the creator got exactly 5% of the threshold portion.
+    let sends: Vec<(String, Uint128)> = res
+        .messages
+        .iter()
+        .filter_map(|m| match &m.msg {
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount })
+                if amount.len() == 1 && amount[0].denom == "ubluechip" =>
+            {
+                Some((to_address.clone(), amount[0].amount))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !sends.iter().any(|(to, _)| to == "bluechip_treasury"),
+        "no bluechip fee should reach the wallet while the reserve is short; got {sends:?}"
+    );
+    assert!(sends.contains(&("creator_wallet".to_string(), Uint128::new(50_000))));
+    assert!(sends.contains(&("whale".to_string(), Uint128::new(3_960_000))));
+}
+
+/// Same scenario but the reserve only has 25_000 of room left: the
+/// threshold-portion fee fills 10_000 of it, the excess retention is capped
+/// by the remaining 15_000 room (not the 40_000 fee-rate cap), and the
+/// refund grows accordingly. The surplus bluechip fee goes to the wallet.
+#[test]
+fn overshoot_crossing_excess_retention_is_bounded_by_reserve_room() {
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(100_000_000_000),
+    }]);
+    setup_pool_storage(&mut deps);
+    crate::state::CREATION_FEE_RESERVE_TARGET
+        .save(&mut deps.storage, &Uint128::new(100_000))
+        .unwrap();
+    crate::state::BLUECHIP_FEE_RESERVED
+        .save(&mut deps.storage, &Uint128::new(75_000))
+        .unwrap();
+    GROSS_NATIVE_COMMITTED
+        .save(&mut deps.storage, &Uint128::new(24_999_000_000))
+        .unwrap();
+    with_factory_context(&mut deps);
+    let env = mock_env();
+
+    let commit_amount = Uint128::new(5_000_000);
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(
+            &Addr::unchecked("whale"),
+            &[Coin {
+                denom: "ubluechip".to_string(),
+                amount: commit_amount,
+            }],
+        ),
+        ExecuteMsg::Commit {
+            asset: TokenInfo {
+                info: TokenType::Native {
+                    denom: "ubluechip".to_string(),
+                },
+                amount: commit_amount,
+            },
+            transaction_deadline: None,
+            belief_price: None,
+            max_spread: None,
+        },
+    )
+    .unwrap();
+
+    let attr = |key: &str| -> String {
+        res.attributes
+            .iter()
+            .find(|a| a.key == key)
+            .unwrap_or_else(|| panic!("missing attribute {key}"))
+            .value
+            .clone()
+    };
+    // room 25_000: threshold fee takes 10_000 (room → 15_000), excess
+    // retention takes the remaining 15_000, refund = 4_000_000 - 15_000.
+    assert_eq!(attr("bluechip_excess_retained_for_creation_fee"), "15000");
+    assert_eq!(attr("bluechip_excess_refunded"), "3985000");
+    let refund = res
+        .messages
+        .iter()
+        .find_map(|m| match &m.msg {
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount }) if to_address == "whale" => {
+                Some(amount[0].amount)
+            }
+            _ => None,
+        })
+        .expect("refund to the crosser");
+    assert_eq!(refund, Uint128::new(3_985_000));
+}
