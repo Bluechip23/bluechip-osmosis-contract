@@ -12,18 +12,18 @@
 //! - Asset handling for the two bank denoms of a pool (OSMO + the
 //!   creator TokenFactory denom).
 //! - Shared admin ops: pause, unpause, emergency
-//! withdraw (initiate + execute + cancel), ensure_not_drained.
+//!   withdraw (initiate + execute + cancel), ensure_not_drained.
 //! - Shared state items and structs backing the above.
 //!
 //! Out of scope (lives in the consuming contract crates):
 //! - Commit-phase logic: commit, threshold crossing, distribution,
-//! claim-creator-excess, claim-creator-fees, retry-factory-notify,
-//! factory-backed USD conversions.  (creator-pool/)
+//!   claim-creator-excess, claim-creator-fees, retry-factory-notify,
+//!   factory-backed USD conversions.  (creator-pool/)
 //! - Entry points, factory message dispatch, contract-level tests.
 //!
 //! Intended consumers:
 //! - `creator-pool` — the two-phase pool. Extends this crate with
-//! commit-phase state and handlers.
+//!   commit-phase state and handlers.
 
 pub mod admin;
 pub mod asset;

@@ -2,12 +2,12 @@
 //!
 //! Split boundary:
 //! - Shared (this module): CommitFeeInfo, PoolConfigUpdate,
-//! CommitStatus, and every response struct returned by a query
-//! handler that lives in `pool_core::query`.
+//!   CommitStatus, and every response struct returned by a query
+//!   handler that lives in `pool_core::query`.
 //! - Per-contract (in creator-pool): ExecuteMsg,
-//! QueryMsg, MigrateMsg, PoolInstantiateMsg,
-//! and commit-only response types (FactoryNotifyStatusResponse,
-//! PoolCommitResponse, CommitterInfo, LastCommittedResponse).
+//!   QueryMsg, MigrateMsg, PoolInstantiateMsg,
+//!   and commit-only response types (FactoryNotifyStatusResponse,
+//!   PoolCommitResponse, CommitterInfo, LastCommittedResponse).
 //!
 //! Wire format is load-bearing — every struct keeps its `#[cw_serde]`
 //! attribute, and JSON shapes (field names, nested layouts) must stay

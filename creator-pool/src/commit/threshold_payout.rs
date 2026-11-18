@@ -32,8 +32,8 @@
 //! pool's threshold-crossing state (retryable via `RetryFactoryNotify`).
 
 use cosmwasm_std::{
-    to_json_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, Env, QuerierWrapper, StdError, Storage,
-    SubMsg, Uint128, WasmMsg,
+    to_json_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, Env, QuerierWrapper, StdError,
+    Storage, SubMsg, Uint128, WasmMsg,
 };
 
 use crate::asset::get_native_denom;
@@ -43,9 +43,9 @@ use crate::state::{
     CommitLimitInfo, CreatorExcessLiquidity, DistributionState, PoolInfo, ThresholdPayoutAmounts,
     COMMITTER_COUNT, CREATOR_EXCESS_POSITION, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION,
     DEFAULT_MAX_GAS_PER_TX, DISTRIBUTION_STATE, IS_THRESHOLD_HIT, REPLY_ID_CREATE_POOL,
-    SECONDS_PER_DAY, THRESHOLD_PAYOUT_BLUECHIP_BASE_UNITS, THRESHOLD_PAYOUT_COMMIT_RETURN_BASE_UNITS,
-    THRESHOLD_PAYOUT_CREATOR_BASE_UNITS, THRESHOLD_PAYOUT_POOL_BASE_UNITS,
-    THRESHOLD_PAYOUT_TOTAL_BASE_UNITS,
+    SECONDS_PER_DAY, THRESHOLD_PAYOUT_BLUECHIP_BASE_UNITS,
+    THRESHOLD_PAYOUT_COMMIT_RETURN_BASE_UNITS, THRESHOLD_PAYOUT_CREATOR_BASE_UNITS,
+    THRESHOLD_PAYOUT_POOL_BASE_UNITS, THRESHOLD_PAYOUT_TOTAL_BASE_UNITS,
 };
 use pool_core::osmosis_msgs::{
     create_balancer_pool_msg, query_pool_creation_fee_coin, swap_exact_amount_out_msg,
@@ -148,7 +148,6 @@ pub struct ThresholdPayoutMsgs {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn trigger_threshold_payout(
     storage: &mut dyn Storage,
     // Live chain querier — used to read the ACTUAL x/poolmanager
@@ -202,7 +201,6 @@ pub fn trigger_threshold_payout(
         }),
         crate::state::REPLY_ID_FACTORY_NOTIFY_INITIAL,
     );
-
 
     // Runtime sanity check that the four payout components add up.
     let total = payout
@@ -399,42 +397,41 @@ pub fn trigger_threshold_payout(
     //     to `MsgCreateBalancerPool`, so `excess_creator_tokens` stays put.
     // Neither is sent anywhere at crossing; the creator claims the raw
     // coins after `unlock_time` via `ClaimCreatorExcessLiquidity`.
-    let (base_seed_osmo, seed_creator) = if pools_bluechip_seed
-        > commit_config.max_bluechip_lock_per_pool
-    {
-        let excess_bluechip = pools_bluechip_seed
-            .checked_sub(commit_config.max_bluechip_lock_per_pool)
-            .map_err(StdError::overflow)?;
+    let (base_seed_osmo, seed_creator) =
+        if pools_bluechip_seed > commit_config.max_bluechip_lock_per_pool {
+            let excess_bluechip = pools_bluechip_seed
+                .checked_sub(commit_config.max_bluechip_lock_per_pool)
+                .map_err(StdError::overflow)?;
 
-        // Creator tokens earmarked in proportion to the over-raise:
-        // `pool_seed_amount * excess_bluechip / pools_bluechip_seed`.
-        let excess_creator_tokens = payout
-            .pool_seed_amount
-            .multiply_ratio(excess_bluechip, pools_bluechip_seed);
+            // Creator tokens earmarked in proportion to the over-raise:
+            // `pool_seed_amount * excess_bluechip / pools_bluechip_seed`.
+            let excess_creator_tokens = payout
+                .pool_seed_amount
+                .multiply_ratio(excess_bluechip, pools_bluechip_seed);
 
-        CREATOR_EXCESS_POSITION.save(
-            storage,
-            &CreatorExcessLiquidity {
-                creator: fee_info.creator_wallet_address.clone(),
-                bluechip_amount: excess_bluechip,
-                token_amount: excess_creator_tokens,
-                unlock_time: env.block.time.plus_seconds(
-                    commit_config.creator_excess_liquidity_lock_days * SECONDS_PER_DAY,
-                ),
-            },
-        )?;
+            CREATOR_EXCESS_POSITION.save(
+                storage,
+                &CreatorExcessLiquidity {
+                    creator: fee_info.creator_wallet_address.clone(),
+                    bluechip_amount: excess_bluechip,
+                    token_amount: excess_creator_tokens,
+                    unlock_time: env.block.time.plus_seconds(
+                        commit_config.creator_excess_liquidity_lock_days * SECONDS_PER_DAY,
+                    ),
+                },
+            )?;
 
-        // The pool is seeded with the NON-earmarked creator tokens so the
-        // earmarked `excess_creator_tokens` stays in the contract for the
-        // creator's later raw claim.
-        let seed_creator = payout
-            .pool_seed_amount
-            .checked_sub(excess_creator_tokens)
-            .map_err(StdError::overflow)?;
-        (commit_config.max_bluechip_lock_per_pool, seed_creator)
-    } else {
-        (pools_bluechip_seed, payout.pool_seed_amount)
-    };
+            // The pool is seeded with the NON-earmarked creator tokens so the
+            // earmarked `excess_creator_tokens` stays in the contract for the
+            // creator's later raw claim.
+            let seed_creator = payout
+                .pool_seed_amount
+                .checked_sub(excess_creator_tokens)
+                .map_err(StdError::overflow)?;
+            (commit_config.max_bluechip_lock_per_pool, seed_creator)
+        } else {
+            (pools_bluechip_seed, payout.pool_seed_amount)
+        };
 
     // The SEED always yields the uncovered creation-fee shortfall,
     // so both the brick invariant and the creator earmark stay consistent.
@@ -549,6 +546,7 @@ pub fn trigger_threshold_payout(
 ///   raised or re-denominated between crossing and seeding) → fail with an
 ///   actionable error; anyone can bank-send the missing coins to this
 ///   contract and retry.
+#[allow(clippy::too_many_arguments)]
 pub fn build_pool_seed(
     storage: &mut dyn Storage,
     querier: &QuerierWrapper,
@@ -588,11 +586,7 @@ pub fn build_pool_seed(
                     msg: format!(
                         "the pool-creation fee is now {}{} but this contract holds only {}; \
                          send the missing {} to {} and call ContinueDistribution again",
-                        fee.amount,
-                        fee.denom,
-                        held,
-                        fee.denom,
-                        env.contract.address
+                        fee.amount, fee.denom, held, fee.denom, env.contract.address
                     ),
                 });
             }

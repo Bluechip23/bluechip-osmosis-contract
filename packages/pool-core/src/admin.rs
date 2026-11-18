@@ -17,8 +17,8 @@ use crate::state::{
     PENDING_EMERGENCY_WITHDRAW, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO, POOL_SPECS,
 };
 use cosmwasm_std::{
-    Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, Env, MessageInfo, Response, StdError, Storage,
-    Uint128,
+    Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, Env, MessageInfo, Response, StdError,
+    Storage, Uint128,
 };
 use pool_factory_interfaces::{EmergencyWithdrawDelayResponse, FactoryQueryMsg};
 
@@ -45,7 +45,11 @@ pub fn ensure_not_drained(storage: &dyn Storage) -> Result<(), ContractError> {
 // Pause / Unpause
 // ---------------------------------------------------------------------------
 
-pub fn execute_pause(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, ContractError> {
+pub fn execute_pause(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
     let pool_info = POOL_INFO.load(deps.storage)?;
     if info.sender != pool_info.factory_addr {
         return Err(ContractError::Unauthorized {});

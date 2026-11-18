@@ -29,7 +29,7 @@ use crate::generic_helpers::{
 use crate::msg::CommitFeeInfo;
 use crate::state::{
     CommitLimitInfo, PoolAnalytics, PoolInfo, PoolSpecs, ThresholdPayoutAmounts,
-    IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
+    GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, THRESHOLD_PROCESSING,
 };
 
 use super::commit_base_attributes;
@@ -92,7 +92,10 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // initial `distributions_remaining`, so it MUST reflect the crosser
     // before the payout runs — hence the insert-and-count happens here.
     super::record_committer(deps.storage, &sender, value_to_threshold)?;
-    GROSS_NATIVE_COMMITTED.save(deps.storage, &commit_config.commit_amount_for_threshold_native)?;
+    GROSS_NATIVE_COMMITTED.save(
+        deps.storage,
+        &commit_config.commit_amount_for_threshold_native,
+    )?;
     // NATIVE_RAISED_FROM_COMMIT stores the NET bluechip entering the pool
     // for the threshold portion. The excess is refunded, not seeded.
     NATIVE_RAISED_FROM_COMMIT.update::<_, ContractError>(deps.storage, |r| {
@@ -156,7 +159,6 @@ pub(crate) fn process_threshold_crossing_with_excess(
     if let Some(swap) = payout_msgs.fee_swap {
         response = response.add_message(swap);
     }
-    let mut response = response;
     if let Some(remit) = payout_msgs.reserve_remit {
         response = response.add_message(remit);
     }
@@ -253,7 +255,6 @@ pub(crate) fn process_threshold_hit_exact(
     if let Some(swap) = payout.fee_swap {
         response = response.add_message(swap);
     }
-    let mut response = response;
     if let Some(remit) = payout.reserve_remit {
         response = response.add_message(remit);
     }

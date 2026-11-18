@@ -171,9 +171,12 @@ pub fn estimate_swap_out<C: CustomQuery>(
     }];
     // `sender` is DEPRECATED on the request and unused by the estimate;
     // pass empty.
-    match PoolmanagerQuerier::new(querier)
-        .estimate_swap_exact_amount_in(String::new(), pool_id, token_in_str, routes)
-    {
+    match PoolmanagerQuerier::new(querier).estimate_swap_exact_amount_in(
+        String::new(),
+        pool_id,
+        token_in_str,
+        routes,
+    ) {
         Ok(resp) => Uint128::from_str(&resp.token_out_amount).unwrap_or_default(),
         Err(_) => Uint128::zero(),
     }
@@ -381,20 +384,19 @@ fn execute_simple_swap_with_ctx(
     }
 
     // Resolve which side is being offered and the ask denom.
-    let (offer_denom, ask_denom) =
-        if offer_asset.info.equal(&pool_info.pool_info.asset_infos[0]) {
-            (
-                denom_of(&pool_info.pool_info.asset_infos[0]),
-                denom_of(&pool_info.pool_info.asset_infos[1]),
-            )
-        } else if offer_asset.info.equal(&pool_info.pool_info.asset_infos[1]) {
-            (
-                denom_of(&pool_info.pool_info.asset_infos[1]),
-                denom_of(&pool_info.pool_info.asset_infos[0]),
-            )
-        } else {
-            return Err(ContractError::AssetMismatch {});
-        };
+    let (offer_denom, ask_denom) = if offer_asset.info.equal(&pool_info.pool_info.asset_infos[0]) {
+        (
+            denom_of(&pool_info.pool_info.asset_infos[0]),
+            denom_of(&pool_info.pool_info.asset_infos[1]),
+        )
+    } else if offer_asset.info.equal(&pool_info.pool_info.asset_infos[1]) {
+        (
+            denom_of(&pool_info.pool_info.asset_infos[1]),
+            denom_of(&pool_info.pool_info.asset_infos[0]),
+        )
+    } else {
+        return Err(ContractError::AssetMismatch {});
+    };
 
     if POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false) {
         return Err(ContractError::PoolPausedLowLiquidity {});
@@ -494,7 +496,10 @@ fn execute_simple_swap_with_ctx(
 /// deprecated `data` field for pre-CosmWasm-2.0 chains. Returns the
 /// `token_out_amount`.
 pub fn parse_swap_out_amount(result: &SubMsgResult) -> StdResult<Uint128> {
-    let response = result.clone().into_result().map_err(StdError::generic_err)?;
+    let response = result
+        .clone()
+        .into_result()
+        .map_err(StdError::generic_err)?;
 
     let bytes: Vec<u8> = response
         .msg_responses
@@ -513,9 +518,8 @@ pub fn parse_swap_out_amount(result: &SubMsgResult) -> StdResult<Uint128> {
         StdError::generic_err(format!("swap reply: failed to decode response: {}", e))
     })?;
 
-    Uint128::from_str(&decoded.token_out_amount).map_err(|e| {
-        StdError::generic_err(format!("swap reply: invalid token_out_amount: {}", e))
-    })
+    Uint128::from_str(&decoded.token_out_amount)
+        .map_err(|e| StdError::generic_err(format!("swap reply: invalid token_out_amount: {}", e)))
 }
 
 /// Reply handler for `REPLY_ID_SWAP_FORWARD`: forward the swapped-out

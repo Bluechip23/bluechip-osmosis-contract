@@ -23,12 +23,11 @@ use crate::query::query_check_commit;
 use crate::state::{
     CommitLimitInfo, ExpectedFactory, PoolAnalytics, PoolDetails, PoolInfo, PoolSpecs, PoolState,
     ThresholdPayoutAmounts, COMMITFEEINFO, COMMIT_LIMIT_INFO, DEFAULT_LP_FEE,
-    DEFAULT_SWAP_RATE_LIMIT_SECS, EXPECTED_FACTORY, FAILED_MINTS, IS_THRESHOLD_HIT, MAX_LP_FEE,
-    MIN_LP_FEE, NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY, PENDING_MINT_REPLIES,
-    POOL_ANALYTICS, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
+    DEFAULT_SWAP_RATE_LIMIT_SECS, EXPECTED_FACTORY, FAILED_MINTS, GROSS_NATIVE_COMMITTED,
+    IS_THRESHOLD_HIT, MAX_LP_FEE, MIN_LP_FEE, NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY,
+    PENDING_MINT_REPLIES, POOL_ANALYTICS, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
     REPLY_ID_CREATE_POOL, REPLY_ID_DISTRIBUTION_MINT_BASE, REPLY_ID_FACTORY_NOTIFY_INITIAL,
     REPLY_ID_FACTORY_NOTIFY_RETRY, REPLY_ID_SWAP_FORWARD, THRESHOLD_PAYOUT_AMOUNTS,
-    GROSS_NATIVE_COMMITTED,
 };
 use crate::swap_helper::simple_swap;
 use cosmwasm_std::{
@@ -456,7 +455,10 @@ pub fn execute_retry_factory_notify(
 /// reply, preferring the typed `msg_responses` entry and falling back to
 /// the deprecated `data` field.
 fn parse_created_pool_id(result: &SubMsgResult) -> StdResult<u64> {
-    let response = result.clone().into_result().map_err(StdError::generic_err)?;
+    let response = result
+        .clone()
+        .into_result()
+        .map_err(StdError::generic_err)?;
     let bytes: Vec<u8> = response
         .msg_responses
         .iter()
@@ -556,12 +558,16 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
                     .add_attribute("amount", pending.amount.to_string())
                     .add_attribute("reply_id", msg.id.to_string())),
                 SubMsgResult::Err(e) => {
-                    FAILED_MINTS.update::<_, StdError>(deps.storage, &pending.user, |existing| {
-                        let prior = existing.unwrap_or_default();
-                        prior
-                            .checked_add(pending.amount)
-                            .map_err(|o| StdError::generic_err(o.to_string()))
-                    })?;
+                    FAILED_MINTS.update::<_, StdError>(
+                        deps.storage,
+                        &pending.user,
+                        |existing| {
+                            let prior = existing.unwrap_or_default();
+                            prior
+                                .checked_add(pending.amount)
+                                .map_err(|o| StdError::generic_err(o.to_string()))
+                        },
+                    )?;
                     Ok(Response::new()
                         .add_attribute("action", "distribution_mint_isolated_failure")
                         .add_attribute("user", pending.user.to_string())

@@ -40,7 +40,11 @@ pub fn ensure_distribution_complete(
 /// Final step of the launch: once the committer ledger is empty, mint the
 /// creator / protocol / pool-seed tokens and create the native pool. Runs
 /// as the `ContinueDistribution` call that follows the last batch.
-fn execute_seed_pool(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, ContractError> {
+fn execute_seed_pool(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
     let pool_info = POOL_INFO.load(deps.storage)?;
     let fee_info = crate::state::COMMITFEEINFO.load(deps.storage)?;
     let payout = crate::state::THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;

@@ -22,8 +22,8 @@ use std::str::FromStr;
 
 use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    from_json, to_json_binary, Addr, Coin, ContractResult, Empty, OwnedDeps, Querier, QuerierResult,
-    QueryRequest, SystemError, SystemResult, Uint128, WasmQuery,
+    from_json, to_json_binary, Addr, Coin, ContractResult, Empty, OwnedDeps, Querier,
+    QuerierResult, QueryRequest, SystemError, SystemResult, Uint128, WasmQuery,
 };
 use osmosis_std::types::cosmos::base::v1beta1::Coin as OsmoCoin;
 use osmosis_std::types::osmosis::poolmanager::v1beta1::{
@@ -173,8 +173,11 @@ impl PoolMockQuerier {
                 };
                 // Osmosis coin string is `{amount}{denom}`; take the numeric
                 // prefix as the token_in amount.
-                let amount_str: String =
-                    req.token_in.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let amount_str: String = req
+                    .token_in
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 let token_in_amount = Uint128::from_str(&amount_str).unwrap_or_default();
                 let out = token_in_amount.multiply_ratio(self.estimate_num, self.estimate_den);
                 let resp = EstimateSwapExactAmountInResponse {
@@ -245,9 +248,7 @@ impl PoolMockQuerier {
 /// `OwnedDeps` backed by [`PoolMockQuerier`], with the contract's bank
 /// balance seeded from `balances`. Configure the estimate ratio / factory
 /// oracle via the returned `deps.querier` builder methods.
-pub fn mock_deps_estimate(
-    balances: &[Coin],
-) -> OwnedDeps<MockStorage, MockApi, PoolMockQuerier> {
+pub fn mock_deps_estimate(balances: &[Coin]) -> OwnedDeps<MockStorage, MockApi, PoolMockQuerier> {
     let base = MockQuerier::new(&[(MOCK_CONTRACT_ADDR, balances)]);
     OwnedDeps {
         storage: MockStorage::default(),

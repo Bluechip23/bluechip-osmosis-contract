@@ -363,7 +363,10 @@ fn test_lp_fee_is_fixed_once_the_native_pool_exists() {
     .unwrap_err();
     assert!(matches!(err, ContractError::LpFeeFixedAfterPoolCreation {}));
 
-    let factory = crate::state::POOL_INFO.load(&deps.storage).unwrap().factory_addr;
+    let factory = crate::state::POOL_INFO
+        .load(&deps.storage)
+        .unwrap()
+        .factory_addr;
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -1520,7 +1523,9 @@ mod distribution_liveness_tests {
         install_factory(&mut deps);
         EMERGENCY_DRAINED.save(&mut deps.storage, &true).unwrap();
         // Drains latch the pause; the claim must get past BOTH gates.
-        crate::state::POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
+        crate::state::POOL_PAUSED
+            .save(&mut deps.storage, &true)
+            .unwrap();
 
         // Self-recover (restarts bank-relevant distribution machinery):
         // still rejected post-drain.
@@ -1632,7 +1637,9 @@ mod distribution_liveness_tests {
         assert!(COMMIT_LEDGER.has(&deps.storage, &pending));
 
         EMERGENCY_DRAINED.save(&mut deps.storage, &true).unwrap();
-        crate::state::POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
+        crate::state::POOL_PAUSED
+            .save(&mut deps.storage, &true)
+            .unwrap();
 
         // 250 / 1_000 of 500_000 = 125_000, same as the batch loop.
         let res = claim(&mut deps, &pending).unwrap();
@@ -1646,7 +1653,10 @@ mod distribution_liveness_tests {
         assert_eq!(res.messages[0].msg, expected);
         assert!(!COMMIT_LEDGER.has(&deps.storage, &pending));
         assert_eq!(
-            DISTRIBUTION_STATE.load(&deps.storage).unwrap().distributed_so_far,
+            DISTRIBUTION_STATE
+                .load(&deps.storage)
+                .unwrap()
+                .distributed_so_far,
             Uint128::new(125_010)
         );
 

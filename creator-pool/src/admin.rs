@@ -7,13 +7,13 @@
 //!
 //! The creator-pool crate keeps:
 //! - `execute_emergency_withdraw` — a wrapper around pool-core's
-//! two-phase initiate/core_drain that adds the commit-only
-//! pre-threshold rejection, CREATOR_EXCESS_POSITION earmark preservation,
-//! and DISTRIBUTION_STATE halt.
+//!   two-phase initiate/core_drain that adds the commit-only
+//!   pre-threshold rejection, CREATOR_EXCESS_POSITION earmark preservation,
+//!   and DISTRIBUTION_STATE halt.
 //! - `execute_recover_stuck_states` + private recovery helpers —
-//! both failure modes (stuck threshold, stalled distribution) only
-//! ever occur inside the commit flow, so they stay here rather than
-//! in the shared library.
+//!   both failure modes (stuck threshold, stalled distribution) only
+//!   ever occur inside the commit flow, so they stay here rather than
+//!   in the shared library.
 
 pub use pool_core::admin::{
     ensure_not_drained, execute_cancel_emergency_withdraw, execute_emergency_withdraw_dispatch,
@@ -26,9 +26,8 @@ use crate::state::{
     CREATOR_EXCESS_POSITION, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX,
     DISTRIBUTION_STATE, FAILED_MINTS, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
     MAX_CONSECUTIVE_DISTRIBUTION_FAILURES, PENDING_EMERGENCY_WITHDRAW, POOL_INFO, POOL_PAUSED,
-    PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS,
-    STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS,
-    THRESHOLD_PROCESSING,
+    PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS,
+    STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS, THRESHOLD_PROCESSING,
 };
 use cosmwasm_std::{
     Addr, DepsMut, Env, MessageInfo, Order, Response, StdResult, Storage, SubMsg, Timestamp,
@@ -42,14 +41,14 @@ use cosmwasm_std::{
 /// Wraps pool-core's two-phase emergency withdraw with commit-only
 /// bookkeeping:
 /// - Pre-threshold rejection (committed funds are untracked in
-/// reserves; draining would strand them).
+///   reserves; draining would strand them).
 /// - CREATOR_EXCESS_POSITION earmark PRESERVATION on Phase 2 —
-/// its raw `bluechip_amount` / `token_amount` are passed to the core
-/// drain as sweep EXCLUSIONS so the time-locked excess stays in the
-/// contract for the creator; the record itself is left intact so the
-/// creator can still `ClaimCreatorExcessLiquidity` after the drain.
+///   its raw `bluechip_amount` / `token_amount` are passed to the core
+///   drain as sweep EXCLUSIONS so the time-locked excess stays in the
+///   contract for the creator; the record itself is left intact so the
+///   creator can still `ClaimCreatorExcessLiquidity` after the drain.
 /// - DISTRIBUTION_STATE halt on Phase 2 so future
-/// ContinueDistribution calls reject cleanly.
+///   ContinueDistribution calls reject cleanly.
 ///
 /// Phase 1/2 dispatch: if `PENDING_EMERGENCY_WITHDRAW` is unset we run
 /// Phase 1 (pause + set timelock); otherwise Phase 2 (drain after the

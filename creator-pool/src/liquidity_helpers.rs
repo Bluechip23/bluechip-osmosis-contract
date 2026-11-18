@@ -99,7 +99,10 @@ fn execute_claim_creator_excess_inner(
         ("action", "claim_creator_excess".to_string()),
         ("creator", excess_position.creator.to_string()),
         ("bluechip_denom", bluechip_denom),
-        ("bluechip_amount", excess_position.bluechip_amount.to_string()),
+        (
+            "bluechip_amount",
+            excess_position.bluechip_amount.to_string(),
+        ),
         ("creator_denom", creator_denom),
         ("token_amount", excess_position.token_amount.to_string()),
         ("pool_contract", env.contract.address.to_string()),

@@ -9,7 +9,9 @@
 //! split happens in the dispatcher; `swap_amount` here is already
 //! net-of-fees).
 
-use cosmwasm_std::{to_json_binary, Addr, Coin, CosmosMsg, Decimal, DepsMut, Env, Response, SubMsg, Uint128};
+use cosmwasm_std::{
+    to_json_binary, Addr, Coin, CosmosMsg, Decimal, DepsMut, Env, Response, SubMsg, Uint128,
+};
 
 use crate::asset::{get_native_denom, TokenInfo};
 use crate::error::ContractError;
@@ -80,12 +82,7 @@ pub(super) fn process_post_threshold_commit(
     // committer's GROSS attached bluechip is returned by tx failure, no fees
     // are taken, no swap is dispatched, and no pause is latched. Pre-threshold
     // commits never reach here (no pool yet).
-    enforce_liquidity_breaker(
-        deps.storage,
-        &deps.querier,
-        pool_id,
-        &bluechip_denom,
-    )?;
+    enforce_liquidity_breaker(deps.storage, &deps.querier, pool_id, &bluechip_denom)?;
 
     let token_in = Coin {
         denom: bluechip_denom.clone(),

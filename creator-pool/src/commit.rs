@@ -39,9 +39,9 @@ use crate::generic_helpers::{
 };
 use crate::msg::CommitFeeInfo;
 use crate::state::{
-    PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
-    POOL_ANALYTICS, POOL_INFO, POOL_PAUSED, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
-    THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
+    PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT,
+    LAST_THRESHOLD_ATTEMPT, POOL_ANALYTICS, POOL_INFO, POOL_PAUSED, POOL_SPECS,
+    THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
 };
 
 use crate::swap_helper::get_commit_context;
@@ -91,7 +91,7 @@ pub(crate) fn record_committer(
         // `may_load` + `save` (not `update`) so a pool whose
         // COMMITTER_COUNT was never initialised still counts correctly.
         let current = COMMITTER_COUNT.may_load(storage)?.unwrap_or(0);
-        COMMITTER_COUNT.save(storage, &current.checked_add(1).unwrap_or(u32::MAX))?;
+        COMMITTER_COUNT.save(storage, &current.saturating_add(1))?;
     }
     Ok(())
 }

@@ -316,18 +316,16 @@ pub fn process_distribution_batch(
 }
 
 pub fn calculate_effective_batch_size(dist_state: &DistributionState) -> u32 {
-    let base_batch_size = if dist_state.estimated_gas_per_distribution == 0 {
-        1u32
-    } else {
-        let raw = dist_state.max_gas_per_tx / dist_state.estimated_gas_per_distribution;
-        if raw > u32::MAX as u64 {
-            u32::MAX
-        } else {
-            raw as u32
-        }
+    // A zero gas estimate would divide by zero; treat it as one-per-tx.
+    let base_batch_size = match dist_state
+        .max_gas_per_tx
+        .checked_div(dist_state.estimated_gas_per_distribution)
+    {
+        None => 1u32,
+        Some(raw) => u32::try_from(raw).unwrap_or(u32::MAX),
     };
 
-    base_batch_size.min(MAX_DISTRIBUTIONS_PER_TX).max(1)
+    base_batch_size.clamp(1, MAX_DISTRIBUTIONS_PER_TX)
 }
 
 pub(crate) fn calculate_committer_reward(

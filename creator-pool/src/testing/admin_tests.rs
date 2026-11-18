@@ -275,7 +275,9 @@ fn test_emergency_withdraw() {
     assert_eq!(exec_res.messages.len(), 0);
 
     // Pool is permanently drained.
-    assert!(pool_core::state::EMERGENCY_DRAINED.load(&deps.storage).unwrap());
+    assert!(pool_core::state::EMERGENCY_DRAINED
+        .load(&deps.storage)
+        .unwrap());
 }
 
 #[test]
@@ -334,7 +336,13 @@ fn test_cancel_emergency_withdraw_keeps_a_prior_admin_pause() {
     install_factory_emergency_delay_mock(&mut deps, "factory_addr");
 
     // The pool is admin-paused for its own reason BEFORE the withdraw.
-    execute(deps.as_mut(), mock_env(), info.clone(), ExecuteMsg::Pause {}).unwrap();
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        info.clone(),
+        ExecuteMsg::Pause {},
+    )
+    .unwrap();
     execute(
         deps.as_mut(),
         mock_env(),
@@ -379,8 +387,12 @@ fn test_armed_emergency_withdraw_blocks_unpause_expires_and_is_queryable() {
 
     let status = |deps: &cosmwasm_std::OwnedDeps<_, _, _>| -> EmergencyWithdrawStatusResponse {
         from_json(
-            crate::query::query(deps.as_ref(), mock_env(), QueryMsg::EmergencyWithdrawStatus {})
-                .unwrap(),
+            crate::query::query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::EmergencyWithdrawStatus {},
+            )
+            .unwrap(),
         )
         .unwrap()
     };
@@ -405,8 +417,13 @@ fn test_armed_emergency_withdraw_blocks_unpause_expires_and_is_queryable() {
     assert!(!st.drained);
 
     // Unpause cannot reopen a pool with a drain armed.
-    let err = execute(deps.as_mut(), env.clone(), info.clone(), ExecuteMsg::Unpause {})
-        .unwrap_err();
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        info.clone(),
+        ExecuteMsg::Unpause {},
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         crate::error::ContractError::EmergencyWithdrawPending {}

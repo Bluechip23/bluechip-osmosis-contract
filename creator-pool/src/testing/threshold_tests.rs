@@ -1,14 +1,16 @@
 use crate::asset::{TokenInfo, TokenType};
+use crate::contract::execute;
 use crate::error::ContractError;
 use crate::msg::{CommitFeeInfo, ExecuteMsg};
 use crate::state::{
     CommitLimitInfo, CreatorExcessLiquidity, DistributionState, ExpectedFactory, RecoveryType,
     COMMITFEEINFO, COMMIT_INFO, COMMIT_LEDGER, COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION,
-    DISTRIBUTION_STATE, EXPECTED_FACTORY, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT, POOL_PAUSED,
-    THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
+    DISTRIBUTION_STATE, EXPECTED_FACTORY, GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT,
+    LAST_THRESHOLD_ATTEMPT, POOL_PAUSED, THRESHOLD_PROCESSING,
 };
-use crate::contract::execute;
-use crate::testing::fixtures::{setup_pool_post_threshold, setup_pool_storage, with_factory_context};
+use crate::testing::fixtures::{
+    setup_pool_post_threshold, setup_pool_storage, with_factory_context,
+};
 use cosmwasm_std::testing::{mock_dependencies_with_balance, MockApi, MockQuerier, MockStorage};
 use cosmwasm_std::{
     coin, BankMsg, Binary, Coin, Decimal, OwnedDeps, SystemError, Timestamp, WasmQuery,
@@ -155,7 +157,10 @@ fn test_threshold_with_excess_creates_position() {
     let has_refund = res.messages.iter().any(|submsg| {
         matches!(&submsg.msg, CosmosMsg::Bank(BankMsg::Send { to_address, .. }) if to_address == "final_committer")
     });
-    assert!(has_refund, "Should refund the post-fee excess to the crosser");
+    assert!(
+        has_refund,
+        "Should refund the post-fee excess to the crosser"
+    );
 }
 
 #[test]
@@ -513,7 +518,10 @@ fn test_commit_threshold_overshoot_split() {
     let has_refund = res.messages.iter().any(|submsg| {
         matches!(&submsg.msg, CosmosMsg::Bank(BankMsg::Send { to_address, .. }) if to_address == "whale")
     });
-    assert!(has_refund, "overshoot must refund the post-fee excess to the crosser");
+    assert!(
+        has_refund,
+        "overshoot must refund the post-fee excess to the crosser"
+    );
 
     let sub = COMMIT_INFO.load(&deps.storage, &info.sender).unwrap();
     // Only the threshold portion is recorded in commit-info (the excess was
@@ -1264,7 +1272,9 @@ fn test_commit_rejects_below_pre_threshold_floor() {
         cfg.min_commit_native_pre_threshold = crate::state::DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD;
         cfg.min_commit_native_post_threshold =
             crate::state::DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD;
-        crate::state::COMMIT_LIMIT_INFO.save(&mut deps.storage, &cfg).unwrap();
+        crate::state::COMMIT_LIMIT_INFO
+            .save(&mut deps.storage, &cfg)
+            .unwrap();
     }
     // One micro under the default pre-threshold floor (115 native).
     let pre_floor = crate::state::DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD;
@@ -1317,7 +1327,9 @@ fn test_commit_rejects_below_post_threshold_floor() {
         cfg.min_commit_native_pre_threshold = crate::state::DEFAULT_MIN_COMMIT_NATIVE_PRE_THRESHOLD;
         cfg.min_commit_native_post_threshold =
             crate::state::DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD;
-        crate::state::COMMIT_LIMIT_INFO.save(&mut deps.storage, &cfg).unwrap();
+        crate::state::COMMIT_LIMIT_INFO
+            .save(&mut deps.storage, &cfg)
+            .unwrap();
     }
     let post_floor = crate::state::DEFAULT_MIN_COMMIT_NATIVE_POST_THRESHOLD;
     let just_below = post_floor.checked_sub(Uint128::one()).unwrap();
@@ -1461,7 +1473,9 @@ fn test_emergency_drain_preserves_creator_excess_and_claim_survives_drain() {
             .messages
             .iter()
             .filter_map(|m| match &m.msg {
-                CosmosMsg::Bank(BankMsg::Send { to_address, amount }) if to_address == "drain_recipient" => {
+                CosmosMsg::Bank(BankMsg::Send { to_address, amount })
+                    if to_address == "drain_recipient" =>
+                {
                     amount.iter().find(|c| c.denom == denom).map(|c| c.amount)
                 }
                 _ => None,
@@ -1507,7 +1521,11 @@ fn test_emergency_drain_preserves_creator_excess_and_claim_survives_drain() {
         CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
             assert_eq!(to_address, "creator");
             assert_eq!(
-                amount.iter().find(|c| c.denom == "ubluechip").unwrap().amount,
+                amount
+                    .iter()
+                    .find(|c| c.denom == "ubluechip")
+                    .unwrap()
+                    .amount,
                 earmark_bluechip
             );
             assert_eq!(
@@ -1773,7 +1791,7 @@ mod native_raised_net_semantics_tests {
     fn trigger_threshold_payout_reads_native_raised_directly_no_recovery_multiply() {
         use crate::generic_helpers::trigger_threshold_payout;
         use crate::state::{
-            CREATOR_EXCESS_POSITION, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, POOL_INFO,
+            COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION, IS_THRESHOLD_HIT, POOL_INFO,
             THRESHOLD_PAYOUT_AMOUNTS,
         };
 
@@ -2296,7 +2314,10 @@ mod cross_denom_fee_tests {
 
         // The FULL raise seeds the pool — no shortfall draw, ever.
         let (seed_osmo, _) = SEED_LIQUIDITY.load(&deps.storage).unwrap();
-        assert_eq!(seed_osmo, raised, "seed funds must be untouchable by the fee swap");
+        assert_eq!(
+            seed_osmo, raised,
+            "seed funds must be untouchable by the fee swap"
+        );
         assert!(msgs.reserve_remit.is_none(), "no surplus to remit");
     }
 
@@ -2419,7 +2440,11 @@ mod cross_denom_fee_tests {
             None,
         )
         .unwrap();
-        assert_eq!(to_wallet2, Uint128::zero(), "all retained while below target");
+        assert_eq!(
+            to_wallet2,
+            Uint128::zero(),
+            "all retained while below target"
+        );
         assert_eq!(
             crate::state::BLUECHIP_FEE_RESERVED
                 .load(&deps2.storage)
