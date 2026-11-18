@@ -68,10 +68,20 @@ echo ""
 
 # ---- Execute ----------------------------------------------------------
 # Same SimpleSwap shape both directions; only the attached coin differs.
-SWAP_MSG="$(jq -nc --argjson info "$OFFER_INFO" --arg amt "$AMOUNT" \
+# A DIRECT SimpleSwap must carry a belief_price (only the registered
+# router may omit it): derive it from the simulation just performed —
+# belief_price = offer / expected_ask, 18 decimals. The 5% max_spread
+# then bounds drift between simulation and execution.
+if [ -z "$EXPECTED" ] || [ "$EXPECTED" = "0" ]; then
+    echo "error: simulation returned no expected amount — cannot derive belief_price" >&2
+    exit 1
+fi
+BELIEF="$(awk -v o="$AMOUNT" -v e="$EXPECTED" 'BEGIN { printf "%.18f", o / e }')"
+echo "belief_price:  $BELIEF (offer/expected)"
+SWAP_MSG="$(jq -nc --argjson info "$OFFER_INFO" --arg amt "$AMOUNT" --arg bp "$BELIEF" \
     '{simple_swap:{
         offer_asset:{info:$info, amount:$amt},
-        belief_price:null,
+        belief_price:$bp,
         max_spread:"0.05",
         to:null,
         transaction_deadline:null

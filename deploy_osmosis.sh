@@ -197,11 +197,34 @@ resolve_code_id() {
     local var="$1" file="$2" label="$3"
     local current="${!var:-}"
     if [ -n "$current" ]; then
-        printf "      %-16s code_id=%s  (reused)\n" "$label" "$current" >&2
-        echo "$current"
-        return 0
-    fi
-    if [ "$STORE_MODE" = "gov" ]; then
+        # NEVER trust a preset/stale code id blindly: verify the on-chain
+        # data_hash against the local artifact. A stale id from an old
+        # state file would silently deploy superseded bytes — the whole
+        # stack would run the wrong contract while looking healthy.
+        # Same artifacts/-then-repo-root path fallback as upload_wasm
+        # (cw20_base / cw721_base ship at the repo root).
+        local want have path="$ARTIFACTS/$file"
+        [ ! -f "$path" ] && [ -f "$REPO_ROOT/$file" ] && path="$REPO_ROOT/$file"
+        if [ ! -f "$path" ]; then
+            echo "error: cannot verify $var=$current — missing local $file" >&2
+            return 1
+        fi
+        want="$(sha256sum "$path" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
+        have="$(query_json wasm code-info "$current" 2>/dev/null \
+                | jq -r '.data_hash // .code_info.data_hash // empty' \
+                | tr '[:lower:]' '[:upper:]')"
+        if [ -n "$have" ] && [ "$have" = "$want" ]; then
+            printf "      %-16s code_id=%s  (reused, data_hash verified)\n" "$label" "$current" >&2
+            echo "$current"
+            return 0
+        fi
+        if [ "$STORE_MODE" = "gov" ]; then
+            echo "error: $var=$current data_hash mismatch (on-chain ${have:-<none>} != local $want)" >&2
+            echo "       the stored code is NOT the local artifact — fix $var in $ENV_FILE" >&2
+            return 1
+        fi
+        printf "      %-16s code_id=%s  STALE (hash mismatch) — re-storing\n" "$label" "$current" >&2
+    elif [ "$STORE_MODE" = "gov" ]; then
         echo "error: STORE_MODE=gov but $var is empty in $ENV_FILE" >&2
         echo "       fill in the code IDs from the passed StoreCode proposals" >&2
         return 1
