@@ -1584,6 +1584,101 @@ mod distribution_liveness_tests {
         );
     }
 
+    /// A drain that lands mid-distribution must not strand committers
+    /// whose COMMIT_LEDGER row was never processed: the bulk loop and both
+    /// recovery paths reject a drained pool, so the per-committer claim is
+    /// the only exit. It pays the exact batch-loop amount, once, and stacks
+    /// with any FAILED_MINTS balance the same committer already holds.
+    #[test]
+    fn drained_pool_lets_unprocessed_ledger_committers_claim_once() {
+        use crate::state::{DistributionState, COMMIT_LEDGER, DISTRIBUTION_STATE, FAILED_MINTS};
+
+        let mut deps = mock_dependencies();
+        setup_pool_storage(&mut deps);
+        install_factory(&mut deps);
+
+        let pending = Addr::unchecked("pending_committer");
+        let both = Addr::unchecked("pending_and_failed");
+        COMMIT_LEDGER
+            .save(&mut deps.storage, &pending, &Uint128::new(250))
+            .unwrap();
+        COMMIT_LEDGER
+            .save(&mut deps.storage, &both, &Uint128::new(100))
+            .unwrap();
+        FAILED_MINTS
+            .save(&mut deps.storage, &both, &Uint128::new(7))
+            .unwrap();
+        // State as the drain leaves it: halted, totals intact.
+        DISTRIBUTION_STATE
+            .save(
+                &mut deps.storage,
+                &DistributionState {
+                    is_distributing: false,
+                    total_to_distribute: Uint128::new(500_000),
+                    total_committed_native: Uint128::new(1_000),
+                    last_processed_key: None,
+                    distributions_remaining: 0,
+                    estimated_gas_per_distribution: 1,
+                    max_gas_per_tx: 1,
+                    last_successful_batch_size: None,
+                    consecutive_failures: 0,
+                    started_at: mock_env().block.time,
+                    last_updated: mock_env().block.time,
+                    distributed_so_far: Uint128::new(10),
+                },
+            )
+            .unwrap();
+
+        let claim = |deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, who: &Addr| {
+            execute(
+                deps.as_mut(),
+                mock_env(),
+                message_info(who, &[]),
+                ExecuteMsg::ClaimFailedDistribution { recipient: None },
+            )
+        };
+
+        // Live pool: the ledger belongs to the batch loop, not this path.
+        let err = claim(&mut deps, &pending).unwrap_err();
+        assert!(format!("{:?}", err).contains("NoFailedMintEntry"));
+        assert!(COMMIT_LEDGER.has(&deps.storage, &pending));
+
+        EMERGENCY_DRAINED.save(&mut deps.storage, &true).unwrap();
+        crate::state::POOL_PAUSED.save(&mut deps.storage, &true).unwrap();
+
+        // 250 / 1_000 of 500_000 = 125_000, same as the batch loop.
+        let res = claim(&mut deps, &pending).unwrap();
+        let expected = pool_core::osmosis_msgs::mint_msg(
+            &Addr::unchecked("pool_contract"),
+            CREATOR_DENOM,
+            Uint128::new(125_000),
+            &pending,
+        );
+        assert_eq!(res.messages.len(), 1);
+        assert_eq!(res.messages[0].msg, expected);
+        assert!(!COMMIT_LEDGER.has(&deps.storage, &pending));
+        assert_eq!(
+            DISTRIBUTION_STATE.load(&deps.storage).unwrap().distributed_so_far,
+            Uint128::new(125_010)
+        );
+
+        // One-shot.
+        let err = claim(&mut deps, &pending).unwrap_err();
+        assert!(format!("{:?}", err).contains("NoFailedMintEntry"));
+
+        // Ledger share (50_000) plus the pre-existing failed mint (7).
+        let res = claim(&mut deps, &both).unwrap();
+        let expected = pool_core::osmosis_msgs::mint_msg(
+            &Addr::unchecked("pool_contract"),
+            CREATOR_DENOM,
+            Uint128::new(50_007),
+            &both,
+        );
+        assert_eq!(res.messages[0].msg, expected);
+        assert!(!COMMIT_LEDGER.has(&deps.storage, &both));
+        assert!(!FAILED_MINTS.has(&deps.storage, &both));
+    }
+
     /// Suppress unused-import lint in this test module — the timestamp
     /// import is referenced through `setup_pool_storage`'s internals.
     #[allow(dead_code)]

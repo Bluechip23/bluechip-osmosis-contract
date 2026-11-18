@@ -92,6 +92,11 @@ pub enum ExecuteMsg {
     // (e.g., the alternate recipient is also blocked) the amount is
     // re-stashed into FAILED_MINTS under the original committer address
     // so they can try again with yet another recipient.
+    //
+    // After an emergency drain this also pays the caller's own
+    // still-unprocessed COMMIT_LEDGER row (one-shot, same pro-rata
+    // formula as the batch loop), since the batch loop never runs again
+    // on a drained pool.
     ClaimFailedDistribution {
         recipient: Option<String>,
     },

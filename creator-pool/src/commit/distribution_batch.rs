@@ -315,7 +315,7 @@ pub fn calculate_effective_batch_size(dist_state: &DistributionState) -> u32 {
     base_batch_size.min(MAX_DISTRIBUTIONS_PER_TX).max(1)
 }
 
-fn calculate_committer_reward(
+pub(crate) fn calculate_committer_reward(
     usd_paid: Uint128,
     total_to_distribute: Uint128,
     total_committed_native: Uint128,

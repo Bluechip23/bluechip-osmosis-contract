@@ -457,11 +457,38 @@ pub fn execute_claim_failed_distribution(
         return Err(ContractError::PoolPausedLowLiquidity {});
     }
 
-    let owed = FAILED_MINTS
+    let mut owed = FAILED_MINTS
         .may_load(deps.storage, &info.sender)?
-        .ok_or_else(|| ContractError::NoFailedMintEntry {
-            user: info.sender.to_string(),
-        })?;
+        .unwrap_or_default();
+
+    // Post-drain ledger claim. A drain halts the bulk distribution loop
+    // forever (`ContinueDistribution` and both recovery paths reject
+    // `EMERGENCY_DRAINED`), so a committer whose COMMIT_LEDGER row had not
+    // been processed yet would otherwise have no way to receive an
+    // entitlement that was fixed at crossing. Convert the caller's own
+    // row here, using the exact per-row formula of the batch loop. The
+    // row is removed in the same tx, so the claim is one-shot and bounded
+    // by the ledger; if the mint fails, the reply handler re-credits the
+    // amount to FAILED_MINTS like any other failed distribution mint.
+    // Only reachable once drained: on a live pool the batch loop owns the
+    // ledger and its cursor.
+    if drained {
+        if let Some(paid) = COMMIT_LEDGER.may_load(deps.storage, &info.sender)? {
+            if let Some(mut dist_state) = DISTRIBUTION_STATE.may_load(deps.storage)? {
+                let reward = crate::commit::distribution_batch::calculate_committer_reward(
+                    paid,
+                    dist_state.total_to_distribute,
+                    dist_state.total_committed_native,
+                )?;
+                COMMIT_LEDGER.remove(deps.storage, &info.sender);
+                dist_state.distributed_so_far =
+                    dist_state.distributed_so_far.checked_add(reward)?;
+                DISTRIBUTION_STATE.save(deps.storage, &dist_state)?;
+                owed = owed.checked_add(reward)?;
+            }
+        }
+    }
+
     if owed.is_zero() {
         // Defensive: persisted zero would be a state-corruption shape;
         // treat it as absent.
