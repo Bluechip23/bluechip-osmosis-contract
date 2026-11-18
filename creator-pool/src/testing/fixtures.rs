@@ -56,6 +56,14 @@ pub fn mock_dependencies_with_balance(
 pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(
     deps: &mut OwnedDeps<MockStorage, MockApi, Q>,
 ) {
+    // Mirror instantiate: every real pool carries its cw2 record, which
+    // `migrate` now requires.
+    cw2::set_contract_version(
+        &mut deps.storage,
+        "bluechip-osmosis-creator-pool",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .unwrap();
     let pool_info = PoolInfo {
         pool_id: 1u64,
         pool_info: PoolDetails {

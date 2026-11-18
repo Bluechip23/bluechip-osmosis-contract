@@ -133,6 +133,18 @@ pub enum ContractError {
     #[error("Pool has been permanently drained via emergency withdrawal")]
     EmergencyDrained {},
 
+    #[error(
+        "An emergency withdraw is armed; the pool stays paused until it is drained or \
+         cancelled via CancelEmergencyWithdraw"
+    )]
+    EmergencyWithdrawPending {},
+
+    #[error(
+        "Armed emergency withdraw expired at {expires_at}; cancel it and initiate again to \
+         restart the notice period"
+    )]
+    EmergencyWithdrawExpired { expires_at: Timestamp },
+
     #[error("Emergency withdraw timelock not yet elapsed. Executable after: {effective_after}")]
     EmergencyTimelockPending { effective_after: Timestamp },
 

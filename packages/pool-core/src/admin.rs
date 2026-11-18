@@ -13,7 +13,8 @@ use crate::error::ContractError;
 use crate::msg::PoolConfigUpdate;
 use crate::state::{
     EmergencyWithdrawalInfo, COMMITFEEINFO, EMERGENCY_DRAINED, EMERGENCY_WITHDRAWAL,
-    PAUSED_BEFORE_EMERGENCY, PENDING_EMERGENCY_WITHDRAW, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO, POOL_SPECS,
+    EMERGENCY_WITHDRAW_EXECUTION_WINDOW_SECONDS, PAUSED_BEFORE_EMERGENCY,
+    PENDING_EMERGENCY_WITHDRAW, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO, POOL_SPECS,
 };
 use cosmwasm_std::{
     Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, Env, MessageInfo, Response, StdError, Storage,
@@ -70,6 +71,14 @@ pub fn execute_unpause(
         return Err(ContractError::Unauthorized {});
     }
     let pool_contract = pool_info.pool_info.contract_addr.to_string();
+    // A drained pool is terminal and stays paused.
+    ensure_not_drained(deps.storage)?;
+    // An armed emergency withdraw keeps the pool paused for its whole
+    // window. Unpausing here would leave a drain armed on a live, trading
+    // pool; the only way back to trading is CancelEmergencyWithdraw.
+    if PENDING_EMERGENCY_WITHDRAW.may_load(deps.storage)?.is_some() {
+        return Err(ContractError::EmergencyWithdrawPending {});
+    }
     POOL_PAUSED.save(deps.storage, &false)?;
     POOL_PAUSED_AUTO.save(deps.storage, &false)?;
     Ok(Response::new()
@@ -167,6 +176,13 @@ pub fn execute_emergency_withdraw_core_drain(
 
     if env.block.time < effective_after {
         return Err(ContractError::EmergencyTimelockPending { effective_after });
+    }
+    // An armed withdraw does not stay executable forever: past the window
+    // it must be cancelled and re-initiated, which restarts the public
+    // notice period.
+    let expires_at = effective_after.plus_seconds(EMERGENCY_WITHDRAW_EXECUTION_WINDOW_SECONDS);
+    if env.block.time > expires_at {
+        return Err(ContractError::EmergencyWithdrawExpired { expires_at });
     }
 
     PENDING_EMERGENCY_WITHDRAW.remove(deps.storage);

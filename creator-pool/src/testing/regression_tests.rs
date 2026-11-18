@@ -405,6 +405,23 @@ fn test_continue_distribution_completes_in_one_tx_when_final() {
 }
 
 #[test]
+fn test_migrate_rejects_foreign_or_missing_contract_name() {
+    let msg = || MigrateMsg::UpdateVersion {};
+
+    // Another contract's storage.
+    let mut deps = mock_dependencies();
+    setup_pool_post_threshold(&mut deps);
+    cw2::set_contract_version(&mut deps.storage, "some-other-contract", "0.1.0").unwrap();
+    let err = migrate(deps.as_mut(), mock_env(), msg()).unwrap_err();
+    assert!(err.to_string().contains("contract name mismatch"), "{err}");
+
+    // No cw2 record at all.
+    let mut deps = mock_dependencies();
+    let err = migrate(deps.as_mut(), mock_env(), msg()).unwrap_err();
+    assert!(err.to_string().contains("no readable cw2"), "{err}");
+}
+
+#[test]
 fn test_migrate_rejects_excessive_fees() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);

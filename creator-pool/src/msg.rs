@@ -195,6 +195,21 @@ pub enum QueryMsg {
     // third-party LP lives on the native pool, not in this contract.
     #[returns(NativePoolIdResponse)]
     NativePoolId {},
+    // Emergency-withdraw status: whether a drain is armed (and when it
+    // becomes executable / expires) and whether the pool has been drained.
+    #[returns(EmergencyWithdrawStatusResponse)]
+    EmergencyWithdrawStatus {},
+}
+
+#[cw_serde]
+pub struct EmergencyWithdrawStatusResponse {
+    /// Set while a withdraw is armed: the drain is executable from this time.
+    pub pending_effective_after: Option<Timestamp>,
+    /// Set while a withdraw is armed: after this time the armed withdraw can
+    /// no longer be executed and must be cancelled and re-initiated.
+    pub pending_expires_at: Option<Timestamp>,
+    /// True once the pool has been drained (terminal).
+    pub drained: bool,
 }
 
 #[cw_serde]

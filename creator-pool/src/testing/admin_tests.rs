@@ -363,6 +363,106 @@ fn test_cancel_emergency_withdraw_keeps_a_prior_admin_pause() {
 }
 
 #[test]
+fn test_armed_emergency_withdraw_blocks_unpause_expires_and_is_queryable() {
+    use crate::msg::{EmergencyWithdrawStatusResponse, QueryMsg};
+    use cosmwasm_std::from_json;
+
+    let mut deps = mock_dependencies();
+    let msg = mock_instantiate_msg();
+    let info = message_info(&Addr::unchecked("factory_addr"), &[]);
+    let env = mock_env();
+    instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+    crate::state::IS_THRESHOLD_HIT
+        .save(&mut deps.storage, &true)
+        .unwrap();
+    install_factory_emergency_delay_mock(&mut deps, "factory_addr");
+
+    let status = |deps: &cosmwasm_std::OwnedDeps<_, _, _>| -> EmergencyWithdrawStatusResponse {
+        from_json(
+            crate::query::query(deps.as_ref(), mock_env(), QueryMsg::EmergencyWithdrawStatus {})
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert!(status(&deps).pending_effective_after.is_none());
+
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        info.clone(),
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+
+    // The armed withdraw is visible, with its executable-from and expiry times.
+    let st = status(&deps);
+    let effective_after = st.pending_effective_after.expect("armed");
+    let expires_at = st.pending_expires_at.expect("armed");
+    assert_eq!(
+        expires_at,
+        effective_after.plus_seconds(pool_core::state::EMERGENCY_WITHDRAW_EXECUTION_WINDOW_SECONDS)
+    );
+    assert!(!st.drained);
+
+    // Unpause cannot reopen a pool with a drain armed.
+    let err = execute(deps.as_mut(), env.clone(), info.clone(), ExecuteMsg::Unpause {})
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::ContractError::EmergencyWithdrawPending {}
+    ));
+    assert!(POOL_PAUSED.load(&deps.storage).unwrap());
+
+    // Past the execution window the armed withdraw can no longer drain.
+    let mut late = env.clone();
+    late.block.time = expires_at.plus_seconds(1);
+    let err = execute(
+        deps.as_mut(),
+        late.clone(),
+        info.clone(),
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::ContractError::EmergencyWithdrawExpired { .. }
+    ));
+    assert!(!status(&deps).drained);
+
+    // Cancel + re-initiate restarts the notice period; draining inside the
+    // new window works, and the drained pool can never be unpaused.
+    execute(
+        deps.as_mut(),
+        late.clone(),
+        info.clone(),
+        ExecuteMsg::CancelEmergencyWithdraw {},
+    )
+    .unwrap();
+    execute(
+        deps.as_mut(),
+        late.clone(),
+        info.clone(),
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+    let mut drain_env = late.clone();
+    drain_env.block.time = status(&deps).pending_effective_after.unwrap();
+    execute(
+        deps.as_mut(),
+        drain_env.clone(),
+        info.clone(),
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+    assert!(status(&deps).drained);
+    let err = execute(deps.as_mut(), drain_env, info, ExecuteMsg::Unpause {}).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::ContractError::EmergencyDrained {}
+    ));
+}
+
+#[test]
 fn test_update_config_all() {
     let mut deps = mock_dependencies();
     let msg = mock_instantiate_msg();

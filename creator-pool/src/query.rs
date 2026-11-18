@@ -88,6 +88,18 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::Analytics {} => to_json_binary(&query_analytics(deps)?),
 
         QueryMsg::NativePoolId {} => to_json_binary(&query_native_pool_id(deps)?),
+        QueryMsg::EmergencyWithdrawStatus {} => {
+            let pending = crate::state::PENDING_EMERGENCY_WITHDRAW.may_load(deps.storage)?;
+            to_json_binary(&crate::msg::EmergencyWithdrawStatusResponse {
+                pending_effective_after: pending,
+                pending_expires_at: pending.map(|t| {
+                    t.plus_seconds(crate::state::EMERGENCY_WITHDRAW_EXECUTION_WINDOW_SECONDS)
+                }),
+                drained: crate::state::EMERGENCY_DRAINED
+                    .may_load(deps.storage)?
+                    .unwrap_or(false),
+            })
+        }
     }
 }
 
