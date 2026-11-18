@@ -104,7 +104,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
 }
 
 /// The native GAMM pool id (and its `gamm/pool/{id}` LP-share denom) seeded
-/// at threshold crossing, or `None` pre-threshold. Read-only; lets frontends
+/// after the distribution, or `None` until then. Read-only; lets frontends
 /// route users' own MsgJoinPool / MsgExitPool at the native pool.
 pub fn query_native_pool_id(deps: Deps) -> StdResult<crate::msg::NativePoolIdResponse> {
     let pool_id = crate::state::POOL_ID.may_load(deps.storage)?;

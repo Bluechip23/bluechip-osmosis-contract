@@ -186,9 +186,9 @@ pub enum QueryMsg {
     // call to render an earnings panel.
     #[returns(CreatorEarningsResponse)]
     CreatorEarnings {},
-    // The native Osmosis GAMM pool id this contract seeded at threshold
-    // crossing (learned from the MsgCreateBalancerPool reply). `None`
-    // pre-threshold. Frontends use this to route users' own liquidity
+    // The native Osmosis GAMM pool id this contract seeded after the
+    // distribution (learned from the MsgCreateBalancerPool reply). `None`
+    // until then. Frontends use this to route users' own liquidity
     // add/remove (MsgJoinPool / MsgExitPool) at the native pool and to
     // resolve the LP-share denom `gamm/pool/{id}` for balance display —
     // third-party LP lives on the native pool, not in this contract.
@@ -317,7 +317,7 @@ pub struct PoolInstantiateMsg {
     /// factory from its `gamm_pool_creation_fee.amount` config. Pinned at
     /// instantiate into `CREATION_FEE_RESERVE_TARGET`; the pool retains this
     /// much bluechip out of the protocol's 1% commit fee to cover the fee the
-    /// `x/gamm` module auto-charges at threshold-crossing. Zero disables the
+    /// `x/gamm` module charges when the pool is created. Zero disables the
     /// reserve (gamm fee waived). `#[serde(default)]` keeps pre-this-field
     /// factory create messages deserializing with a zero (disabled) reserve.
     #[serde(default)]

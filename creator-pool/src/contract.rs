@@ -186,7 +186,7 @@ pub fn instantiate(
     // Pin the gamm creation-fee reserve target from the factory-
     // supplied amount and start the running reserve at zero. The pool retains
     // bluechip out of the protocol's 1% commit fee up to this target so the
-    // fee the gamm module auto-charges at threshold-crossing is paid from
+    // fee the gamm module charges when the pool is created is paid from
     // protocol revenue, not the creator or the AMM seed. Zero = fee waived.
     crate::state::CREATION_FEE_RESERVE_TARGET
         .save(deps.storage, &msg.gamm_pool_creation_fee_amount)?;

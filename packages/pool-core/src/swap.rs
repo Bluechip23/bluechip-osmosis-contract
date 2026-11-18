@@ -223,10 +223,10 @@ pub fn compute_token_out_min<C: CustomQuery>(
 
 /// Native relative circuit breaker — a PER-TRANSACTION revert.
 ///
-/// Queries the LIVE per-side liquidity of the native GAMM pool (`pool_id`)
-/// via the poolmanager `total_pool_liquidity` query and compares each side
-/// against the amount seeded at threshold-crossing ([`SEED_LIQUIDITY`]). If
-/// EITHER side has fallen below [`BREAKER_FLOOR_PERCENT`]% of its seeded
+/// Queries the LIVE liquidity of the native GAMM pool (`pool_id`) via the
+/// poolmanager `total_pool_liquidity` query and compares the OSMO side
+/// against the amount seeded when the pool opened ([`SEED_LIQUIDITY`]). If
+/// that side has fallen below [`BREAKER_FLOOR_PERCENT`]% of its seeded
 /// amount, this returns `Err(LiquidityBelowSeedFloor)` and the calling
 /// swap / post-threshold commit reverts. Relative-to-seed (not absolute) so
 /// the floor scales with each pool's own raise size.

@@ -98,7 +98,7 @@ pub struct ExpectedFactory {
 #[cw_serde]
 pub struct PoolSpecs {
     /// LP fee. Reused as the native GAMM pool's `swap_fee` when the pool
-    /// is seeded at threshold-crossing (`create_balancer_pool_msg`).
+    /// is created after the distribution (`create_balancer_pool_msg`).
     pub lp_fee: Decimal,
     pub min_commit_interval: u64,
 }
@@ -157,7 +157,7 @@ pub const POOL_INFO: Item<PoolInfo> = Item::new("pool_info");
 /// Mutable pool state (just the pool's own address, post Phase-2).
 pub const POOL_STATE: Item<PoolState> = Item::new("pool_state");
 /// The native Osmosis GAMM pool id, learned from the
-/// `MsgCreateBalancerPool` reply at threshold-crossing. Unset until then.
+/// `MsgCreateBalancerPool` reply after the distribution. Unset until then.
 pub const POOL_ID: Item<u64> = Item::new("gamm_pool_id");
 /// Tunable pool parameters (lp_fee used as the gamm swap_fee, min_commit_interval).
 pub const POOL_SPECS: Item<PoolSpecs> = Item::new("pool_specs");

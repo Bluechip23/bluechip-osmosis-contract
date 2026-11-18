@@ -30,7 +30,7 @@ pub enum ContractError {
     PoolPausedLowLiquidity {},
     /// Per-transaction circuit-breaker revert: the live native pool's
     /// `{side}` reserve is below `BREAKER_FLOOR_PERCENT`% of what was seeded
-    /// at threshold crossing. Nothing is latched — the next swap re-evaluates
+    /// when the pool opened. Nothing is latched — the next swap re-evaluates
     /// the live pool on its own.
     #[error(
         "Native pool liquidity below the circuit-breaker floor: {side} side is {current}, \

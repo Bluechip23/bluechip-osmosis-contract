@@ -4,8 +4,8 @@
 //! (third-party LP lives on the native pool, not in this contract).
 //!
 //! The release transfers the RAW earmarked coins — `bluechip_amount`
-//! (bluechip denom) + `token_amount` (creator denom) — that were parked in
-//! the contract's bank balance at threshold crossing, straight to the
+//! (bluechip denom) + `token_amount` (creator denom) — that are parked in
+//! the contract's bank balance once the pool is seeded, straight to the
 //! creator. There is no LP-share query/proportion anymore.
 
 use crate::asset::get_native_denom;
@@ -72,7 +72,7 @@ fn execute_claim_creator_excess_inner(
 
     // Send the RAW earmarked coins to the creator. The contract holds both
     // (excess bluechip from commits + excess creator tokens minted-but-not-
-    // seeded at crossing), so this spends the contract's own bank balance.
+    // seeded when the pool opened), so this spends its own bank balance.
     let mut coins: Vec<Coin> = vec![];
     if !excess_position.bluechip_amount.is_zero() {
         coins.push(Coin {
