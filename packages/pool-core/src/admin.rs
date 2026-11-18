@@ -13,6 +13,7 @@ use crate::error::ContractError;
 use crate::msg::PoolConfigUpdate;
 use crate::state::{
     EmergencyWithdrawalInfo, COMMITFEEINFO, EMERGENCY_DRAINED, EMERGENCY_WITHDRAWAL,
+    EMERGENCY_WITHDRAW_EXECUTION_WINDOW_SECONDS, PAUSED_BEFORE_EMERGENCY,
     PENDING_EMERGENCY_WITHDRAW, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO, POOL_SPECS,
 };
 use cosmwasm_std::{
@@ -70,6 +71,14 @@ pub fn execute_unpause(
         return Err(ContractError::Unauthorized {});
     }
     let pool_contract = pool_info.pool_info.contract_addr.to_string();
+    // A drained pool is terminal and stays paused.
+    ensure_not_drained(deps.storage)?;
+    // An armed emergency withdraw keeps the pool paused for its whole
+    // window. Unpausing here would leave a drain armed on a live, trading
+    // pool; the only way back to trading is CancelEmergencyWithdraw.
+    if PENDING_EMERGENCY_WITHDRAW.may_load(deps.storage)?.is_some() {
+        return Err(ContractError::EmergencyWithdrawPending {});
+    }
     POOL_PAUSED.save(deps.storage, &false)?;
     POOL_PAUSED_AUTO.save(deps.storage, &false)?;
     Ok(Response::new()
@@ -102,6 +111,8 @@ pub fn execute_emergency_withdraw_initiate(
     }
 
     let now = env.block.time;
+    let was_paused = POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false);
+    PAUSED_BEFORE_EMERGENCY.save(deps.storage, &was_paused)?;
     POOL_PAUSED.save(deps.storage, &true)?;
     POOL_PAUSED_AUTO.save(deps.storage, &false)?;
     let delay: EmergencyWithdrawDelayResponse = deps.querier.query_wasm_smart(
@@ -165,6 +176,13 @@ pub fn execute_emergency_withdraw_core_drain(
 
     if env.block.time < effective_after {
         return Err(ContractError::EmergencyTimelockPending { effective_after });
+    }
+    // An armed withdraw does not stay executable forever: past the window
+    // it must be cancelled and re-initiated, which restarts the public
+    // notice period.
+    let expires_at = effective_after.plus_seconds(EMERGENCY_WITHDRAW_EXECUTION_WINDOW_SECONDS);
+    if env.block.time > expires_at {
+        return Err(ContractError::EmergencyWithdrawExpired { expires_at });
     }
 
     PENDING_EMERGENCY_WITHDRAW.remove(deps.storage);
@@ -296,10 +314,18 @@ pub fn execute_cancel_emergency_withdraw(
         return Err(ContractError::NoPendingEmergencyWithdraw {});
     }
     PENDING_EMERGENCY_WITHDRAW.remove(deps.storage);
-    POOL_PAUSED.save(deps.storage, &false)?;
+    // Restore the pause state from before Phase 1 rather than force-unpausing:
+    // a pool that was already admin-paused stays paused until an explicit
+    // Unpause. Pools armed before this record existed fall back to unpaused.
+    let was_paused = PAUSED_BEFORE_EMERGENCY
+        .may_load(deps.storage)?
+        .unwrap_or(false);
+    PAUSED_BEFORE_EMERGENCY.remove(deps.storage);
+    POOL_PAUSED.save(deps.storage, &was_paused)?;
     POOL_PAUSED_AUTO.save(deps.storage, &false)?;
     Ok(Response::new()
         .add_attribute("action", "emergency_withdraw_cancelled")
+        .add_attribute("pool_paused", was_paused.to_string())
         .add_attribute(
             "pool_contract",
             pool_info.pool_info.contract_addr.to_string(),

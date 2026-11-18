@@ -219,6 +219,11 @@ fn execute_commit_logic(
     // TWAP valuation — a pricing-pool outage then cannot block
     // trading-phase commits (pre-threshold commits stay fail-closed).
     let threshold_already_hit = IS_THRESHOLD_HIT.load(deps.storage)?;
+    if threshold_already_hit {
+        // A post-threshold commit is a buy through the native pool; it
+        // waits for the committer distribution like every routed swap.
+        distribution::ensure_distribution_complete(deps.storage)?;
+    }
     let commit_ctx = get_commit_context(
         deps.as_ref(),
         &pool_info.factory_addr,

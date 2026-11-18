@@ -294,6 +294,9 @@ pub fn execute(
             if !query_check_commit(deps.as_ref())? {
                 return Err(ContractError::ShortOfThreshold {});
             }
+            // A drained pool is terminal: no trading through this contract.
+            ensure_not_drained(deps.storage)?;
+            crate::commit::distribution::ensure_distribution_complete(deps.storage)?;
             offer_asset.confirm_sent_native_balance(&info)?;
             // A DIRECT SimpleSwap must carry an explicit `belief_price`.
             // The on-chain estimate floor is computed at current (possibly
@@ -581,8 +584,26 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
 
 #[entry_point]
 pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
+    // Refuse to migrate onto another contract's storage (or storage with
+    // no cw2 record at all): every pool instantiated from this code writes
+    // its cw2 name, so a missing or different name means this is not a
+    // creator-pool and its state must not be reinterpreted as one. Mirrors
+    // the factory's migrate guard.
+    let stored_version = cw2::get_contract_version(deps.storage).map_err(|e| {
+        ContractError::Std(StdError::generic_err(format!(
+            "migrate: no readable cw2 contract version ({e}); refusing to migrate"
+        )))
+    })?;
+    if stored_version.contract != CONTRACT_NAME {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "migrate: contract name mismatch — stored \"{}\", expected \"{}\"; \
+             refusing to migrate onto foreign storage",
+            stored_version.contract, CONTRACT_NAME
+        ))));
+    }
+
     // Reject downgrades.
-    if let Ok(stored_version) = cw2::get_contract_version(deps.storage) {
+    {
         let stored_semver: semver::Version =
             stored_version.version.parse().map_err(|e: semver::Error| {
                 ContractError::StoredVersionInvalid {

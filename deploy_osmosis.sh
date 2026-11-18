@@ -74,6 +74,17 @@ if [ "$CHAIN_ID" = "osmosis-1" ]; then
         echo "error: PRICING_POOL_ID is empty — point it at the deepest OSMO/USDC pool" >&2
         exit 1
     fi
+    # The seed cap is in OSMO base units. A cap below the commit threshold
+    # diverts the difference (and the matching share of pool tokens) to the
+    # creator as time-locked excess instead of seeding it as liquidity.
+    if [ "${MAX_BLUECHIP_LOCK_PER_POOL:-0}" -lt "${COMMIT_THRESHOLD_LIMIT_NATIVE:-0}" ] \
+        && [ "${ALLOW_CREATOR_EXCESS:-0}" != "1" ]; then
+        echo "error: MAX_BLUECHIP_LOCK_PER_POOL ($MAX_BLUECHIP_LOCK_PER_POOL) is below" >&2
+        echo "       COMMIT_THRESHOLD_LIMIT_NATIVE ($COMMIT_THRESHOLD_LIMIT_NATIVE): only part of" >&2
+        echo "       each raise would be seeded as liquidity, the rest going to the creator." >&2
+        echo "       Raise the cap to the threshold, or set ALLOW_CREATOR_EXCESS=1 if intended." >&2
+        exit 1
+    fi
     if [ "$FACTORY_WASM_FILE" != "factory.wasm" ]; then
         echo "error: refusing to deploy '$FACTORY_WASM_FILE' to mainnet — only the" >&2
         echo "       prod factory build (factory.wasm) may ship to a public chain" >&2

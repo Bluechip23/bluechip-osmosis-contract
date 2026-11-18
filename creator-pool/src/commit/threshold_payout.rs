@@ -1,20 +1,24 @@
 //! Threshold-crossing payout orchestration.
 //!
-//! Runs once per pool when a commit crosses the
-//! `commit_amount_for_threshold_native` target. It:
-//! - Mints the four creator-token splits (`creator_reward_amount` →
-//!   creator wallet, `bluechip_reward_amount` → bluechip wallet,
-//!   `pool_seed_amount` → the POOL CONTRACT, `commit_return_amount`
-//!   funds the post-threshold committer airdrop) via TokenFactory MsgMint.
-//! - Schedules the post-threshold distribution batch loop
-//!   (DISTRIBUTION_STATE), unchanged — it is independent of the pool.
-//! - **Seeds a NATIVE Osmosis GAMM balancer pool** with the raised
-//!   bluechip (capped at `max_bluechip_lock_per_pool`) and the pool-seed
-//!   creator tokens. The
-//!   `MsgCreateBalancerPool` rides back on the crossing Response as a
-//!   `SubMsg::reply_on_success(_, REPLY_ID_CREATE_POOL)`; the reply parses
-//!   the new `pool_id` and stores it. The pool holds the resulting
-//!   `gamm/pool/{id}` LP shares permanently.
+//! `trigger_threshold_payout` runs once per pool when a commit crosses the
+//! `commit_amount_for_threshold_native` target. It does NOT mint anything
+//! or create the native pool — both are deferred until every committer has
+//! been paid, so nobody can trade ahead of the airdrop. At crossing it:
+//! - Schedules the committer distribution batch loop (DISTRIBUTION_STATE).
+//! - Secures the GAMM creation-fee coin (swapping the retained native
+//!   reserve into it when the fee is non-native) so the swap stays atomic
+//!   with the crossing commit.
+//! - Records what will be seeded (`PENDING_POOL_SEED`): the raised
+//!   bluechip (capped at `max_bluechip_lock_per_pool`) and the matching
+//!   pool-seed creator tokens.
+//!
+//! `build_pool_seed` runs later, as the `ContinueDistribution` call that
+//! follows the final batch. It mints the creator / bluechip / pool-seed
+//! splits via TokenFactory MsgMint and creates the NATIVE Osmosis GAMM
+//! balancer pool as a `SubMsg::reply_on_success(_, REPLY_ID_CREATE_POOL)`;
+//! the reply parses the new `pool_id` and stores it. The pool contract
+//! holds the resulting `gamm/pool/{id}` LP shares.
+//!
 //! - When the raised bluechip exceeds the cap, records a time-locked
 //!   creator entitlement to the RAW excess coins — the over-cap bluechip
 //!   and the proportional creator tokens (`CREATOR_EXCESS_POSITION`),
@@ -129,17 +133,8 @@ pub fn validate_pool_threshold_payments(
 #[derive(Debug)]
 pub struct ThresholdPayoutMsgs {
     pub factory_notify: SubMsg,
-    pub create_pool: SubMsg,
-    pub other_msgs: Vec<CosmosMsg>,
-    /// Bank-send of any creation-fee reserve LEFTOVER
-    /// (`reserved - creation_fee`) back to the bluechip wallet. `Some` only
-    /// when the retained reserve exceeded the actual gamm creation fee (the
-    /// common case, since the reserve fills to the target during funding).
-    /// The caller MUST emit this AFTER `create_pool` so the gamm module has
-    /// already charged the fee from the pool's OSMO balance; remitting the
-    /// surplus earlier would still be arithmetically safe (only the strict
-    /// surplus is remitted) but sequencing it post-creation keeps the intent
-    /// obvious and leaves the full reserve available during pool creation.
+    /// Bank-send of any creation-fee reserve LEFTOVER back to the bluechip
+    /// wallet. Emitted after `fee_swap`.
     pub reserve_remit: Option<CosmosMsg>,
     /// Cross-denom fee acquisition — `Some` only when the chain's live
     /// pool-creation fee is denominated in a NON-native denom (osmosis-1:
@@ -208,7 +203,6 @@ pub fn trigger_threshold_payout(
         crate::state::REPLY_ID_FACTORY_NOTIFY_INITIAL,
     );
 
-    let mut other_msgs: Vec<CosmosMsg> = Vec::new();
 
     // Runtime sanity check that the four payout components add up.
     let total = payout
@@ -221,29 +215,11 @@ pub fn trigger_threshold_payout(
         return Err(ContractError::ThresholdPayoutCorruption);
     }
 
-    // Mint the three up-front splits (the commit-return split is minted
-    // per-committer during distribution, from the pool as denom admin).
-    other_msgs.push(mint_tokens(
-        &pool_info.pool_info.contract_addr,
-        &pool_info.token_denom,
-        &fee_info.creator_wallet_address,
-        payout.creator_reward_amount,
-    ));
-    other_msgs.push(mint_tokens(
-        &pool_info.pool_info.contract_addr,
-        &pool_info.token_denom,
-        bluechip_wallet,
-        payout.bluechip_reward_amount,
-    ));
-    // pool_seed_amount is minted to the POOL CONTRACT so it holds the
-    // creator side when MsgCreateBalancerPool executes.
-    other_msgs.push(mint_tokens(
-        &pool_info.pool_info.contract_addr,
-        &pool_info.token_denom,
-        &env.contract.address,
-        payout.pool_seed_amount,
-    ));
-
+    // NO tokens are minted here. The creator / protocol / pool-seed splits
+    // are minted by `build_pool_seed`, in the transaction that creates the
+    // native pool, after the committer distribution has finished — so
+    // nobody holds tradable supply ahead of the committers. The
+    // commit-return split is minted per-committer during distribution.
     // Post-threshold committer distribution setup (unchanged — independent
     // of the pool venue). Distinct-committer count is read O(1) from the
     // incrementally-maintained `COMMITTER_COUNT` rather than the
@@ -502,32 +478,20 @@ pub fn trigger_threshold_payout(
         });
     }
 
-    // Snapshot the per-side liquidity ACTUALLY seeded (post the shortfall
-    // adjustment above) as the breaker's reference point. A later swap trips
-    // the breaker if either live side falls below BREAKER_FLOOR_PERCENT% of
-    // the amount recorded here.
+    // Record what the deferred pool creation will seed. The native pool is
+    // NOT created in this transaction: `build_pool_seed` creates it once the
+    // committer ledger is empty. The fee coin for that later
+    // `MsgCreateBalancerPool` is already secured here — bought by `fee_swap`
+    // below for a non-native fee, or sitting in the retained native reserve.
     crate::state::SEED_LIQUIDITY.save(storage, &(seed_osmo, seed_creator))?;
-
-    // Build the MsgCreateBalancerPool SubMsg. asset_infos[0] is the
-    // bluechip Native side, [1] the creator TokenFactory side.
-    let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
-    let coin_osmo = Coin {
-        denom: bluechip_denom,
-        amount: seed_osmo,
-    };
-    let coin_creator = Coin {
-        denom: pool_info.token_denom.clone(),
-        amount: seed_creator,
-    };
-    let create_pool = SubMsg::reply_on_success(
-        create_balancer_pool_msg(
-            &pool_info.pool_info.contract_addr,
-            &coin_osmo,
-            &coin_creator,
-            lp_fee,
-        ),
-        REPLY_ID_CREATE_POOL,
-    );
+    crate::state::PENDING_POOL_SEED.save(
+        storage,
+        &crate::state::PendingPoolSeed {
+            seed_osmo,
+            seed_creator,
+            fee_coin_held: fee_coin.clone(),
+        },
+    )?;
 
     // Remit any creation-fee reserve LEFTOVER back to the bluechip
     // wallet. After the gamm module charges `creation_fee`, the retained
@@ -562,13 +526,129 @@ pub fn trigger_threshold_payout(
     IS_THRESHOLD_HIT.save(storage, &true)?;
     crate::state::THRESHOLD_CROSSED_AT.save(storage, &env.block.time)?;
 
+    let _ = (lp_fee, bluechip_wallet);
     Ok(ThresholdPayoutMsgs {
         factory_notify,
-        create_pool,
-        other_msgs,
         reserve_remit,
         fee_swap,
     })
+}
+
+/// Messages that open the pool once the committer distribution is done:
+/// the creator / protocol / pool-seed mints followed by the
+/// `MsgCreateBalancerPool` SubMsg (its reply stores `POOL_ID`).
+///
+/// Everything is atomic: if the create fails the mints revert with it and
+/// `PENDING_POOL_SEED` stays in place for a retry.
+///
+/// The creation fee was secured at crossing, but the chain's LIVE fee is
+/// re-read here because it is what `x/gamm` will actually charge:
+/// - native fee larger than the amount held → the difference comes out of
+///   the OSMO seed (same rule the crossing applies);
+/// - non-native fee the contract does not hold enough of (the fee was
+///   raised or re-denominated between crossing and seeding) → fail with an
+///   actionable error; anyone can bank-send the missing coins to this
+///   contract and retry.
+pub fn build_pool_seed(
+    storage: &mut dyn Storage,
+    querier: &QuerierWrapper,
+    env: &Env,
+    pool_info: &PoolInfo,
+    fee_info: &CommitFeeInfo,
+    payout: &ThresholdPayoutAmounts,
+    bluechip_wallet: &Addr,
+    lp_fee: Decimal,
+) -> Result<(Vec<CosmosMsg>, SubMsg), ContractError> {
+    let pending = crate::state::PENDING_POOL_SEED.load(storage)?;
+    let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
+
+    let live_fee: Option<Coin> = query_pool_creation_fee_coin(querier)
+        .or_else(|| pending.fee_coin_held.clone())
+        .filter(|c| !c.amount.is_zero());
+
+    let mut seed_osmo = pending.seed_osmo;
+    match &live_fee {
+        None => {}
+        Some(fee) if fee.denom == bluechip_denom => {
+            let held = pending
+                .fee_coin_held
+                .as_ref()
+                .filter(|c| c.denom == bluechip_denom)
+                .map(|c| c.amount)
+                .unwrap_or_default();
+            seed_osmo = seed_osmo.saturating_sub(fee.amount.saturating_sub(held));
+        }
+        Some(fee) => {
+            let held = querier
+                .query_balance(env.contract.address.clone(), fee.denom.clone())
+                .map(|c| c.amount)
+                .unwrap_or_default();
+            if held < fee.amount {
+                return Err(ContractError::InvalidThresholdParams {
+                    msg: format!(
+                        "the pool-creation fee is now {}{} but this contract holds only {}; \
+                         send the missing {} to {} and call ContinueDistribution again",
+                        fee.amount,
+                        fee.denom,
+                        held,
+                        fee.denom,
+                        env.contract.address
+                    ),
+                });
+            }
+        }
+    }
+    if seed_osmo.is_zero() {
+        return Err(ContractError::InvalidThresholdParams {
+            msg: "pool-creation fee meets or exceeds the OSMO seed".to_string(),
+        });
+    }
+
+    let pool_addr = &pool_info.pool_info.contract_addr;
+    let mints = vec![
+        mint_tokens(
+            pool_addr,
+            &pool_info.token_denom,
+            &fee_info.creator_wallet_address,
+            payout.creator_reward_amount,
+        ),
+        mint_tokens(
+            pool_addr,
+            &pool_info.token_denom,
+            bluechip_wallet,
+            payout.bluechip_reward_amount,
+        ),
+        // Minted to the pool contract in full; only `seed_creator` goes
+        // into the pool, any remainder is the creator's earmarked excess.
+        mint_tokens(
+            pool_addr,
+            &pool_info.token_denom,
+            &env.contract.address,
+            payout.pool_seed_amount,
+        ),
+    ];
+
+    // Breaker reference = what is ACTUALLY seeded.
+    crate::state::SEED_LIQUIDITY.save(storage, &(seed_osmo, pending.seed_creator))?;
+
+    let create_pool = SubMsg::reply_on_success(
+        create_balancer_pool_msg(
+            pool_addr,
+            &Coin {
+                denom: bluechip_denom,
+                amount: seed_osmo,
+            },
+            &Coin {
+                denom: pool_info.token_denom.clone(),
+                amount: pending.seed_creator,
+            },
+            lp_fee,
+        ),
+        REPLY_ID_CREATE_POOL,
+    );
+
+    crate::state::PENDING_POOL_SEED.remove(storage);
+    Ok((mints, create_pool))
 }
 
 /// Build a TokenFactory `MsgMint` that mints `amount` of the creator

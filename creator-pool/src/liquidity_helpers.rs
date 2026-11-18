@@ -52,6 +52,24 @@ fn execute_claim_creator_excess_inner(
 
     // One-shot: remove the entitlement AFTER capturing its amounts (the
     // BankMsg::Send messages below carry the captured values).
+    // The earmarked creator tokens only exist once the pool has been
+    // seeded (they are part of the pool-seed mint). Before that the claim
+    // waits — unless the pool was drained first, in which case the seed
+    // mint will never happen and only the OSMO earmark is payable.
+    let mut excess_position = excess_position;
+    if crate::state::PENDING_POOL_SEED
+        .may_load(deps.storage)?
+        .is_some()
+    {
+        let drained = crate::state::EMERGENCY_DRAINED
+            .may_load(deps.storage)?
+            .unwrap_or(false);
+        if !drained {
+            return Err(ContractError::DistributionInProgress {});
+        }
+        excess_position.token_amount = cosmwasm_std::Uint128::zero();
+    }
+
     CREATOR_EXCESS_POSITION.remove(deps.storage);
 
     // Send the RAW earmarked coins to the creator. The contract holds both

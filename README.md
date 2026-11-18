@@ -3,8 +3,9 @@
 A decentralized subscription / creator-economy protocol built with CosmWasm
 for **Osmosis**. Creators launch a token by raising a fixed,
 **native-denominated** commit threshold in **OSMO**; when the threshold is
-crossed the protocol mints the token, seeds a **native Osmosis GAMM pool**,
-and airdrops the token to the people who funded it.
+crossed the protocol airdrops the token to the people who funded it and
+then seeds a **native Osmosis GAMM pool**, which opens for trading only once
+every funder has received their tokens.
 
 The protocol has **no in-house AMM, no CW20, no LP-position NFT, and no
 price oracle** — chain-native modules do the heavy lifting:
@@ -83,14 +84,16 @@ factory config is re-pointed. Post-threshold commits skip it. See
 
 ## Lifecycle
 
-A pool moves through three stages. The **only** user action available before
-the threshold is `Commit`; everything else is gated on `IS_THRESHOLD_HIT`.
+A pool moves through these stages. The **only** user action available before
+the threshold is `Commit`; trading opens only after every committer has been
+paid.
 
 ```
- Stage 0            Stage 1                Stage 2                 Stage 3
- CREATE     →       PRE-THRESHOLD    →     CROSSING (atomic)   →   POST-THRESHOLD
- factory.Create     Commit (funding)       mint + seed GAMM        Commit (buy) + SimpleSwap
-                    OSMO-valued ledger     + queue airdrop         + distribution
+ Stage 0        Stage 1              Stage 2               Stage 3                    Stage 4
+ CREATE    →    PRE-THRESHOLD   →    CROSSING (atomic) →   DISTRIBUTION          →    TRADING
+ factory.       Commit (funding)     queue airdrop,        pay committers in          Commit (buy)
+ Create         OSMO-valued ledger   secure GAMM fee       batches, then mint the     + SimpleSwap
+                                     (no mints, no pool)   rest + create GAMM pool
 ```
 
 ### Stage 0 — Create (factory, permissionless)
@@ -176,7 +179,9 @@ NATIVE_RAISED_FROM_COMMIT.update(..)?;                           // NET OSMO hel
 ```
 
 Commits are floored (min **115 OSMO** pre / **25 OSMO** post, admin-tunable
-per pool up to 25,000 OSMO) and rate-limited to **13s/wallet**.
+per pool up to 25,000 OSMO). Direct calls are spaced by a **13s per-wallet
+cooldown** — a spam throttle, not a trading control (see
+[Sandwich / MEV protection](#sandwich--mev-protection)).
 Pre-threshold, `SimpleSwap` and every claim/recover path reject — only
 `Commit` works.
 
@@ -194,33 +199,51 @@ if IS_THRESHOLD_HIT.may_load(storage)?.unwrap_or(false) {
 }
 ```
 
-It does five things:
+The crossing deliberately does **not** open trading. It mints nothing to the
+creator, the protocol or the pool, and it creates no native pool. Those
+happen in [Stage 3](#stage-3--distribution-then-the-pool-opens), after every
+committer has been paid, so nobody holds tradable supply — and there is no
+official pool to trade on — ahead of the people who funded the launch.
 
-**(1) Mint the four token splits** via TokenFactory `MsgMint` (pool is admin):
+The crossing does four things:
+
+**(1) Queue the committer airdrop** (`DISTRIBUTION_STATE`) — paid in batches
+(see [distribution](#batched-distribution)).
+
+**(2) Secure the GAMM creation fee.** On osmosis-1 the fee is charged in
+alloyed USDC, so the crossing swaps the retained OSMO reserve into exactly
+the fee coin and holds it for the later pool creation (see
+[how the pool is paid for](#how-the-liquidity-pool-is-paid-for)). Doing the
+swap here keeps it atomic with the crossing commit: if it cannot clear, the
+whole crossing reverts and can be retried.
+
+**(3) Fix what will be seeded** (`PENDING_POOL_SEED`): the OSMO and creator
+token amounts for the pool, and — if the pool's cap is below its net raise —
+the creator's time-locked excess (see
+[excess](#excess-liquidity-above-the-lock-cap)).
+
+**(4) Notify the factory** (`NotifyThresholdCrossed`, one-shot + idempotent).
+It's dispatched `reply_on_error` so a factory hiccup can't revert the
+crossing; a permissionless `RetryFactoryNotify` re-sends it.
+
+### Stage 3 — Distribution, then the pool opens
+
+`ContinueDistribution` (permissionless; the keeper calls it) mints each
+committer's share in batches. When the ledger is empty, **the next
+`ContinueDistribution` call opens the pool** in one atomic transaction:
 
 ```rust
-other_msgs.push(mint_tokens(pool, denom, &creator_wallet,  payout.creator_reward_amount));  // 325,000 → creator
-other_msgs.push(mint_tokens(pool, denom, bluechip_wallet,  payout.bluechip_reward_amount)); //  25,000 → protocol
-other_msgs.push(mint_tokens(pool, denom, &pool_contract,   payout.pool_seed_amount));       // 350,000 → pool (to seed)
-// payout.commit_return_amount (500,000) is minted per-committer during distribution.
-```
-
-**(2) Queue the committer airdrop** (`DISTRIBUTION_STATE`) — paid in batches
-later, not here (see [distribution](#batched-distribution)).
-
-**(3) Seed a native GAMM balancer pool** with the raised OSMO + the pool-seed
-tokens. Equal weights give a standard constant-product (`x·y=k`) curve:
-
-```rust
-// packages/pool-core/src/osmosis_msgs.rs
-const BALANCER_EQUAL_WEIGHT: &str = "1";        // equal weights = 50/50 constant product
-let create_pool = SubMsg::reply_on_success(
-    create_balancer_pool_msg(&pool_contract, &coin_osmo, &coin_creator, lp_fee),
+// creator-pool/src/commit/threshold_payout.rs — build_pool_seed
+mint_tokens(pool, denom, &creator_wallet, payout.creator_reward_amount);   // 325,000 → creator
+mint_tokens(pool, denom, bluechip_wallet, payout.bluechip_reward_amount);  //  25,000 → protocol
+mint_tokens(pool, denom, &pool_contract,  payout.pool_seed_amount);        // 350,000 → pool (to seed)
+SubMsg::reply_on_success(
+    create_balancer_pool_msg(&pool_contract, &coin_osmo, &coin_creator, lp_fee), // 50/50 constant product
     REPLY_ID_CREATE_POOL,
 );
 ```
 
-The reply records the new pool id so post-threshold swaps can route:
+The reply records the new pool id so swaps can route:
 
 ```rust
 // creator-pool/src/contract.rs — reply
@@ -230,18 +253,17 @@ REPLY_ID_CREATE_POOL => {
 }
 ```
 
-Because the create rides a `reply_on_success` SubMsg, **a failed GAMM
-creation reverts the whole crossing** — so if the pool ends up `FullyCommitted`,
-the native pool provably exists.
+If the GAMM creation fails, the three mints revert with it and the call can
+simply be retried. The live creation fee is re-read at this point because it
+is what the chain will actually charge: a larger OSMO-denominated fee comes
+out of the OSMO seed, and a non-native fee the contract no longer holds
+enough of (the chain raised or re-denominated it since the crossing) fails
+with an error naming the coin to send to the pool contract.
 
-**(4) Handle over-raise** — the OSMO above the cap is escrowed for the creator
-(see [excess](#excess-liquidity-above-the-lock-cap)).
+Until that call succeeds, `SimpleSwap` and post-threshold `Commit` revert
+with `DistributionInProgress`, and `{ "native_pool_id": {} }` returns `null`.
 
-**(5) Notify the factory** (`NotifyThresholdCrossed`, one-shot + idempotent).
-It's dispatched `reply_on_error` so a factory hiccup can't revert the
-crossing; a permissionless `RetryFactoryNotify` re-sends it.
-
-### Stage 3 — Post-threshold (active trading)
+### Stage 4 — Active trading
 
 - **`SimpleSwap`** routes through the native pool via `MsgSwapExactAmountIn`;
   the output is forwarded to the receiver in the reply.
@@ -249,7 +271,6 @@ crossing; a permissionless `RetryFactoryNotify` re-sends it.
   OSMO (after the same 1%+5% fees) is swapped for the creator token. These
   commits pass `include_fee_budget: false` to the factory, so a
   pricing-pool outage can never block trading-phase commits.
-- **`ContinueDistribution`** flushes the airdrop in batches.
 
 ```rust
 // creator-pool/src/commit/post_threshold.rs — the swap leg
@@ -266,8 +287,9 @@ top of it.
 
 ## Who owns the initial liquidity? (No one.)
 
-At crossing the pool contract creates the GAMM pool and receives its
-`gamm/pool/{id}` **LP shares into its own balance**. There is **no
+When the pool opens (after the distribution) the pool contract creates the
+GAMM pool and receives its `gamm/pool/{id}` **LP shares into its own
+balance**. There is **no
 liquidity-deposit or liquidity-withdraw entry point** on the creator pool —
 the execute surface is commit / swap / distribution / claims / admin, and
 nothing else:
@@ -278,12 +300,21 @@ SimpleSwap { .. }  Commit { .. }  ContinueDistribution {}  ClaimCreatorExcessLiq
 Pause {}  Unpause {}  EmergencyWithdraw {}  RecoverStuckStates { .. }  /* ... */
 ```
 
-So the seed liquidity is **permanently locked in the pool contract** and
-belongs to no user. It cannot be pulled, rugged, or transferred. The only
-path that ever moves it is the admin two-phase **emergency withdraw**, which
-sweeps the LP shares to the protocol wallet (a break-glass, timelocked
-control — not a normal LP exit). Trading fees accrue to the locked position;
-nobody can claim them out.
+So the seed liquidity is **held by the pool contract** and belongs to no
+user: no creator, committer or trader can withdraw it, and trading fees
+accrue to the held position. It is **not** burned or unconditionally
+permanent, and it should not be described that way. Two admin-controlled
+paths can move it:
+
+- the two-phase **emergency withdraw**, which after its delay sends the
+  contract's `gamm/pool/{id}` shares to the protocol wallet, where they are
+  ordinary redeemable LP shares; and
+- a **code migration** of the pool (via the factory's 48h upgrade flow) or of
+  the factory itself (via its chain-level migrate admin), which can replace
+  the code that enforces every rule above.
+
+See [who can do what, and how fast](#who-can-do-what-and-how-fast) for the
+exact authorities and delays.
 
 ---
 
@@ -331,7 +362,8 @@ pool's OSMO balance. On **osmosis-1 the fee is 20 alloyed USDC** — the pool
 holds no USDC, so the crossing first emits a `MsgSwapExactAmountOut` through
 the factory's pricing pool (which trades OSMO against the fee-quote denom by
 definition), converting the retained OSMO reserve into *exactly* the fee
-coin; exact-out leaves zero USDC dust. The swap's spend cap is the factory's
+coin, which the contract holds until the pool is created after the
+distribution; exact-out leaves zero USDC dust once the fee is charged. The swap's spend cap is the factory's
 [fee-route TWAP](#the-fee-route-twap-the-only-price-read) valuation plus a
 20% margin, **hard-clamped to the retained reserve**:
 
@@ -413,7 +445,11 @@ GROSS_NATIVE_COMMITTED.save(deps.storage, &commit_config.commit_amount_for_thres
 ## Excess liquidity above the lock cap
 
 `max_bluechip_lock_per_pool` caps how much of the raised OSMO is seeded into
-the GAMM pool, so a single AMM never has to absorb the full raise. Anything
+the GAMM pool. The cap is in **OSMO base units, not dollars**. The mainnet
+launch config sets it equal to the commit threshold, so the entire net raise
+is seeded alongside all 350,000 pool-allocation tokens and this excess path
+is not triggered; it only applies if the cap is configured below a pool's
+net raise. In that case, anything
 above the cap — plus the proportional creator tokens — is **time-locked to
 the creator**, not seeded and not lost:
 
@@ -489,6 +525,14 @@ rejected). The same registration also exempts the router from the per-address
 so all router users would otherwise share one rate-limit slot per pool.
 Direct callers keep the cooldown.
 
+Be precise about what the cooldown is: it applies only to a wallet calling
+this contract's `Commit` / `SimpleSwap` directly. It does **not** limit a
+swap sent through the router (one hop is enough), a trade made directly on
+the native Osmosis pool, or a user spreading calls across several wallets.
+It throttles accidental double-submits and cheap spam against this
+contract; it is not a limit on how often anyone can trade the token and
+must not be relied on as one.
+
 **Post-crossing circuit breaker.** Before any contract-routed swap or
 post-threshold commit, a relative liquidity breaker compares the live GAMM
 pool to what was seeded and **reverts that transaction** if either side is
@@ -498,6 +542,21 @@ normal tx failure, and the next transaction re-evaluates the live pool on its
 own. There is no auto-pause for the multisig to reset, and the committer
 distribution (`ContinueDistribution`) is never blocked by it. Only an explicit
 admin `Pause` halts the pool.
+
+What the breaker is **not**:
+
+- It checks reserves **before** the trade only. A trade that starts above
+  the floor may finish below it; the next contract-routed trade is the one
+  that gets refused.
+- It **fails open** if the liquidity query errors or no seed snapshot
+  exists; the trade's own minimum-out still applies.
+- It covers this contract's venue only. Trades, LP joins and LP exits made
+  **directly on the native Osmosis pool** never run it (or the admin pause).
+- It compares against the launch seed forever. One side falling to 25% of
+  its seed corresponds to roughly a 16x price move in **either** direction,
+  so a token that appreciates that far closes this contract's swap and
+  commit venue just as a collapse does, until reserves return or outside LPs
+  add depth. Native trading continues regardless.
 
 ```rust
 // packages/pool-core/src/swap.rs — Err(LiquidityBelowSeedFloor) reverts the
@@ -516,8 +575,11 @@ enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creator_den
   **live-probed** at factory instantiate and at every config propose/apply.
   Post-threshold commits skip the budget entirely, so a pricing-pool outage
   can never block trading.
-- **Reentrancy** — one shared `REENTRANCY_LOCK` wraps commit and swap;
-  checked/`Uint256` arithmetic throughout; `overflow-checks = true` in release.
+- **Arithmetic** — checked/`Uint256` arithmetic throughout;
+  `overflow-checks = true` in release. (A `REENTRANCY_LOCK` flag wraps commit
+  and swap, but it is released before the handler's messages dispatch, so
+  treat it as bookkeeping, not as a protection: the handlers only message
+  chain modules, which do not call back.)
 - **Strict fund handling** — `must_pay` on every commit/swap rejects
   multi-denom or wrong-amount attachments, so no stray coins are ever
   absorbed.
@@ -529,20 +591,20 @@ enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creator_den
   `ClaimFailedDistribution`) instead of reverting the batch. Stalls recover
   via admin (`RecoverPoolStuckStates`, 1h) or anyone
   (`SelfRecoverDistribution`, 7d).
-- **Rate limits & spam** — 13s per-wallet commit/swap cooldown (registered
-  router exempt); 5s per-caller `ContinueDistribution` cooldown; 1h/address
+- **Rate limits & spam** — 13s per-wallet cooldown on DIRECT commit/swap
+  calls only (router-routed swaps, native Osmosis trades and additional
+  wallets are not limited, so this is a spam throttle, not a trading
+  limit); 5s per-caller `ContinueDistribution` cooldown; 1h/address
   pool-creation limit + flat OSMO creation fee.
 - **Admin & governance** — every privileged factory entry point is
-  admin-gated; all config / pool-config / upgrade flows are **48h
-  propose→apply** with no early-apply and no silent overwrite of a pending
-  proposal; every pending change is publicly readable via the factory
-  `PendingChanges {}` query, and an apply **expires 7 days** after its
-  timelock elapses (re-propose required); `bluechip_denom` is **immutable**
-  on a live factory; two-phase emergency withdraw (config-set delay, 6h–7d
-  bounds, 24h default) routes to the protocol wallet; `migrate` refuses
-  semver downgrades and foreign storage (cw2 name mismatch). Put
-  admin/migration keys behind a multisig — mainnet deploys refuse to run
-  without one.
+  admin-gated. Config, pool-config, router-registration and pool-upgrade
+  changes are **48h propose→apply** with no early-apply and no silent
+  overwrite of a pending proposal; `bluechip_denom` is **immutable** on a
+  live factory; both contracts' `migrate` refuse semver downgrades and
+  foreign storage (cw2 name mismatch). **Not everything is behind 48h** —
+  pause, unpause and stuck-state recovery are immediate, and the emergency
+  drain runs on its own shorter delay. The full table is in
+  [who can do what, and how fast](#who-can-do-what-and-how-fast).
 - **Router** — every hop's pool is validated against the factory registry (and
   its declared pair against the pool's real sides) before funds move; a route
   through a pre-threshold pool is rejected up front.
@@ -585,19 +647,46 @@ the fee safely reverts rather than mis-budgeting:
 | Rounding | budget = **ceil**(fee × price) — never undershoots by a base unit |
 | Window | 600s trailing (`FEE_TWAP_WINDOW_SECONDS`) |
 
-**Why a TWAP is safe here.** The blast radius is the fee, not the raise. A
-manipulated TWAP either (a) under-budgets — the exact-out swap exceeds its
-`token_in_max`, the whole crossing reverts atomically, and it is retried
-later (liveness only, funds safe) — or (b) over-budgets — the pool side
-hard-clamps the swap's spend to its 1%-retention reserve
-(`BLUECHIP_FEE_RESERVED`), so the worst case spends protocol fee revenue,
-never committer or seed funds. Manipulating a 600s TWAP costs more than
-either outcome is worth.
+**What the TWAP can and cannot affect.** It never changes *how much* OSMO a
+pool needs: the threshold is a fixed native amount. It **can** affect
+*whether and when* a pool funds or crosses, because it fails closed:
 
-The factory sizes the budget against **max(configured fee, live
-x/poolmanager fee)** so config drift or a chain-governance fee change can
-never strand a crossing, and serves it via the same `CommitContext` query
-every commit already makes. Post-threshold commits pass
+- A TWAP query error, a zero/unparseable price, or a price above the
+  ceiling reverts every **pre-threshold commit** on every pool, including
+  the crossing commit, until the pricing pool recovers or the multisig
+  re-points the route (a 48h change).
+- An under-budgeted fee swap (spot far from the 600s TWAP, or too little
+  depth in the pricing pool) reverts the **crossing** atomically; it can be
+  retried later.
+- The pricing pool is therefore a liveness dependency for the funding
+  phase. Pick a deep one: a thin pool is cheap to push outside these bounds.
+
+**What a manipulated TWAP can spend.** For the cross-denom fee swap the
+pool hard-clamps the spend to its retained 1% fee reserve
+(`BLUECHIP_FEE_RESERVED`), so committer and seed funds are not reachable
+through that swap. The bound is the reserve, **not** "$20": the reserve
+grows toward the TWAP-sized budget, the price ceiling admits a budget of up
+to 20,000 OSMO for a 20-USDC fee, and the reserve can hold up to the
+protocol's whole 1% of the raise (5,000 OSMO at a 500,000 OSMO threshold)
+plus up to 1% of a crosser's excess. Unused reserve is remitted to the
+protocol wallet, not refunded to committers.
+
+**Fee changes on the chain.** The factory sizes the budget against
+**max(configured fee, live x/poolmanager fee)**, which absorbs ordinary
+drift in a supported fee. It does not make pools immune to every change:
+
+- A fee in a denom that is neither OSMO nor the configured quote denom makes
+  commits and crossings revert until the factory config is updated.
+- Only the **first** coin of the chain's fee list is read.
+- A fee charged in **OSMO itself** that exceeds the retained reserve is
+  covered by reducing the OSMO seeded into the pool — the one case where a
+  fee shortfall comes out of committer-funded liquidity.
+- If the chain removes its fee but the factory config still names one, a
+  crossing can still buy the configured coin and leave it unspent in the
+  pool contract.
+
+The budget is served via the same `CommitContext` query every commit
+already makes. Post-threshold commits pass
 `include_fee_budget: false` — they never fund a fee swap, so a pricing-pool
 outage cannot block trading. The route is live-probed at factory
 **instantiate** and at every config **propose/apply**, so a dead or
@@ -620,15 +709,18 @@ Integrators read the same context the pools use:
 
 ## Token economics
 
-Exactly **1,200,000** creator tokens (6-dec ⇒ `1_200_000_000_000` base units)
-are minted at crossing — the split is validated against canonical constants at
-config, instantiate, and runtime, so nothing else can ever be minted from the
-threshold payout:
+Each pool's supply is **1,200,000** creator tokens (6-dec ⇒
+`1_200_000_000_000` base units). **Nothing is minted at crossing.** The
+committers' **500,000 are minted first, in distribution batches**; the
+remaining **700,000** (creator, protocol, pool seed) are minted in the
+transaction that opens the pool, after the last batch. The split is validated against
+canonical constants at config, instantiate, and runtime, and the current
+code has no other mint path:
 
 | Recipient | Tokens | % | Notes |
 |---|---|---|---|
 | Committers | 500,000 | ~41.7% | pro-rata by OSMO committed; airdropped in batches |
-| Creator | 325,000 | ~27.1% | unlocked at crossing (not vested) |
+| Creator | 325,000 | ~27.1% | minted when the pool opens, after the committer distribution; not vested |
 | Protocol wallet | 25,000 | ~2.1% | live-resolved recipient |
 | Pool seed | 350,000 | ~29.2% | seeds the GAMM pool (owned by no user) |
 
@@ -644,6 +736,87 @@ division dust is settled to the creator on the final batch. Creator tokens are
 **not vested** and creators may commit to their own pools — weigh that when
 choosing pool parameters.
 
+### Where a 500,000 OSMO launch goes
+
+With the mainnet launch config (1% + 5% fees, seed cap = threshold) and
+evenly divisible commits:
+
+| Flow | Amount |
+|---|---|
+| Gross commits | 500,000 OSMO |
+| Protocol fee (1%), part of it retained to pay the GAMM creation fee | 5,000 OSMO |
+| Creator fee (5%), paid to the creator as each commit lands | 25,000 OSMO |
+| **Seeded into the native pool** | **470,000 OSMO + 350,000 tokens** |
+| Creator excess | none (the cap equals the threshold) |
+| Creator tokens, minted when the pool opens | 325,000 |
+| Protocol tokens, minted when the pool opens | 25,000 |
+| Committer tokens, minted in batches before the pool opens | 500,000 |
+
+Things a committer should know before funding:
+
+- **There is no refund path before the threshold.** A commit is final. If a
+  pool never reaches its threshold, or is paused, or the fee route stays
+  broken, earlier commits stay in the pool contract with no exit in the
+  current code. The 1% and 5% fees on each commit are paid out immediately
+  and are not recoverable either.
+- The creator's 325,000 tokens are not vested. They are minted in the same
+  transaction that opens the pool, after every committer has received
+  theirs, so creator and committers can first trade at the same moment.
+- An emergency drain between the crossing and the pool opening is terminal:
+  the pool is never created and the creator / protocol / pool-seed tokens
+  are never minted. Committers can still claim their airdrop.
+- If `max_bluechip_lock_per_pool` is ever configured **below** a pool's net
+  raise, the difference and a proportional share of the 350,000 pool tokens
+  go to the creator after the lock period instead of into liquidity (see
+  [Excess liquidity above the lock cap](#excess-liquidity-above-the-lock-cap)).
+  These values are snapshotted per pool at creation; check them for the
+  specific pool you are funding.
+
+---
+
+## Who can do what, and how fast
+
+`ADMIN_MULTISIG` is both the factory's in-contract admin and its chain-level
+(wasmd) migrate admin. Each pool's chain-level admin is the factory.
+
+| Action | Who | Delay | Notes |
+|---|---|---|---|
+| Pause / unpause a pool | factory admin | **none** | Unpause is refused while an emergency withdraw is armed, and on a drained pool |
+| Recover stuck pool state | factory admin | **none** | cursor/flag resets only; moves no funds |
+| Emergency withdraw — arm | factory admin | **none** | pauses the pool immediately; post-threshold pools only |
+| Emergency withdraw — drain | factory admin | **6h–7d after arming (24h default)** | must execute within 7 days of becoming executable, otherwise cancel and re-arm; sends the pool's LP shares and residual balances to the protocol wallet |
+| Emergency withdraw — cancel | factory admin | none | restores the pause state from before arming |
+| Factory config (fees, threshold, wallet, fee route, delays, pool code id) | factory admin | **48h**, apply within 7d | threshold/fees/caps apply to pools created afterwards; wallet and fee route apply to existing pools too |
+| Per-pool config (min commits, cooldown) | factory admin | **48h**, apply within 7d | |
+| Register router | factory admin | **48h**, apply within 7d | |
+| Upgrade pools to new code | factory admin | **48h** to start (within 7d) | later batches of a started upgrade have **no** expiry; paused pools are skipped until unpaused |
+| Router config (admin, factory) | router admin | **48h** | no apply expiry |
+| Migrate the **factory** itself | chain-level migrate admin (`ADMIN_MULTISIG`) | **none on-chain** | new factory code can change or remove every delay in this table |
+
+Reading this table honestly:
+
+- The 48h timelocks are enforced by the factory's own code. Whoever can
+  migrate the factory can replace that code, so the outer trust boundary is
+  the multisig (a 2-of-4 SDK multisig at launch), which is a signing
+  threshold and **not** a time delay.
+- The protocol wallet that receives fees and any emergency drain is
+  configured separately from the admin multisig; at launch it is the
+  deployer key. Check the live factory config for the current value.
+- A drain is terminal: the pool stays paused and closed to swaps. The
+  creator's time-locked excess (if any), already-failed distribution mints,
+  and any committer airdrop not yet distributed all remain claimable
+  afterwards (`ClaimCreatorExcessLiquidity`, `ClaimFailedDistribution`).
+- Pending changes: `{ "pending_changes": {} }` on the factory returns the
+  pending config, router and upgrade proposals plus the **first 100**
+  pending per-pool config updates (no pagination). An armed emergency
+  withdraw is read from the pool with `{ "emergency_withdraw_status": {} }`.
+  The router's pending config is only visible in its events/raw state.
+- Storing the creator-pool code with `Everybody` instantiate permission
+  means anyone can instantiate their own copy pointing at their own
+  "factory". Such instances are not in the official factory's registry and
+  the official router will not route through them, but they are real
+  contracts — verify a pool through the factory's `pool_by_address` query.
+
 ---
 
 ## Batched distribution
@@ -654,8 +827,34 @@ protocol keeper (`keepers/`, `npm run distribution-keeper`) — the protocol's
 `ContinueDistribution` until the ledger drains (≤40 recipients/tx,
 gas-adaptive, 5s per-caller cooldown). There is no keeper bounty.
 Termination is driven by ledger-emptiness, so no extra cleanup call is ever
-needed. Nothing fails closed if the keeper lags — distributions simply wait
-until someone (anyone) calls.
+needed.
+
+If a pool is emergency-drained before the distribution has finished, the
+batch loop never runs again, but nobody loses their airdrop: each remaining
+committer claims their own share with `ClaimFailedDistribution` (the same
+call that retries a failed mint).
+
+**Nothing can be traded until the distribution finishes.** While any
+committer is still waiting, no native pool exists, the creator and protocol
+hold no tokens, and `SimpleSwap` / post-threshold `Commit` (and router
+routes through the pool) revert with `DistributionInProgress`. When the
+ledger is empty, the next `ContinueDistribution` call mints the remaining
+splits and creates the pool; trading opens for everyone in that transaction.
+The distribution state stays visible (`is_distributing: true`, zero
+remaining) until that call succeeds, so the keeper and
+`scripts/continue_distribution.sh` need no special handling.
+
+If the keeper lags, the launch simply waits until someone (anyone) calls
+`ContinueDistribution`; a batch stalled for more than 24h needs the admin
+(`RecoverPoolStuckStates`, after 1h) or anyone (`SelfRecoverDistribution`,
+after 7d) to restart it first. The pool-opening call itself is not subject
+to the stall timeout.
+
+Committers who have already received tokens could in principle trade them
+between themselves or create their own pool before the official one opens;
+the contract cannot prevent transfers of a token someone holds. What it
+guarantees is that no official liquidity, creator supply or protocol supply
+exists until every committer has been paid.
 
 ```json
 { "continue_distribution": {} }
@@ -676,14 +875,16 @@ until someone (anyone) calls.
 // creator wallet, locked excess (+ claimable_now), is_threshold_hit, threshold_crossed_at
 
 { "distribution_state": {} }        // live airdrop cursor + is_stalled
+{ "emergency_withdraw_status": {} } // armed drain (executable-from / expires-at) + drained flag
 { "analytics": {} }                 // volume/commit/swap counters for indexers
 ```
 
 Factory: `{ "pools": { "start_after": null, "limit": 30 } }` pages the registry;
 `{ "pool_by_address": { "pool_addr": "osmo1..." } }` is the authoritative
 lookup the router uses; `{ "creator_token_info": { "pool_id": 1 } }` returns
-the denom + on-chain total supply; `{ "pending_changes": {} }` exposes every
-pending timelocked config / router / upgrade proposal.
+the denom + on-chain total supply; `{ "pending_changes": {} }` exposes the
+pending timelocked config / router / upgrade proposals and the first 100
+pending per-pool config updates.
 
 ---
 
@@ -692,19 +893,19 @@ pending timelocked config / router / upgrade proposal.
 | Parameter | Value | Where |
 |---|---|---|
 | Commit threshold | 500,000 OSMO (`500000000000`, 6-dec native base units; expected to be retuned over time via the 48h config flow — applies to pools created after the change) | factory config |
-| Total mint at crossing | 1,200,000 (325k/25k/350k/500k) | `THRESHOLD_PAYOUT_*_BASE_UNITS` |
+| Token supply per pool | 1,200,000 (500k committers minted in batches first; 325k creator / 25k protocol / 350k pool seed minted when the pool opens) | `THRESHOLD_PAYOUT_*_BASE_UNITS` |
 | Commit fees | 1% protocol + 5% creator | commits only |
 | GAMM swap fee (LP) | 0.3% default (0.1%–10% bounds) | `DEFAULT_LP_FEE` → pool `swap_fee` |
 | Min commit (pre / post) | 115 OSMO / 25 OSMO (ceiling 25,000 OSMO) | `DEFAULT_MIN_COMMIT_NATIVE_*` |
 | Circuit-breaker floor | 25% of seeded per-side | `BREAKER_FLOOR_PERCENT` |
-| Commit/swap rate limit | 13 s / wallet (registered router exempt) | `DEFAULT_SWAP_RATE_LIMIT_SECS` |
-| Max OSMO lock per pool | config (excess → creator escrow) | `max_bluechip_lock_per_pool` |
+| Commit/swap cooldown | 13 s / wallet on direct calls (router-routed and native trades not limited) | `DEFAULT_SWAP_RATE_LIMIT_SECS` |
+| Max OSMO lock per pool | config; mainnet sets it to the full threshold (500,000 OSMO) so the whole net raise is seeded and no creator excess arises | `max_bluechip_lock_per_pool` |
 | Creator excess lock | 7 days (config), then claim once | `CreatorExcessLiquidity.unlock_time` |
 | Fee-TWAP window | 600 s trailing | `FEE_TWAP_WINDOW_SECONDS` |
 | Fee-TWAP plausibility ceiling | 1,000 uosmo / fee base unit | `MAX_NATIVE_PER_FEE_UNIT` |
-| GAMM creation fee | live x/poolmanager param (osmosis-1: 20 alloyed USDC; swapped from the 1%-retention reserve at crossing, spend clamped to that reserve) | funded from the 1% reserve |
-| Admin timelock | 48 h (all propose→apply); apply expires 7 d after the timelock | `ADMIN_TIMELOCK_SECONDS` / `ADMIN_APPLY_WINDOW_SECONDS` |
-| Emergency-withdraw delay | 6 h – 7 d (24 h default) | factory config |
+| GAMM creation fee | live x/poolmanager param (osmosis-1: 20 alloyed USDC; swapped from the 1%-retention reserve at crossing and held until the pool opens, spend clamped to that reserve) | funded from the 1% reserve |
+| Admin timelock | 48 h on config / pool-config / router / upgrade proposals; apply expires 7 d after the timelock (upgrade continuation batches and router config do not expire). Pause, unpause and recovery are immediate | `ADMIN_TIMELOCK_SECONDS` / `ADMIN_APPLY_WINDOW_SECONDS` |
+| Emergency-withdraw delay | 6 h – 7 d (24 h default); the armed drain must execute within 7 d | factory config / `EMERGENCY_WITHDRAW_EXECUTION_WINDOW_SECONDS` |
 | Distribution batch | ≤40 / tx; admin recover 1h / public 7d | `MAX_DISTRIBUTIONS_PER_TX` |
 | Creator token decimals | 6 (enforced) | `validate_creator_token_info` |
 
@@ -714,7 +915,7 @@ pending timelocked config / router / upgrade proposal.
 
 Two layers, both runnable from this repo:
 
-**300 workspace unit/property tests** (mock chain): every fee split, gate,
+**308 workspace unit/property tests** (mock chain): every fee split, gate,
 recovery path, and the crossing-conservation property test
 (`creator-pool/src/testing/invariant_tests.rs`).
 
@@ -725,7 +926,7 @@ twap modules, not mocks. It covers:
 
 1. **Factory instantiate against a live TWAP route** — the fee-route probe
    accepts a working pricing pool and refuses a dead one.
-2. **Full lifecycle** — create → commit → cross → swap, with the real
+2. **Full lifecycle** — create → commit → cross → distribute → pool opens → swap, with the real
    `MsgCreateBalancerPool`, reply protobuf decode, and TokenFactory mints.
 3. **Mainnet-shape crossing** — the pool pays a 20-USDC creation fee by
    swapping its OSMO retention through a live pricing pool at crossing.
@@ -752,7 +953,7 @@ cargo fmt --all -- --check
 make optimize-all                           # deterministic wasm → artifacts/*.wasm
 ```
 
-Current suite: **creator-pool 160, factory 108, router 24, pool-core 8**
+Current suite: **creator-pool 168, factory 108, router 24, pool-core 8**
 (includes the crossing-conservation property test). Ship the factory **`prod`**
 optimizer build only (real 48h timelocks); the `integration_short_timing`
 build is for shell tests and is CI-guarded against shipping.
