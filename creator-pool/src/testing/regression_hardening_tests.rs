@@ -397,7 +397,7 @@ fn overshoot_crossing_refunds_exact_post_fee_excess_to_crosser() {
 // aren't executed here, but the message ORDER the contract emits is exactly
 // what determines on-chain sequencing, so this pins the invariant.
 #[test]
-fn crossing_dispatches_seed_mints_before_pool_creation_and_notify_last() {
+fn pool_creation_and_upfront_mints_are_deferred_until_distribution_completes() {
     let mut deps = mock_dependencies_with_balance(&[Coin {
         denom: "ubluechip".to_string(),
         amount: Uint128::new(100_000_000_000),
@@ -434,45 +434,211 @@ fn crossing_dispatches_seed_mints_before_pool_creation_and_notify_last() {
     )
     .unwrap();
 
-    let create_idx = res
+    // --- Crossing: NO pool, NO mints. ---
+    // The native pool and the creator / protocol / pool-seed mints are
+    // deferred until every committer has been paid, so nobody can trade
+    // ahead of the airdrop.
+    assert!(
+        res.messages.iter().all(|m| m.id != REPLY_ID_CREATE_POOL),
+        "crossing must not create the native pool"
+    );
+    assert!(
+        res.messages
+            .iter()
+            .all(|m| m.id != 0 || matches!(m.msg, CosmosMsg::Bank(_))),
+        "crossing must not mint (only fee sends / refund / remit are plain messages)"
+    );
+    assert!(res
+        .messages
+        .iter()
+        .any(|m| m.id == REPLY_ID_FACTORY_NOTIFY_INITIAL));
+    assert!(crate::state::PENDING_POOL_SEED
+        .may_load(&deps.storage)
+        .unwrap()
+        .is_some());
+
+    // --- Final distribution batch: pays committers, still no pool. ---
+    let batch = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&Addr::unchecked("keeper_a"), &[]),
+        ExecuteMsg::ContinueDistribution {},
+    )
+    .unwrap();
+    assert!(batch.messages.iter().all(|m| m.id != REPLY_ID_CREATE_POOL));
+    assert!(
+        crate::state::COMMIT_LEDGER
+            .keys(&deps.storage, None, None, cosmwasm_std::Order::Ascending)
+            .next()
+            .is_none(),
+        "single batch drains this ledger"
+    );
+    assert!(
+        crate::state::DISTRIBUTION_STATE
+            .may_load(&deps.storage)
+            .unwrap()
+            .is_some(),
+        "state stays until the pool is seeded so keepers keep calling"
+    );
+
+    // --- Next call: mints then creates the pool, in that order. ---
+    let seed = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&Addr::unchecked("keeper_b"), &[]),
+        ExecuteMsg::ContinueDistribution {},
+    )
+    .unwrap();
+    let create_idx = seed
         .messages
         .iter()
         .position(|m| m.id == REPLY_ID_CREATE_POOL)
-        .expect("crossing must emit the MsgCreateBalancerPool SubMsg");
-    let notify_idx = res
-        .messages
-        .iter()
-        .position(|m| m.id == REPLY_ID_FACTORY_NOTIFY_INITIAL)
-        .expect("crossing must emit the factory-notify SubMsg");
-
-    assert!(
-        notify_idx > create_idx,
-        "factory-notify (reply_on_error) must be dispatched AFTER pool creation, got notify@{notify_idx} create@{create_idx}"
+        .expect("seeding call must emit the MsgCreateBalancerPool SubMsg");
+    assert_eq!(
+        create_idx, 3,
+        "the three split mints (creator, protocol, pool seed) must precede pool creation"
     );
+    assert!(seed.messages[..create_idx]
+        .iter()
+        .all(|m| m.id == 0 && !matches!(m.msg, CosmosMsg::Bank(_))));
+    assert!(crate::state::PENDING_POOL_SEED
+        .may_load(&deps.storage)
+        .unwrap()
+        .is_none());
+    assert!(crate::state::DISTRIBUTION_STATE
+        .may_load(&deps.storage)
+        .unwrap()
+        .is_none());
 
-    // Every plain (reply_never, id==0) message — the two fee sends, the three
-    // split mints (incl. the pool-seed mint to the contract), and the excess
-    // refund — must precede the create-pool SubMsg.
-    for (i, m) in res.messages.iter().enumerate() {
-        if m.id == 0 {
-            assert!(
-                i < create_idx,
-                "plain message at index {i} (a mint/fee/refund) must execute before \
-                 MsgCreateBalancerPool at {create_idx}"
+    // Nothing left to do afterwards.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&Addr::unchecked("keeper_c"), &[]),
+        ExecuteMsg::ContinueDistribution {},
+    )
+    .unwrap_err();
+}
+
+// The deferred pool creation re-checks the creation fee it must pay. A
+// non-native fee coin the contract does not hold fails with an actionable
+// error and leaves the pending seed in place; once the coin is there the
+// same call seeds the pool.
+#[test]
+fn pool_seed_requires_the_non_native_fee_coin_to_be_held() {
+    use crate::state::{PendingPoolSeed, PENDING_POOL_SEED};
+    const USDC: &str = "uusdc";
+
+    let pending = PendingPoolSeed {
+        seed_osmo: Uint128::new(1_000_000),
+        seed_creator: Uint128::new(2_000_000),
+        fee_coin_held: Some(Coin {
+            denom: USDC.to_string(),
+            amount: Uint128::new(20_000_000),
+        }),
+    };
+    let keeper = || message_info(&Addr::unchecked("keeper"), &[]);
+
+    // Not held → refused, nothing consumed.
+    let mut deps = mock_dependencies_with_balance(&[]);
+    setup_pool_storage(&mut deps);
+    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
+    PENDING_POOL_SEED.save(&mut deps.storage, &pending).unwrap();
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        keeper(),
+        ExecuteMsg::ContinueDistribution {},
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("send the missing"), "{err}");
+    assert!(PENDING_POOL_SEED.may_load(&deps.storage).unwrap().is_some());
+
+    // Held → seeds: three mints then the create-pool SubMsg.
+    let mut deps = mock_dependencies_with_balance(&[Coin {
+        denom: USDC.to_string(),
+        amount: Uint128::new(20_000_000),
+    }]);
+    setup_pool_storage(&mut deps);
+    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
+    PENDING_POOL_SEED.save(&mut deps.storage, &pending).unwrap();
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        keeper(),
+        ExecuteMsg::ContinueDistribution {},
+    )
+    .unwrap();
+    assert_eq!(res.messages.len(), 4);
+    assert_eq!(res.messages[3].id, REPLY_ID_CREATE_POOL);
+    assert!(PENDING_POOL_SEED.may_load(&deps.storage).unwrap().is_none());
+    assert_eq!(
+        crate::state::SEED_LIQUIDITY.load(&deps.storage).unwrap(),
+        (Uint128::new(1_000_000), Uint128::new(2_000_000))
+    );
+}
+
+// Creator excess before the pool is seeded: the earmarked tokens do not
+// exist yet, so the claim waits. If the pool was drained first the seed
+// mint never happens and only the OSMO earmark is paid.
+#[test]
+fn creator_excess_claim_waits_for_pool_seed_unless_drained() {
+    use crate::state::{
+        CreatorExcessLiquidity, PendingPoolSeed, CREATOR_EXCESS_POSITION, PENDING_POOL_SEED,
+    };
+
+    let mut deps = mock_dependencies();
+    setup_pool_storage(&mut deps);
+    IS_THRESHOLD_HIT.save(&mut deps.storage, &true).unwrap();
+    PENDING_POOL_SEED
+        .save(
+            &mut deps.storage,
+            &PendingPoolSeed {
+                seed_osmo: Uint128::new(1),
+                seed_creator: Uint128::new(1),
+                fee_coin_held: None,
+            },
+        )
+        .unwrap();
+    CREATOR_EXCESS_POSITION
+        .save(
+            &mut deps.storage,
+            &CreatorExcessLiquidity {
+                creator: Addr::unchecked("creator"),
+                bluechip_amount: Uint128::new(500),
+                token_amount: Uint128::new(700),
+                unlock_time: mock_env().block.time,
+            },
+        )
+        .unwrap();
+    let claim = ExecuteMsg::ClaimCreatorExcessLiquidity {
+        transaction_deadline: None,
+    };
+    let creator = message_info(&Addr::unchecked("creator"), &[]);
+
+    let err = execute(deps.as_mut(), mock_env(), creator.clone(), claim.clone()).unwrap_err();
+    assert!(matches!(err, ContractError::DistributionInProgress {}));
+    assert!(CREATOR_EXCESS_POSITION
+        .may_load(&deps.storage)
+        .unwrap()
+        .is_some());
+
+    crate::state::EMERGENCY_DRAINED
+        .save(&mut deps.storage, &true)
+        .unwrap();
+    let res = execute(deps.as_mut(), mock_env(), creator, claim).unwrap();
+    match &res.messages[0].msg {
+        CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { amount, .. }) => {
+            assert_eq!(
+                amount,
+                &vec![Coin {
+                    denom: "ubluechip".to_string(),
+                    amount: Uint128::new(500)
+                }]
             );
         }
+        other => panic!("expected the OSMO-only payout, got {other:?}"),
     }
-
-    // Sanity: the three split mints (non-Bank plain messages) really are among
-    // the messages preceding creation — otherwise the pool would hold no seed.
-    let mint_like_before_create = res.messages[..create_idx]
-        .iter()
-        .filter(|m| m.id == 0 && !matches!(m.msg, CosmosMsg::Bank(_)))
-        .count();
-    assert!(
-        mint_like_before_create >= 3,
-        "expected the 3 up-front split mints (incl. pool-seed) before pool creation, saw {mint_like_before_create}"
-    );
 }
 
 // ===========================================================================

@@ -29,10 +29,63 @@ use crate::state::{
 pub fn ensure_distribution_complete(
     storage: &dyn cosmwasm_std::Storage,
 ) -> Result<(), ContractError> {
-    if DISTRIBUTION_STATE.may_load(storage)?.is_some() {
+    if DISTRIBUTION_STATE.may_load(storage)?.is_some()
+        || crate::state::PENDING_POOL_SEED.may_load(storage)?.is_some()
+    {
         return Err(ContractError::DistributionInProgress {});
     }
     Ok(())
+}
+
+/// Final step of the launch: once the committer ledger is empty, mint the
+/// creator / protocol / pool-seed tokens and create the native pool. Runs
+/// as the `ContinueDistribution` call that follows the last batch.
+fn execute_seed_pool(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, ContractError> {
+    let pool_info = POOL_INFO.load(deps.storage)?;
+    let fee_info = crate::state::COMMITFEEINFO.load(deps.storage)?;
+    let payout = crate::state::THRESHOLD_PAYOUT_AMOUNTS.load(deps.storage)?;
+    let specs = crate::state::POOL_SPECS.load(deps.storage)?;
+
+    // Live protocol wallet, falling back to the create-time snapshot so a
+    // factory outage cannot block the pool from opening.
+    let bluechip_wallet = match deps
+        .querier
+        .query_wasm_smart::<pool_factory_interfaces::BluechipWalletResponse>(
+            pool_info.factory_addr.to_string(),
+            &pool_factory_interfaces::FactoryQueryEnvelope::PoolFactoryQuery(
+                pool_factory_interfaces::FactoryQueryMsg::BluechipWalletAddress {},
+            ),
+        ) {
+        Ok(resp) => resp.address,
+        Err(_) => fee_info.bluechip_wallet_address.clone(),
+    };
+
+    let (mints, create_pool) = crate::commit::threshold_payout::build_pool_seed(
+        deps.storage,
+        &deps.querier,
+        &env,
+        &pool_info,
+        &fee_info,
+        &payout,
+        &bluechip_wallet,
+        specs.lp_fee,
+    )?;
+    // The distribution is over; clearing its state (if a recovery path has
+    // not already) is what reopens contract-routed trading.
+    DISTRIBUTION_STATE.remove(deps.storage);
+
+    Ok(Response::new()
+        .add_messages(mints)
+        .add_submessage(create_pool)
+        .add_attribute("action", "continue_distribution")
+        .add_attribute("phase", "pool_seeded")
+        .add_attribute("caller", info.sender.to_string())
+        .add_attribute("processed_count", "0")
+        .add_attribute("remaining_after", "0")
+        .add_attribute("distribution_complete", "true")
+        .add_attribute("pool_contract", env.contract.address.to_string())
+        .add_attribute("block_height", env.block.height.to_string())
+        .add_attribute("block_time", env.block.time.seconds().to_string()))
 }
 
 pub fn execute_continue_distribution(
@@ -78,6 +131,19 @@ pub fn execute_continue_distribution(
         }
     }
     LAST_CONTINUE_DISTRIBUTION_AT.save(deps.storage, &info.sender, &now)?;
+
+    // Every committer has been processed and the pool is still unseeded:
+    // this call opens the pool instead of running a batch.
+    if crate::state::PENDING_POOL_SEED
+        .may_load(deps.storage)?
+        .is_some()
+        && crate::state::COMMIT_LEDGER
+            .keys(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+            .next()
+            .is_none()
+    {
+        return execute_seed_pool(deps, env, info);
+    }
 
     let dist_state = DISTRIBUTION_STATE.load(deps.storage)?;
     if !dist_state.is_distributing {

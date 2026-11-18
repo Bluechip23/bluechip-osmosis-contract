@@ -248,9 +248,11 @@ fn test_race_condition_commits_crossing_threshold() {
         swap_err
     );
 
-    // Once the distribution has finished (state removed by the final
-    // batch) the gate lifts and the commit proceeds to the next check.
+    // Once the distribution has finished and the pool has been seeded
+    // (both markers cleared) the gate lifts and the commit proceeds to the
+    // next check.
     crate::state::DISTRIBUTION_STATE.remove(&mut deps.storage);
+    crate::state::PENDING_POOL_SEED.remove(&mut deps.storage);
     let info3 = message_info(
         &Addr::unchecked("carol"),
         &[Coin {
@@ -325,15 +327,16 @@ fn test_commit_crosses_threshold() {
         .iter()
         .any(|attr| attr.key == "phase" && attr.value == "threshold_crossing"));
 
-    // Phase-2: crossing emits mints + the MsgCreateBalancerPool SubMsg +
-    // the factory-notify SubMsg + the post-fee excess refund. No reserves
-    // are seeded locally, so the `pool_state.total_liquidity` assertion is
-    // gone; the message count still holds.
-    assert!(
-        res.messages.len() >= 6,
-        "Expected at least 6 messages, got {}",
-        res.messages.len()
-    );
+    // The crossing records the pending pool seed but creates no native
+    // pool and mints nothing: both wait for the distribution to finish.
+    assert!(res
+        .messages
+        .iter()
+        .all(|m| m.id != crate::state::REPLY_ID_CREATE_POOL));
+    assert!(crate::state::PENDING_POOL_SEED
+        .may_load(&deps.storage)
+        .unwrap()
+        .is_some());
 
     assert!(
         DISTRIBUTION_STATE

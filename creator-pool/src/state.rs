@@ -84,6 +84,28 @@ pub const THRESHOLD_PROCESSING: Item<bool> = Item::new("threshold_processing");
 /// Fixed split of creator-token amounts paid out at threshold crossing.
 pub const THRESHOLD_PAYOUT_AMOUNTS: Item<ThresholdPayoutAmounts> =
     Item::new("threshold_payout_amounts");
+/// Written at threshold crossing, removed when the native pool is created.
+/// While present the pool has crossed but is NOT yet seeded: the creator,
+/// protocol and pool-seed tokens are unminted and no native pool exists.
+/// The seeding runs in the `ContinueDistribution` call that follows the
+/// final distribution batch, so no one holds tradable supply (or has an
+/// official pool to trade on) before every committer has been paid.
+pub const PENDING_POOL_SEED: Item<PendingPoolSeed> = Item::new("pending_pool_seed");
+
+#[cw_serde]
+pub struct PendingPoolSeed {
+    /// OSMO to seed, fixed at crossing (net raise, capped, less any
+    /// native creation-fee shortfall).
+    pub seed_osmo: Uint128,
+    /// Creator tokens to seed, fixed at crossing.
+    pub seed_creator: Uint128,
+    /// The GAMM creation-fee coin the contract is holding for the deferred
+    /// `MsgCreateBalancerPool`: bought by the crossing's fee swap when the
+    /// fee is non-native, or the retained native amount otherwise. `None`
+    /// when the chain charged no fee at crossing.
+    pub fee_coin_held: Option<cosmwasm_std::Coin>,
+}
+
 /// Cursor + accounting for the post-threshold distribution batch loop.
 pub const DISTRIBUTION_STATE: Item<DistributionState> = Item::new("distribution_state");
 /// Threshold target, max bluechip lock, and excess-lock duration.

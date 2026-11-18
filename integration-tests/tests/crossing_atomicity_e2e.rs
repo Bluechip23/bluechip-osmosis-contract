@@ -183,6 +183,22 @@ fn mid_crossing_module_failure_reverts_mints_ledger_fees_and_funds() {
         .query(&pool_addr, &PoolQueryMsg::IsFullyCommited {})
         .unwrap();
     assert!(matches!(status, CommitStatus::FullyCommitted {}));
+    // The crossing itself mints nothing and creates no native pool: both
+    // wait until every committer has been paid.
+    let native: NativePoolIdResponse = wasm
+        .query(&pool_addr, &PoolQueryMsg::NativePoolId {})
+        .unwrap();
+    assert!(native.pool_id.is_none(), "no native pool at crossing");
+    assert_eq!(
+        creator_supply(&wasm, &factory_addr, reg_pool_id),
+        Uint128::zero(),
+        "nothing is minted at crossing"
+    );
+
+    // Distribution, then the follow-up call that mints the creator /
+    // protocol / pool-seed splits and creates the native pool.
+    app.increase_time(30);
+    drain_distribution(&app, &wasm, &pool_addr, &committer);
     let native: NativePoolIdResponse = wasm
         .query(&pool_addr, &PoolQueryMsg::NativePoolId {})
         .unwrap();
@@ -195,15 +211,12 @@ fn mid_crossing_module_failure_reverts_mints_ledger_fees_and_funds() {
     );
     assert_eq!(
         creator_supply(&wasm, &factory_addr, reg_pool_id),
-        Uint128::new(700_000_000_000),
-        "exactly the three up-front mints landed this time"
+        Uint128::new(1_200_000_000_000),
+        "full supply once the distribution finished and the pool opened"
     );
 
-    // The stored POOL_ID makes the pool swappable once the committer
-    // distribution has finished (contract-routed trading waits for it): a
-    // belief-priced swap then routes through the freshly seeded native pool.
-    app.increase_time(30);
-    drain_distribution(&app, &wasm, &pool_addr, &committer);
+    // The stored POOL_ID makes the pool swappable: a belief-priced swap
+    // routes through the freshly seeded native pool.
     app.increase_time(30);
     let swap = PoolExecuteMsg::SimpleSwap {
         offer_asset: TokenInfo {
@@ -339,6 +352,9 @@ fn unroutable_live_fee_denom_bricks_crossing_until_restored() {
         .query(&pool_addr, &PoolQueryMsg::IsFullyCommited {})
         .unwrap();
     assert!(matches!(status, CommitStatus::FullyCommitted {}));
+    // The native pool opens after the distribution, not at crossing.
+    app.increase_time(30);
+    drain_distribution(&app, &wasm, &pool_addr, &committer);
     let native: NativePoolIdResponse = wasm
         .query(&pool_addr, &PoolQueryMsg::NativePoolId {})
         .unwrap();

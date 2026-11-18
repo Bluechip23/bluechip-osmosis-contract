@@ -227,7 +227,22 @@ pub fn process_distribution_batch(
                         residual,
                     )?);
                 }
-                DISTRIBUTION_STATE.remove(storage);
+                if crate::state::PENDING_POOL_SEED.may_load(storage)?.is_some() {
+                    // The ledger is empty but the native pool is not created
+                    // yet. Keep the state (so keepers keep calling and
+                    // trading stays closed) with the totals marked settled;
+                    // the next `ContinueDistribution` seeds the pool and
+                    // removes it.
+                    dist_state.last_processed_key = last_processed;
+                    dist_state.distributions_remaining = 0;
+                    dist_state.last_successful_batch_size = Some(processed_count);
+                    dist_state.consecutive_failures = 0;
+                    dist_state.last_updated = env.block.time;
+                    dist_state.distributed_so_far = dist_state.total_to_distribute;
+                    DISTRIBUTION_STATE.save(storage, &dist_state)?;
+                } else {
+                    DISTRIBUTION_STATE.remove(storage);
+                }
             } else if processed_count > 0 {
                 // Progress made; persist the new cursor for the next call.
                 let new_remaining = dist_state

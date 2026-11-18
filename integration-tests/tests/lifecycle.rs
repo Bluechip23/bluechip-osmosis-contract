@@ -71,11 +71,6 @@ const GAMM_CREATE_FEE: u128 = 1_000_000_000;
 const TOTAL_CREATOR_SUPPLY: u128 = 1_200_000_000_000;
 /// Creator's up-front reward mint.
 const CREATOR_REWARD: u128 = 325_000_000_000;
-/// Minted AT CROSSING: creator_reward (325B) + bluechip_reward (25B) +
-/// pool_seed (350B) = 700B. The fourth split — commit_return (500B) — is
-/// minted per-committer during distribution, so supply is 700B right after
-/// crossing and reaches the full 1.2T only after `ContinueDistribution`.
-const UPFRONT_MINTED_AT_CROSSING: u128 = 700_000_000_000;
 
 fn read_wasm(name: &str) -> Vec<u8> {
     // Optimizer output lives in ../artifacts. The Makefile copies the prod
@@ -345,11 +340,9 @@ fn full_lifecycle_create_commit_cross_swap() {
         "pool crossed threshold + seeded native pool, got {status:?}"
     );
 
-    // Only the THREE up-front splits mint at crossing (creator_reward +
-    // bluechip_reward + pool_seed = 700B). The fourth split (commit_return,
-    // 500B) is minted per-committer during distribution, so total supply is
-    // 700B here and only reaches 1.2T after ContinueDistribution (asserted
-    // below). (Queried via the factory, which reads x/bank supply of the denom.)
+    // NOTHING is minted at crossing and no native pool exists yet: the
+    // creator / protocol / pool-seed splits and the pool are created only
+    // after every committer has been paid, so nobody can trade early.
     let token_info: factory::query::CreatorTokenInfoResponse = wasm
         .query(
             &factory_addr,
@@ -360,23 +353,29 @@ fn full_lifecycle_create_commit_cross_swap() {
         .unwrap();
     assert_eq!(
         token_info.total_supply,
-        Uint128::new(UPFRONT_MINTED_AT_CROSSING),
-        "three up-front threshold mints landed (700B); commit_return mints during distribution"
+        Uint128::zero(),
+        "no creator tokens exist at crossing"
     );
     assert_eq!(token_info.token_denom, creator_denom);
-
-    // The creator wallet received its up-front reward mint.
+    let native_at_crossing: NativePoolIdResponse = wasm
+        .query(&pool_addr, &PoolQueryMsg::NativePoolId {})
+        .unwrap();
+    assert!(
+        native_at_crossing.pool_id.is_none(),
+        "the native pool is not created at crossing"
+    );
     let bank = Bank::new(&app);
-    let creator_bal = tt::balance(&bank, &creator.address(), &creator_denom);
     assert_eq!(
-        creator_bal,
-        Uint128::new(CREATOR_REWARD),
-        "creator received creator_reward_amount"
+        tt::balance(&bank, &creator.address(), &creator_denom),
+        Uint128::zero(),
+        "creator holds nothing until the distribution completes"
     );
 
     // --- Run the permissionless distribution so the committer is paid ---
     // Drain every batch (a single committer completes in one, but loop so the
-    // test is agnostic to batch sizing).
+    // test is agnostic to batch sizing). The distribution state stays live
+    // until the follow-up call that opens the pool, so this same loop also
+    // performs the creator / protocol / pool-seed mints + pool creation.
     loop {
         wasm.execute(
             &pool_addr,
@@ -413,6 +412,18 @@ fn full_lifecycle_create_commit_cross_swap() {
         token_info_final.total_supply,
         Uint128::new(TOTAL_CREATOR_SUPPLY),
         "all four threshold mints landed after distribution (1.2T)"
+    );
+    assert_eq!(
+        tt::balance(&bank, &creator.address(), &creator_denom),
+        Uint128::new(CREATOR_REWARD),
+        "creator received creator_reward_amount once the pool opened"
+    );
+    let native_after: NativePoolIdResponse = wasm
+        .query(&pool_addr, &PoolQueryMsg::NativePoolId {})
+        .unwrap();
+    assert!(
+        native_after.pool_id.is_some(),
+        "native pool created by the call after the last batch"
     );
 
     // --- Post-threshold swap: buy the creator token with OSMO ---
@@ -606,6 +617,10 @@ fn third_party_lp_join_and_exit_native_pool() {
         &committer,
     )
     .unwrap();
+
+    // The native pool opens once the distribution has finished.
+    app.increase_time(30);
+    tt::drain_distribution(&app, &wasm, &pool_addr, &committer);
 
     // Discover the native pool via the contract query (the client's real path).
     let native: NativePoolIdResponse = wasm
@@ -919,8 +934,23 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
         "crossing paid the USDC-denominated creation fee and seeded the pool, got {status:?}"
     );
 
-    // The native pool exists and is discoverable — the create actually ran
+    // The crossing bought exactly the fee coin and is holding it for the
+    // deferred pool creation; no native pool exists yet.
+    let bank = Bank::new(&app);
+    let native: creator_pool::msg::NativePoolIdResponse = wasm
+        .query(&pool_addr, &PoolQueryMsg::NativePoolId {})
+        .unwrap();
+    assert!(native.pool_id.is_none(), "no native pool at crossing");
+    assert_eq!(
+        tt::balance(&bank, &pool_addr, UUSDC),
+        Uint128::new(20_000_000),
+        "the crossing's exact-out swap acquired exactly the fee coin"
+    );
+
+    // After the distribution the pool is created — the create actually ran
     // (the module would have rejected it without the 20 uusdc in balance).
+    app.increase_time(30);
+    tt::drain_distribution(&app, &wasm, &pool_addr, &committer);
     let native: creator_pool::msg::NativePoolIdResponse = wasm
         .query(&pool_addr, &PoolQueryMsg::NativePoolId {})
         .unwrap();
@@ -928,7 +958,6 @@ fn cross_denom_usdc_fee_crossing_swaps_and_creates_pool() {
 
     // No USDC may be left stranded in the pool: exact-out acquired exactly
     // the fee and the module charged exactly the fee.
-    let bank = Bank::new(&app);
     let pool_usdc = tt::balance(&bank, &pool_addr, UUSDC);
     assert!(
         pool_usdc.is_zero(),
@@ -1127,6 +1156,35 @@ fn fee_twap_orientation_25x_pool_spends_native_not_inverse() {
 // ---------------------------------------------------------------------------
 mod tt {
     use super::*;
+
+    /// Run `ContinueDistribution` until the distribution state clears: every
+    /// batch, then the follow-up call that opens the native pool.
+    pub fn drain_distribution(
+        app: &OsmosisTestApp,
+        wasm: &Wasm<OsmosisTestApp>,
+        pool_addr: &str,
+        caller: &SigningAccount,
+    ) {
+        loop {
+            wasm.execute(
+                pool_addr,
+                &PoolExecuteMsg::ContinueDistribution {},
+                &[],
+                caller,
+            )
+            .unwrap();
+            let ds: Option<creator_pool::msg::DistributionStateResponse> = wasm
+                .query(pool_addr, &PoolQueryMsg::DistributionState {})
+                .unwrap();
+            match ds {
+                Some(s) if s.is_distributing => {
+                    app.increase_time(6);
+                    continue;
+                }
+                _ => break,
+            }
+        }
+    }
     use osmosis_test_tube::osmosis_std::types::cosmos::bank::v1beta1::QueryBalanceRequest;
 
     /// Amount of `denom` held in gamm pool `pool_id`'s reserves.

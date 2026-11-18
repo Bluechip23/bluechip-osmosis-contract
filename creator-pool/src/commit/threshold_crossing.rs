@@ -116,7 +116,6 @@ pub(crate) fn process_threshold_crossing_with_excess(
         fee_quote_denom,
         &env,
     )?;
-    messages.extend(payout_msgs.other_msgs);
 
     // Refund the gross excess (less any reserve retention) to the crosser.
     if !excess_refund.is_zero() {
@@ -157,7 +156,7 @@ pub(crate) fn process_threshold_crossing_with_excess(
     if let Some(swap) = payout_msgs.fee_swap {
         response = response.add_message(swap);
     }
-    let mut response = response.add_submessage(payout_msgs.create_pool);
+    let mut response = response;
     if let Some(remit) = payout_msgs.reserve_remit {
         response = response.add_message(remit);
     }
@@ -200,7 +199,7 @@ pub(crate) fn process_threshold_hit_exact(
     fee_cfg: Option<&Coin>,
     pricing_pool_id: u64,
     fee_quote_denom: &str,
-    mut messages: Vec<CosmosMsg>,
+    messages: Vec<CosmosMsg>,
     analytics: &PoolAnalytics,
 ) -> Result<Response, ContractError> {
     if IS_THRESHOLD_HIT.may_load(deps.storage)?.unwrap_or(false) {
@@ -230,7 +229,6 @@ pub(crate) fn process_threshold_hit_exact(
         fee_quote_denom,
         &env,
     )?;
-    messages.extend(payout.other_msgs);
     update_commit_info(
         deps.storage,
         &sender,
@@ -255,7 +253,7 @@ pub(crate) fn process_threshold_hit_exact(
     if let Some(swap) = payout.fee_swap {
         response = response.add_message(swap);
     }
-    let mut response = response.add_submessage(payout.create_pool);
+    let mut response = response;
     if let Some(remit) = payout.reserve_remit {
         response = response.add_message(remit);
     }
