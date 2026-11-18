@@ -198,7 +198,7 @@ not upload fresh copies).
 | `POOL_CREATION_FEE` | flat uosmo anti-spam fee on Create | 1 OSMO | 1–10 OSMO |
 | `GAMM_POOL_CREATION_FEE` (+`_DENOM`) | the fee COIN x/gamm charges at crossing, funded from the 1% commit-fee retention (never the creator); the pool settles against the LIVE fee and, when the denom is the USD quote (osmosis-1: **20 Noble USDC**), swaps its native retention into the fee coin via the pricing pool | 1 OSMO (`uosmo`) | match `osmosisd q poolmanager params` — 20 USDC as of 2026-07 |
 | `COMMIT_FEE_BLUECHIP` / `COMMIT_FEE_CREATOR` | per-commit fee split | 1% / 5% | your call |
-| `MAX_BLUECHIP_LOCK_PER_POOL` | OSMO cap locked into the seed; rest → creator excess | = threshold | your call |
+| `MAX_BLUECHIP_LOCK_PER_POOL` | OSMO cap (base units, **not dollars**) seeded into the native pool; anything above it → time-locked creator excess | = threshold | = threshold (`500000000000`) so the whole net raise and all 350k pool tokens are seeded; the deploy script refuses a lower cap on mainnet unless `ALLOW_CREATOR_EXCESS=1` |
 | `PROTOCOL_WALLET` | receives protocol fees | deploy key | **multisig** |
 | `EMERGENCY_WITHDRAW_DELAY_SECONDS` | drain timelock | 60 | 86400 (24h) |
 

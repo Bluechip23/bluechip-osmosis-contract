@@ -176,6 +176,10 @@ pub const EMERGENCY_WITHDRAWAL: Item<EmergencyWithdrawalInfo> = Item::new("emerg
 /// Effective-after timestamp armed by Phase 1 (initiate); cleared by
 /// Phase 2 (drain) or by cancel.
 pub const PENDING_EMERGENCY_WITHDRAW: Item<Timestamp> = Item::new("pending_emergency_withdraw");
+/// Whether the pool was already paused when Phase 1 armed the emergency
+/// withdraw. Cancel restores this value instead of force-unpausing, so
+/// cancelling a withdraw never lifts an unrelated admin pause.
+pub const PAUSED_BEFORE_EMERGENCY: Item<bool> = Item::new("paused_before_emergency");
 /// Permanent flag set after a successful emergency drain.
 pub const EMERGENCY_DRAINED: Item<bool> = Item::new("emergency_drained");
 /// Expected factory address pinned at instantiate for sanity checks.

@@ -199,8 +199,11 @@ fn mid_crossing_module_failure_reverts_mints_ledger_fees_and_funds() {
         "exactly the three up-front mints landed this time"
     );
 
-    // The stored POOL_ID makes the pool swappable: a belief-priced swap
-    // routes through the freshly seeded native pool.
+    // The stored POOL_ID makes the pool swappable once the committer
+    // distribution has finished (contract-routed trading waits for it): a
+    // belief-priced swap then routes through the freshly seeded native pool.
+    app.increase_time(30);
+    drain_distribution(&app, &wasm, &pool_addr, &committer);
     app.increase_time(30);
     let swap = PoolExecuteMsg::SimpleSwap {
         offer_asset: TokenInfo {

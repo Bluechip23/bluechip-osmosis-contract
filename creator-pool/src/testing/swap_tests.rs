@@ -208,8 +208,58 @@ fn test_race_condition_commits_crossing_threshold() {
         max_spread: Some(Decimal::percent(10)),
     };
 
-    let err2 = execute(deps.as_mut(), env.clone(), info2, msg2).unwrap_err();
-    match err2 {
+    // Contract-routed trading stays closed while the committer
+    // distribution is still running: the follower commit (a buy through
+    // the native pool) and a direct SimpleSwap are both refused.
+    let err2 = execute(deps.as_mut(), env.clone(), info2, msg2.clone()).unwrap_err();
+    assert!(
+        matches!(err2, ContractError::DistributionInProgress {}),
+        "follower commit must wait for the distribution, got {:?}",
+        err2
+    );
+    let swap_err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(
+            &Addr::unchecked("dave"),
+            &[Coin {
+                denom: "ubluechip".to_string(),
+                amount: commit_amount,
+            }],
+        ),
+        ExecuteMsg::SimpleSwap {
+            offer_asset: TokenInfo {
+                info: TokenType::Native {
+                    denom: "ubluechip".to_string(),
+                },
+                amount: commit_amount,
+            },
+            belief_price: Some(Decimal::one()),
+            max_spread: None,
+            allow_high_max_spread: None,
+            to: None,
+            transaction_deadline: None,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(swap_err, ContractError::DistributionInProgress {}),
+        "SimpleSwap must wait for the distribution, got {:?}",
+        swap_err
+    );
+
+    // Once the distribution has finished (state removed by the final
+    // batch) the gate lifts and the commit proceeds to the next check.
+    crate::state::DISTRIBUTION_STATE.remove(&mut deps.storage);
+    let info3 = message_info(
+        &Addr::unchecked("carol"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: commit_amount,
+        }],
+    );
+    let err3 = execute(deps.as_mut(), env.clone(), info3, msg2).unwrap_err();
+    match err3 {
         ContractError::ShortOfThreshold {} => {}
         other => panic!(
             "Expected ShortOfThreshold on same-block follower commit (native pool id not yet set), got {:?}",

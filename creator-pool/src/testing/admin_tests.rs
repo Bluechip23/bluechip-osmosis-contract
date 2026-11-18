@@ -323,6 +323,46 @@ fn test_cancel_emergency_withdraw() {
 }
 
 #[test]
+fn test_cancel_emergency_withdraw_keeps_a_prior_admin_pause() {
+    let mut deps = mock_dependencies();
+    let msg = mock_instantiate_msg();
+    let info = message_info(&Addr::unchecked("factory_addr"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+    crate::state::IS_THRESHOLD_HIT
+        .save(&mut deps.storage, &true)
+        .unwrap();
+    install_factory_emergency_delay_mock(&mut deps, "factory_addr");
+
+    // The pool is admin-paused for its own reason BEFORE the withdraw.
+    execute(deps.as_mut(), mock_env(), info.clone(), ExecuteMsg::Pause {}).unwrap();
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        info.clone(),
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+
+    // Cancelling the withdraw must not lift that earlier pause.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        info.clone(),
+        ExecuteMsg::CancelEmergencyWithdraw {},
+    )
+    .unwrap();
+    assert!(POOL_PAUSED.load(&deps.storage).unwrap());
+    assert!(pool_core::state::PENDING_EMERGENCY_WITHDRAW
+        .may_load(&deps.storage)
+        .unwrap()
+        .is_none());
+
+    // Only an explicit Unpause reopens the pool.
+    execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Unpause {}).unwrap();
+    assert!(!POOL_PAUSED.load(&deps.storage).unwrap());
+}
+
+#[test]
 fn test_update_config_all() {
     let mut deps = mock_dependencies();
     let msg = mock_instantiate_msg();

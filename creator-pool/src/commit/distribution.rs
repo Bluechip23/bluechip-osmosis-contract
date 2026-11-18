@@ -17,6 +17,24 @@ use crate::state::{
     POOL_INFO, POOL_PAUSED,
 };
 
+/// Contract-routed trading (`SimpleSwap` and post-threshold `Commit`) stays
+/// closed until every committer's ledger row has been processed, so no one
+/// trades through this contract while others are still waiting on their
+/// tokens. `DISTRIBUTION_STATE` is written at crossing and removed by the
+/// final batch, so its presence is the "still distributing" signal. (After
+/// an emergency drain it is left in place, which keeps this venue closed.)
+///
+/// This cannot gate trades made directly against the native Osmosis pool,
+/// which exists from the crossing transaction onward.
+pub fn ensure_distribution_complete(
+    storage: &dyn cosmwasm_std::Storage,
+) -> Result<(), ContractError> {
+    if DISTRIBUTION_STATE.may_load(storage)?.is_some() {
+        return Err(ContractError::DistributionInProgress {});
+    }
+    Ok(())
+}
+
 pub fn execute_continue_distribution(
     deps: DepsMut,
     env: Env,

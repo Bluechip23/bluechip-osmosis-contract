@@ -124,6 +124,12 @@ pub enum ContractError {
     #[error("pool can not cover reserves")]
     InsufficientReserves {},
 
+    #[error(
+        "Trading through this contract opens once the committer distribution has finished; \
+         call ContinueDistribution until it completes"
+    )]
+    DistributionInProgress {},
+
     #[error("Pool has been permanently drained via emergency withdrawal")]
     EmergencyDrained {},
 

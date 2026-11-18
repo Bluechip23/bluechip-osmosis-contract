@@ -294,6 +294,7 @@ pub fn execute(
             if !query_check_commit(deps.as_ref())? {
                 return Err(ContractError::ShortOfThreshold {});
             }
+            crate::commit::distribution::ensure_distribution_complete(deps.storage)?;
             offer_asset.confirm_sent_native_balance(&info)?;
             // A DIRECT SimpleSwap must carry an explicit `belief_price`.
             // The on-chain estimate floor is computed at current (possibly

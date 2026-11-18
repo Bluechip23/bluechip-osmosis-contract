@@ -176,7 +176,9 @@ NATIVE_RAISED_FROM_COMMIT.update(..)?;                           // NET OSMO hel
 ```
 
 Commits are floored (min **115 OSMO** pre / **25 OSMO** post, admin-tunable
-per pool up to 25,000 OSMO) and rate-limited to **13s/wallet**.
+per pool up to 25,000 OSMO). Direct calls are spaced by a **13s per-wallet
+cooldown** — a spam throttle, not a trading control (see
+[Sandwich / MEV protection](#sandwich--mev-protection)).
 Pre-threshold, `SimpleSwap` and every claim/recover path reject — only
 `Commit` works.
 
@@ -413,7 +415,11 @@ GROSS_NATIVE_COMMITTED.save(deps.storage, &commit_config.commit_amount_for_thres
 ## Excess liquidity above the lock cap
 
 `max_bluechip_lock_per_pool` caps how much of the raised OSMO is seeded into
-the GAMM pool, so a single AMM never has to absorb the full raise. Anything
+the GAMM pool. The cap is in **OSMO base units, not dollars**. The mainnet
+launch config sets it equal to the commit threshold, so the entire net raise
+is seeded alongside all 350,000 pool-allocation tokens and this excess path
+is not triggered; it only applies if the cap is configured below a pool's
+net raise. In that case, anything
 above the cap — plus the proportional creator tokens — is **time-locked to
 the creator**, not seeded and not lost:
 
@@ -489,6 +495,14 @@ rejected). The same registration also exempts the router from the per-address
 so all router users would otherwise share one rate-limit slot per pool.
 Direct callers keep the cooldown.
 
+Be precise about what the cooldown is: it applies only to a wallet calling
+this contract's `Commit` / `SimpleSwap` directly. It does **not** limit a
+swap sent through the router (one hop is enough), a trade made directly on
+the native Osmosis pool, or a user spreading calls across several wallets.
+It throttles accidental double-submits and cheap spam against this
+contract; it is not a limit on how often anyone can trade the token and
+must not be relied on as one.
+
 **Post-crossing circuit breaker.** Before any contract-routed swap or
 post-threshold commit, a relative liquidity breaker compares the live GAMM
 pool to what was seeded and **reverts that transaction** if either side is
@@ -529,8 +543,10 @@ enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creator_den
   `ClaimFailedDistribution`) instead of reverting the batch. Stalls recover
   via admin (`RecoverPoolStuckStates`, 1h) or anyone
   (`SelfRecoverDistribution`, 7d).
-- **Rate limits & spam** — 13s per-wallet commit/swap cooldown (registered
-  router exempt); 5s per-caller `ContinueDistribution` cooldown; 1h/address
+- **Rate limits & spam** — 13s per-wallet cooldown on DIRECT commit/swap
+  calls only (router-routed swaps, native Osmosis trades and additional
+  wallets are not limited, so this is a spam throttle, not a trading
+  limit); 5s per-caller `ContinueDistribution` cooldown; 1h/address
   pool-creation limit + flat OSMO creation fee.
 - **Admin & governance** — every privileged factory entry point is
   admin-gated; all config / pool-config / upgrade flows are **48h
@@ -654,8 +670,24 @@ protocol keeper (`keepers/`, `npm run distribution-keeper`) — the protocol's
 `ContinueDistribution` until the ledger drains (≤40 recipients/tx,
 gas-adaptive, 5s per-caller cooldown). There is no keeper bounty.
 Termination is driven by ledger-emptiness, so no extra cleanup call is ever
-needed. Nothing fails closed if the keeper lags — distributions simply wait
-until someone (anyone) calls.
+needed.
+
+**Trading through this contract stays closed until the distribution
+finishes.** While any committer is still waiting on their tokens,
+`SimpleSwap` and post-threshold `Commit` (and therefore router routes
+through the pool) revert with `DistributionInProgress`, so nobody trades
+through the contract ahead of committers who have not been paid yet. The
+gate lifts automatically when the final batch empties the ledger. If the
+keeper lags, the venue simply stays closed until someone (anyone) calls
+`ContinueDistribution`; a batch stalled for more than 24h needs the admin
+(`RecoverPoolStuckStates`, after 1h) or anyone (`SelfRecoverDistribution`,
+after 7d) to restart it first.
+
+This gate covers this contract only. The native Osmosis pool is created in
+the crossing transaction and is an ordinary GAMM pool: anyone already
+holding the token — the creator and protocol wallet from the crossing,
+committers as their batch lands — can trade it directly on Osmosis before
+the distribution completes.
 
 ```json
 { "continue_distribution": {} }
@@ -697,8 +729,8 @@ pending timelocked config / router / upgrade proposal.
 | GAMM swap fee (LP) | 0.3% default (0.1%–10% bounds) | `DEFAULT_LP_FEE` → pool `swap_fee` |
 | Min commit (pre / post) | 115 OSMO / 25 OSMO (ceiling 25,000 OSMO) | `DEFAULT_MIN_COMMIT_NATIVE_*` |
 | Circuit-breaker floor | 25% of seeded per-side | `BREAKER_FLOOR_PERCENT` |
-| Commit/swap rate limit | 13 s / wallet (registered router exempt) | `DEFAULT_SWAP_RATE_LIMIT_SECS` |
-| Max OSMO lock per pool | config (excess → creator escrow) | `max_bluechip_lock_per_pool` |
+| Commit/swap cooldown | 13 s / wallet on direct calls (router-routed and native trades not limited) | `DEFAULT_SWAP_RATE_LIMIT_SECS` |
+| Max OSMO lock per pool | config; mainnet sets it to the full threshold (500,000 OSMO) so the whole net raise is seeded and no creator excess arises | `max_bluechip_lock_per_pool` |
 | Creator excess lock | 7 days (config), then claim once | `CreatorExcessLiquidity.unlock_time` |
 | Fee-TWAP window | 600 s trailing | `FEE_TWAP_WINDOW_SECONDS` |
 | Fee-TWAP plausibility ceiling | 1,000 uosmo / fee base unit | `MAX_NATIVE_PER_FEE_UNIT` |
