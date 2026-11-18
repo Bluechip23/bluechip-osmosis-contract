@@ -480,6 +480,70 @@ fn test_armed_emergency_withdraw_blocks_unpause_expires_and_is_queryable() {
 }
 
 #[test]
+fn test_pre_seed_drain_sweeps_the_held_foreign_fee_coin() {
+    // Drained between crossing and pool creation: the creation-fee coin
+    // bought at crossing (a foreign denom on osmosis-1) will never be
+    // spent, and the core drain only sweeps the pool's own two denoms. It
+    // must go to the drain recipient rather than be stranded.
+    use crate::state::{PendingPoolSeed, PENDING_POOL_SEED};
+    const USDC: &str = "uusdc";
+
+    let mut deps = mock_dependencies();
+    let msg = mock_instantiate_msg();
+    let info = message_info(&Addr::unchecked("factory_addr"), &[]);
+    let mut env = mock_env();
+    instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+    crate::state::IS_THRESHOLD_HIT
+        .save(&mut deps.storage, &true)
+        .unwrap();
+    install_factory_emergency_delay_mock(&mut deps, "factory_addr");
+    PENDING_POOL_SEED
+        .save(
+            &mut deps.storage,
+            &PendingPoolSeed {
+                seed_osmo: Uint128::new(1_000),
+                seed_creator: Uint128::new(1_000),
+                fee_coin_held: Some(Coin::new(20_000_000u128, USDC)),
+            },
+        )
+        .unwrap();
+    deps.querier.bank.update_balance(
+        env.contract.address.clone(),
+        vec![Coin::new(20_000_000u128, USDC)],
+    );
+
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        info.clone(),
+        ExecuteMsg::EmergencyWithdraw {},
+    )
+    .unwrap();
+    env.block.time = pool_core::state::PENDING_EMERGENCY_WITHDRAW
+        .load(&deps.storage)
+        .unwrap();
+    let res = execute(deps.as_mut(), env, info, ExecuteMsg::EmergencyWithdraw {}).unwrap();
+
+    let recipient = pool_core::state::EMERGENCY_WITHDRAWAL
+        .load(&deps.storage)
+        .unwrap()
+        .recipient;
+    let swept = res.messages.iter().any(|m| {
+        matches!(
+            &m.msg,
+            cosmwasm_std::CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount })
+                if to_address == recipient.as_str()
+                    && amount == &vec![Coin::new(20_000_000u128, USDC)]
+        )
+    });
+    assert!(
+        swept,
+        "held fee coin must be sent to the drain recipient: {:?}",
+        res.messages
+    );
+}
+
+#[test]
 fn test_update_config_all() {
     let mut deps = mock_dependencies();
     let msg = mock_instantiate_msg();

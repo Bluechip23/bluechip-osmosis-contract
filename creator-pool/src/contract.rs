@@ -4,9 +4,9 @@
 //!
 //! The pool runs no internal AMM. Swaps and post-threshold
 //! commits route through the NATIVE Osmosis pool via `MsgSwapExactAmountIn`
-//! and forward the output in a reply; the pool is seeded at threshold
-//! crossing via `MsgCreateBalancerPool` whose reply records the native
-//! `pool_id`.
+//! and forward the output in a reply; the pool is seeded once the
+//! committer distribution has finished, via `MsgCreateBalancerPool` whose
+//! reply records the native `pool_id`.
 
 use crate::admin::{
     ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_failed_distribution,
@@ -477,7 +477,7 @@ fn parse_created_pool_id(result: &SubMsgResult) -> StdResult<u64> {
     // present-but-empty / field-absent response that proto3-decodes to 0:
     // latching POOL_ID = 0 would silently brick every later swap. Because the
     // create-pool SubMsg is reply_on_success, erroring here reverts the whole
-    // crossing atomically, so the crosser can simply retry.
+    // pool-seeding transaction atomically, so it can simply be retried.
     if decoded.pool_id == 0 {
         return Err(StdError::generic_err(
             "create-pool reply: decoded pool_id is 0 (empty/invalid MsgCreateBalancerPoolResponse)",
@@ -491,8 +491,8 @@ fn parse_created_pool_id(result: &SubMsgResult) -> StdResult<u64> {
 pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
     match msg.id {
         REPLY_ID_CREATE_POOL => {
-            // The native GAMM balancer pool was created at threshold
-            // crossing; record its id so swaps / post-threshold commits can
+            // The native GAMM balancer pool was just created (after the
+            // committer distribution finished); record its id so swaps / post-threshold commits can
             // route `MsgSwapExactAmountIn` through it.
             let pool_id = parse_created_pool_id(&msg.result)?;
             POOL_ID.save(deps.storage, &pool_id)?;

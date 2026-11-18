@@ -915,7 +915,7 @@ pending per-pool config updates.
 
 Two layers, both runnable from this repo:
 
-**307 workspace unit/property tests** (mock chain): every fee split, gate,
+**308 workspace unit/property tests** (mock chain): every fee split, gate,
 recovery path, and the crossing-conservation property test
 (`creator-pool/src/testing/invariant_tests.rs`).
 
@@ -953,7 +953,7 @@ cargo fmt --all -- --check
 make optimize-all                           # deterministic wasm → artifacts/*.wasm
 ```
 
-Current suite: **creator-pool 167, factory 108, router 24, pool-core 8**
+Current suite: **creator-pool 168, factory 108, router 24, pool-core 8**
 (includes the crossing-conservation property test). Ship the factory **`prod`**
 optimizer build only (real 48h timelocks); the `integration_short_timing`
 build is for shell tests and is CI-guarded against shipping.

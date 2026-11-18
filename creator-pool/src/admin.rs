@@ -116,7 +116,49 @@ pub fn execute_emergency_withdraw(
         }
     }
 
-    execute_emergency_withdraw_dispatch(deps.branch(), env, info, earmark_bluechip, earmark_creator)
+    let mut response = execute_emergency_withdraw_dispatch(
+        deps.branch(),
+        env.clone(),
+        info,
+        earmark_bluechip,
+        earmark_creator,
+    )?;
+
+    // Drained before the pool was ever seeded: the creation-fee coin bought
+    // at crossing will never be spent. If it is a foreign denom the core
+    // drain (which sweeps only the pool's two denoms) leaves it behind, so
+    // send it to the same recipient instead of stranding it.
+    if pending_armed {
+        if let (Some(seed), Some(drain)) = (
+            crate::state::PENDING_POOL_SEED.may_load(deps.storage)?,
+            crate::state::EMERGENCY_WITHDRAWAL.may_load(deps.storage)?,
+        ) {
+            let pool_denoms = [
+                crate::asset::get_native_denom(&pool_info.pool_info.asset_infos)?,
+                pool_info.token_denom.clone(),
+            ];
+            if let Some(held) = seed
+                .fee_coin_held
+                .filter(|c| !pool_denoms.contains(&c.denom))
+            {
+                let balance = deps
+                    .querier
+                    .query_balance(env.contract.address, held.denom.clone())
+                    .map(|c| c.amount)
+                    .unwrap_or_default();
+                if !balance.is_zero() {
+                    response = response.add_message(cosmwasm_std::BankMsg::Send {
+                        to_address: drain.recipient.to_string(),
+                        amount: vec![cosmwasm_std::Coin {
+                            denom: held.denom,
+                            amount: balance,
+                        }],
+                    });
+                }
+            }
+        }
+    }
+    Ok(response)
 }
 
 // ---------------------------------------------------------------------------

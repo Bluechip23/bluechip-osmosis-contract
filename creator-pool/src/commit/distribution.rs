@@ -24,8 +24,9 @@ use crate::state::{
 /// final batch, so its presence is the "still distributing" signal. (After
 /// an emergency drain it is left in place, which keeps this venue closed.)
 ///
-/// This cannot gate trades made directly against the native Osmosis pool,
-/// which exists from the crossing transaction onward.
+/// The native Osmosis pool itself is only created by `execute_seed_pool`,
+/// after the ledger is empty, so there is no official pool to trade on
+/// directly before then either.
 pub fn ensure_distribution_complete(
     storage: &dyn cosmwasm_std::Storage,
 ) -> Result<(), ContractError> {
@@ -64,7 +65,7 @@ fn execute_seed_pool(
         Err(_) => fee_info.bluechip_wallet_address.clone(),
     };
 
-    let (mints, create_pool) = crate::commit::threshold_payout::build_pool_seed(
+    let (mints, create_pool, fee_surplus_remit) = crate::commit::threshold_payout::build_pool_seed(
         deps.storage,
         &deps.querier,
         &env,
@@ -81,6 +82,8 @@ fn execute_seed_pool(
     Ok(Response::new()
         .add_messages(mints)
         .add_submessage(create_pool)
+        // After the create, so the chain has already charged its fee.
+        .add_messages(fee_surplus_remit)
         .add_attribute("action", "continue_distribution")
         .add_attribute("phase", "pool_seeded")
         .add_attribute("caller", info.sender.to_string())

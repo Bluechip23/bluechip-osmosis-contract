@@ -11,12 +11,13 @@
 //!    still short (see `reserve_bluechip_fee`).
 //! 2. Credit the threshold portion to `COMMIT_LEDGER` +
 //!    `GROSS_NATIVE_COMMITTED` / `NATIVE_RAISED_FROM_COMMIT`, then run the
-//!    payout: mint the splits, schedule the distribution airdrop, and emit
-//!    the `MsgCreateBalancerPool` SubMsg that seeds the NATIVE pool.
+//!    payout step: schedule the distribution airdrop, secure the GAMM
+//!    creation-fee coin and record the pending pool seed. No tokens are
+//!    minted and no native pool is created here; both happen after the
+//!    distribution (see `threshold_payout::build_pool_seed`).
 //! 3. REFUND the gross excess (less any reserve retention) to the crosser
-//!    via `BankMsg::Send` — there is no inline swap (the native pool
-//!    doesn't exist yet within this tx; third-party trading happens on the
-//!    native pool once seeded).
+//!    via `BankMsg::Send` — there is no inline swap (the native pool does
+//!    not exist until the distribution has finished).
 //! 4. Update commit analytics and clear `THRESHOLD_PROCESSING`.
 
 use cosmwasm_std::{Addr, Coin, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128};
@@ -102,8 +103,8 @@ pub(crate) fn process_threshold_crossing_with_excess(
         Ok(r.checked_add(threshold_portion_after_fees)?)
     })?;
 
-    // Run the payout: mints + distribution setup + the MsgCreateBalancerPool
-    // SubMsg that seeds the native pool. IS_THRESHOLD_HIT is flipped inside.
+    // Run the payout step: distribution setup, creation-fee coin, pending
+    // pool seed. IS_THRESHOLD_HIT is flipped inside.
     let payout_msgs = trigger_threshold_payout(
         deps.storage,
         &deps.querier,
@@ -152,9 +153,9 @@ pub(crate) fn process_threshold_crossing_with_excess(
         &env,
     );
     // Order matters: acquire a cross-denom creation fee FIRST (fee_swap,
-    // when the chain's fee is not native-denominated), create the native
-    // pool NEXT (the gamm module charges the fee from the pool's balance),
-    // THEN remit any creation-fee reserve leftover to the bluechip wallet.
+    // when the chain's fee is not native-denominated), THEN remit any
+    // creation-fee reserve leftover to the bluechip wallet. The fee coin is
+    // held for the deferred pool creation.
     let mut response = Response::new().add_messages(messages);
     if let Some(swap) = payout_msgs.fee_swap {
         response = response.add_message(swap);
@@ -249,8 +250,8 @@ pub(crate) fn process_threshold_hit_exact(
         &env,
     );
     // Order matters: acquire a cross-denom creation fee FIRST (fee_swap),
-    // create the native pool NEXT (the gamm module charges the fee), THEN
-    // remit any creation-fee reserve leftover.
+    // THEN remit any creation-fee reserve leftover. The fee coin is held
+    // for the deferred pool creation.
     let mut response = Response::new().add_messages(messages);
     if let Some(swap) = payout.fee_swap {
         response = response.add_message(swap);

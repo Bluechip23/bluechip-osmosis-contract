@@ -126,10 +126,8 @@ pub fn validate_pool_threshold_payments(
 ///
 /// - `factory_notify`: `reply_on_error` SubMsg — a failure there must NOT
 ///   revert the pool-side threshold-crossing state.
-/// - `create_pool`: `reply_on_success` SubMsg carrying `MsgCreateBalancerPool`
-///   (REPLY_ID_CREATE_POOL). Executes AFTER the mints so the pool holds its
-///   seed coins when the balancer pool is created.
-/// - `other_msgs`: the plain mint CosmosMsgs (creator/bluechip/pool-seed).
+/// - `fee_swap` / `reserve_remit`: see the fields. The crossing emits no
+///   mints and no pool creation; `build_pool_seed` does that later.
 #[derive(Debug)]
 pub struct ThresholdPayoutMsgs {
     pub factory_notify: SubMsg,
@@ -494,8 +492,8 @@ pub fn trigger_threshold_payout(
     // wallet. After the gamm module charges `creation_fee`, the retained
     // `reserved` has `reserved - creation_fee` to spare (zero in the
     // shortfall edge); that surplus is the protocol's fee income and is
-    // returned to the live bluechip wallet. Emitted by the caller AFTER the
-    // create-pool SubMsg (see `ThresholdPayoutMsgs::reserve_remit`).
+    // returned to the live bluechip wallet. Emitted by the caller AFTER
+    // `fee_swap` (see `ThresholdPayoutMsgs::reserve_remit`).
     let leftover = reserved.saturating_sub(creation_fee);
     let reserve_remit = if leftover.is_zero() {
         None
@@ -556,7 +554,7 @@ pub fn build_pool_seed(
     payout: &ThresholdPayoutAmounts,
     bluechip_wallet: &Addr,
     lp_fee: Decimal,
-) -> Result<(Vec<CosmosMsg>, SubMsg), ContractError> {
+) -> Result<(Vec<CosmosMsg>, SubMsg, Option<CosmosMsg>), ContractError> {
     let pending = crate::state::PENDING_POOL_SEED.load(storage)?;
     let bluechip_denom = get_native_denom(&pool_info.pool_info.asset_infos)?;
 
@@ -597,6 +595,40 @@ pub fn build_pool_seed(
             msg: "pool-creation fee meets or exceeds the OSMO seed".to_string(),
         });
     }
+
+    // Whatever part of the fee coin secured at crossing the chain will NOT
+    // charge now (the fee was lowered, removed or re-denominated since) is
+    // protocol fee revenue: remit it rather than leave it stranded.
+    let fee_surplus_remit: Option<CosmosMsg> = match &pending.fee_coin_held {
+        None => None,
+        Some(held) => {
+            let charged_now = live_fee
+                .as_ref()
+                .filter(|f| f.denom == held.denom)
+                .map(|f| f.amount)
+                .unwrap_or_default();
+            let mut surplus = held.amount.saturating_sub(charged_now);
+            if held.denom != bluechip_denom {
+                // Never promise more of a foreign coin than is actually here.
+                let balance = querier
+                    .query_balance(env.contract.address.clone(), held.denom.clone())
+                    .map(|c| c.amount)
+                    .unwrap_or_default();
+                surplus = surplus.min(balance.saturating_sub(charged_now));
+            }
+            if surplus.is_zero() {
+                None
+            } else {
+                Some(CosmosMsg::Bank(BankMsg::Send {
+                    to_address: bluechip_wallet.to_string(),
+                    amount: vec![Coin {
+                        denom: held.denom.clone(),
+                        amount: surplus,
+                    }],
+                }))
+            }
+        }
+    };
 
     let pool_addr = &pool_info.pool_info.contract_addr;
     let mints = vec![
@@ -642,7 +674,7 @@ pub fn build_pool_seed(
     );
 
     crate::state::PENDING_POOL_SEED.remove(storage);
-    Ok((mints, create_pool))
+    Ok((mints, create_pool, fee_surplus_remit))
 }
 
 /// Build a TokenFactory `MsgMint` that mints `amount` of the creator
