@@ -11,8 +11,8 @@ use crate::msg::{
 };
 use crate::query::query;
 use crate::state::{
-    Committing, CreatorExcessLiquidity, COMMIT_INFO, CREATOR_EXCESS_POSITION, THRESHOLD_CROSSED_AT,
-    GROSS_NATIVE_COMMITTED,
+    Committing, CreatorExcessLiquidity, COMMIT_INFO, CREATOR_EXCESS_POSITION,
+    GROSS_NATIVE_COMMITTED, THRESHOLD_CROSSED_AT,
 };
 use crate::testing::fixtures::{setup_pool_post_threshold, setup_pool_storage};
 
@@ -23,20 +23,16 @@ fn test_query_native_pool_id_pre_and_post_threshold() {
     // Pre-threshold: no native pool yet -> both fields None.
     let mut deps = mock_dependencies();
     setup_pool_storage(&mut deps);
-    let resp: NativePoolIdResponse = from_json(
-        query(deps.as_ref(), mock_env(), QueryMsg::NativePoolId {}).unwrap(),
-    )
-    .unwrap();
+    let resp: NativePoolIdResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::NativePoolId {}).unwrap()).unwrap();
     assert_eq!(resp.pool_id, None);
     assert_eq!(resp.lp_share_denom, None);
 
     // Post-threshold: fixture stores POOL_ID = 1 -> id + gamm/pool/1.
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
-    let resp: NativePoolIdResponse = from_json(
-        query(deps.as_ref(), mock_env(), QueryMsg::NativePoolId {}).unwrap(),
-    )
-    .unwrap();
+    let resp: NativePoolIdResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::NativePoolId {}).unwrap()).unwrap();
     assert_eq!(resp.pool_id, Some(1));
     assert_eq!(resp.lp_share_denom.as_deref(), Some("gamm/pool/1"));
 }
@@ -206,7 +202,10 @@ fn test_query_last_committed_exists() {
         resp.last_committed,
         Some(Timestamp::from_seconds(1_600_000_000))
     );
-    assert_eq!(resp.last_payment_bluechip, Some(Uint128::new(1_000_000_000)));
+    assert_eq!(
+        resp.last_payment_bluechip,
+        Some(Uint128::new(1_000_000_000))
+    );
     assert_eq!(resp.last_payment_native, Some(Uint128::new(1_000_000_000)));
 }
 

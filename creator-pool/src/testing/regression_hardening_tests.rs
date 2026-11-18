@@ -27,9 +27,9 @@ use crate::error::ContractError;
 use crate::generic_helpers::process_distribution_batch;
 use crate::msg::ExecuteMsg;
 use crate::state::{
-    DistributionState, COMMITFEEINFO, COMMIT_LEDGER, DISTRIBUTION_STATE, IS_THRESHOLD_HIT,
-    PENDING_MINT_REPLIES, POOL_ID, POOL_INFO, REPLY_ID_CREATE_POOL,
-    REPLY_ID_FACTORY_NOTIFY_INITIAL, GROSS_NATIVE_COMMITTED,
+    DistributionState, COMMITFEEINFO, COMMIT_LEDGER, DISTRIBUTION_STATE, GROSS_NATIVE_COMMITTED,
+    IS_THRESHOLD_HIT, PENDING_MINT_REPLIES, POOL_ID, POOL_INFO, REPLY_ID_CREATE_POOL,
+    REPLY_ID_FACTORY_NOTIFY_INITIAL,
 };
 use crate::testing::fixtures::{
     mock_dependencies_with_balance, setup_pool_post_threshold, setup_pool_storage,
@@ -73,7 +73,11 @@ fn distribution_conserves_supply_across_whale_and_dust_committers() {
 
     for (name, usd) in committers.iter() {
         COMMIT_LEDGER
-            .save(&mut deps.storage, &Addr::unchecked(*name), &Uint128::new(*usd))
+            .save(
+                &mut deps.storage,
+                &Addr::unchecked(*name),
+                &Uint128::new(*usd),
+            )
             .unwrap();
     }
 
@@ -110,7 +114,11 @@ fn distribution_conserves_supply_across_whale_and_dust_committers() {
     let mut guard = 0;
     loop {
         let (_subs, _n) = process_distribution_batch(&mut deps.storage, &pool_info, &env).unwrap();
-        if DISTRIBUTION_STATE.may_load(&deps.storage).unwrap().is_none() {
+        if DISTRIBUTION_STATE
+            .may_load(&deps.storage)
+            .unwrap()
+            .is_none()
+        {
             break;
         }
         guard += 1;
@@ -128,8 +136,7 @@ fn distribution_conserves_supply_across_whale_and_dust_committers() {
 
     // Independent floor reimplementation (NOT the contract's Uint256 path) so
     // a rounding-direction regression is actually caught.
-    let expected_share =
-        |usd: u128| -> u128 { (usd * TOTAL_TO_DISTRIBUTE) / TOTAL_COMMITTED_USD };
+    let expected_share = |usd: u128| -> u128 { (usd * TOTAL_TO_DISTRIBUTE) / TOTAL_COMMITTED_USD };
 
     let mut committer_sum = 0u128;
     for (name, usd) in committers.iter() {
@@ -150,7 +157,10 @@ fn distribution_conserves_supply_across_whale_and_dust_committers() {
         creator_got, expected_dust,
         "creator must absorb exactly the flooring dust ({expected_dust}), got {creator_got}"
     );
-    assert!(expected_dust > 0, "test must exercise a non-zero dust residual");
+    assert!(
+        expected_dust > 0,
+        "test must exercise a non-zero dust residual"
+    );
 
     // The load-bearing safety invariant: total minted == supply. Never more
     // (would let someone claim beyond their share / brick the last claimant),
@@ -247,7 +257,10 @@ fn overshoot_crossing_keeps_ledger_sum_equal_to_threshold() {
 
     assert!(IS_THRESHOLD_HIT.load(&deps.storage).unwrap());
     let threshold = Uint128::new(25_000_000_000);
-    assert_eq!(GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap(), threshold);
+    assert_eq!(
+        GROSS_NATIVE_COMMITTED.load(&deps.storage).unwrap(),
+        threshold
+    );
 
     // The crosser's ledger entry is exactly value_to_threshold ($15k), and
     // the WHOLE ledger sums to the threshold — the ceiling distribution can
@@ -757,8 +770,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     // (A) A DIRECT caller with belief_price = None is now REJECTED.
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
-    deps.querier
-        .set_factory_context("bluechip_treasury");
+    deps.querier.set_factory_context("bluechip_treasury");
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -776,8 +788,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     // end-to-end minimum_receive across the route.
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
-    deps.querier
-        .set_factory_context("bluechip_treasury");
+    deps.querier.set_factory_context("bluechip_treasury");
     let res = execute(
         deps.as_mut(),
         mock_env(),
@@ -798,8 +809,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     // (C) A direct caller WITH an explicit belief_price is accepted.
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
-    deps.querier
-        .set_factory_context("bluechip_treasury");
+    deps.querier.set_factory_context("bluechip_treasury");
     let with_belief = ExecuteMsg::SimpleSwap {
         offer_asset: TokenInfo {
             info: TokenType::Native {
@@ -834,8 +844,7 @@ fn direct_simple_swap_requires_belief_price_but_registered_router_is_exempt() {
     // (D) The commit swap still requires belief_price too (unchanged).
     let mut deps = mock_deps_estimate(&funds(Uint128::new(1_000_000_000)));
     setup_pool_post_threshold(&mut deps);
-    deps.querier
-        .set_factory_context("bluechip_treasury");
+    deps.querier.set_factory_context("bluechip_treasury");
     let err = execute(
         deps.as_mut(),
         mock_env(),

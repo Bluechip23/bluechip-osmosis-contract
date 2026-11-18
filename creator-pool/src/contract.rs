@@ -4,9 +4,9 @@
 //!
 //! The pool runs no internal AMM. Swaps and post-threshold
 //! commits route through the NATIVE Osmosis pool via `MsgSwapExactAmountIn`
-//! and forward the output in a reply; the pool is seeded at threshold
-//! crossing via `MsgCreateBalancerPool` whose reply records the native
-//! `pool_id`.
+//! and forward the output in a reply; the pool is seeded once the
+//! committer distribution has finished, via `MsgCreateBalancerPool` whose
+//! reply records the native `pool_id`.
 
 use crate::admin::{
     ensure_not_drained, execute_cancel_emergency_withdraw, execute_claim_failed_distribution,
@@ -23,12 +23,11 @@ use crate::query::query_check_commit;
 use crate::state::{
     CommitLimitInfo, ExpectedFactory, PoolAnalytics, PoolDetails, PoolInfo, PoolSpecs, PoolState,
     ThresholdPayoutAmounts, COMMITFEEINFO, COMMIT_LIMIT_INFO, DEFAULT_LP_FEE,
-    DEFAULT_SWAP_RATE_LIMIT_SECS, EXPECTED_FACTORY, FAILED_MINTS, IS_THRESHOLD_HIT, MAX_LP_FEE,
-    MIN_LP_FEE, NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY, PENDING_MINT_REPLIES,
-    POOL_ANALYTICS, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
+    DEFAULT_SWAP_RATE_LIMIT_SECS, EXPECTED_FACTORY, FAILED_MINTS, GROSS_NATIVE_COMMITTED,
+    IS_THRESHOLD_HIT, MAX_LP_FEE, MIN_LP_FEE, NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY,
+    PENDING_MINT_REPLIES, POOL_ANALYTICS, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_SPECS, POOL_STATE,
     REPLY_ID_CREATE_POOL, REPLY_ID_DISTRIBUTION_MINT_BASE, REPLY_ID_FACTORY_NOTIFY_INITIAL,
     REPLY_ID_FACTORY_NOTIFY_RETRY, REPLY_ID_SWAP_FORWARD, THRESHOLD_PAYOUT_AMOUNTS,
-    GROSS_NATIVE_COMMITTED,
 };
 use crate::swap_helper::simple_swap;
 use cosmwasm_std::{
@@ -187,7 +186,7 @@ pub fn instantiate(
     // Pin the gamm creation-fee reserve target from the factory-
     // supplied amount and start the running reserve at zero. The pool retains
     // bluechip out of the protocol's 1% commit fee up to this target so the
-    // fee the gamm module auto-charges at threshold-crossing is paid from
+    // fee the gamm module charges when the pool is created is paid from
     // protocol revenue, not the creator or the AMM seed. Zero = fee waived.
     crate::state::CREATION_FEE_RESERVE_TARGET
         .save(deps.storage, &msg.gamm_pool_creation_fee_amount)?;
@@ -456,7 +455,10 @@ pub fn execute_retry_factory_notify(
 /// reply, preferring the typed `msg_responses` entry and falling back to
 /// the deprecated `data` field.
 fn parse_created_pool_id(result: &SubMsgResult) -> StdResult<u64> {
-    let response = result.clone().into_result().map_err(StdError::generic_err)?;
+    let response = result
+        .clone()
+        .into_result()
+        .map_err(StdError::generic_err)?;
     let bytes: Vec<u8> = response
         .msg_responses
         .iter()
@@ -475,7 +477,7 @@ fn parse_created_pool_id(result: &SubMsgResult) -> StdResult<u64> {
     // present-but-empty / field-absent response that proto3-decodes to 0:
     // latching POOL_ID = 0 would silently brick every later swap. Because the
     // create-pool SubMsg is reply_on_success, erroring here reverts the whole
-    // crossing atomically, so the crosser can simply retry.
+    // pool-seeding transaction atomically, so it can simply be retried.
     if decoded.pool_id == 0 {
         return Err(StdError::generic_err(
             "create-pool reply: decoded pool_id is 0 (empty/invalid MsgCreateBalancerPoolResponse)",
@@ -489,8 +491,8 @@ fn parse_created_pool_id(result: &SubMsgResult) -> StdResult<u64> {
 pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
     match msg.id {
         REPLY_ID_CREATE_POOL => {
-            // The native GAMM balancer pool was created at threshold
-            // crossing; record its id so swaps / post-threshold commits can
+            // The native GAMM balancer pool was just created (after the
+            // committer distribution finished); record its id so swaps / post-threshold commits can
             // route `MsgSwapExactAmountIn` through it.
             let pool_id = parse_created_pool_id(&msg.result)?;
             POOL_ID.save(deps.storage, &pool_id)?;
@@ -556,12 +558,16 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
                     .add_attribute("amount", pending.amount.to_string())
                     .add_attribute("reply_id", msg.id.to_string())),
                 SubMsgResult::Err(e) => {
-                    FAILED_MINTS.update::<_, StdError>(deps.storage, &pending.user, |existing| {
-                        let prior = existing.unwrap_or_default();
-                        prior
-                            .checked_add(pending.amount)
-                            .map_err(|o| StdError::generic_err(o.to_string()))
-                    })?;
+                    FAILED_MINTS.update::<_, StdError>(
+                        deps.storage,
+                        &pending.user,
+                        |existing| {
+                            let prior = existing.unwrap_or_default();
+                            prior
+                                .checked_add(pending.amount)
+                                .map_err(|o| StdError::generic_err(o.to_string()))
+                        },
+                    )?;
                     Ok(Response::new()
                         .add_attribute("action", "distribution_mint_isolated_failure")
                         .add_attribute("user", pending.user.to_string())
@@ -628,6 +634,11 @@ pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, Co
 
     match msg {
         MigrateMsg::UpdateFees { new_fees } => {
+            // Same rule as the config path: once the native pool exists its
+            // swap fee is fixed, so only the stored copy would change.
+            if POOL_ID.may_load(deps.storage)?.is_some() {
+                return Err(ContractError::LpFeeFixedAfterPoolCreation {});
+            }
             if new_fees > MAX_LP_FEE || new_fees < MIN_LP_FEE {
                 return Err(ContractError::LpFeeOutOfRange {
                     got: new_fees,

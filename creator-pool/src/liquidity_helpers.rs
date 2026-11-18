@@ -4,8 +4,8 @@
 //! (third-party LP lives on the native pool, not in this contract).
 //!
 //! The release transfers the RAW earmarked coins — `bluechip_amount`
-//! (bluechip denom) + `token_amount` (creator denom) — that were parked in
-//! the contract's bank balance at threshold crossing, straight to the
+//! (bluechip denom) + `token_amount` (creator denom) — that are parked in
+//! the contract's bank balance once the pool is seeded, straight to the
 //! creator. There is no LP-share query/proportion anymore.
 
 use crate::asset::get_native_denom;
@@ -20,9 +20,7 @@ pub fn execute_claim_creator_excess(
     transaction_deadline: Option<Timestamp>,
 ) -> Result<Response, ContractError> {
     crate::generic_helpers::enforce_transaction_deadline(env.block.time, transaction_deadline)?;
-    crate::generic_helpers::with_reentrancy_guard(deps, |deps| {
-        execute_claim_creator_excess_inner(deps, env, info)
-    })
+    execute_claim_creator_excess_inner(deps, env, info)
 }
 
 fn execute_claim_creator_excess_inner(
@@ -74,7 +72,7 @@ fn execute_claim_creator_excess_inner(
 
     // Send the RAW earmarked coins to the creator. The contract holds both
     // (excess bluechip from commits + excess creator tokens minted-but-not-
-    // seeded at crossing), so this spends the contract's own bank balance.
+    // seeded when the pool opened), so this spends its own bank balance.
     let mut coins: Vec<Coin> = vec![];
     if !excess_position.bluechip_amount.is_zero() {
         coins.push(Coin {
@@ -101,7 +99,10 @@ fn execute_claim_creator_excess_inner(
         ("action", "claim_creator_excess".to_string()),
         ("creator", excess_position.creator.to_string()),
         ("bluechip_denom", bluechip_denom),
-        ("bluechip_amount", excess_position.bluechip_amount.to_string()),
+        (
+            "bluechip_amount",
+            excess_position.bluechip_amount.to_string(),
+        ),
         ("creator_denom", creator_denom),
         ("token_amount", excess_position.token_amount.to_string()),
         ("pool_contract", env.contract.address.to_string()),

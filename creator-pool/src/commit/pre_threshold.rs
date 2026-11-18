@@ -12,7 +12,7 @@ use cosmwasm_std::{Addr, CosmosMsg, DepsMut, Env, Response, Uint128};
 use crate::asset::TokenInfo;
 use crate::error::ContractError;
 use crate::generic_helpers::update_commit_info;
-use crate::state::{PoolAnalytics, NATIVE_RAISED_FROM_COMMIT, GROSS_NATIVE_COMMITTED};
+use crate::state::{PoolAnalytics, GROSS_NATIVE_COMMITTED, NATIVE_RAISED_FROM_COMMIT};
 
 use super::commit_base_attributes;
 

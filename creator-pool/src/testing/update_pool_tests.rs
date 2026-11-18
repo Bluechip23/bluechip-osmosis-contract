@@ -200,6 +200,12 @@ fn test_update_config_accepts_floors_at_max_boundary() {
     .unwrap();
 
     let stored = COMMIT_LIMIT_INFO.load(&deps.storage).unwrap();
-    assert_eq!(stored.min_commit_native_pre_threshold, MAX_MIN_COMMIT_NATIVE);
-    assert_eq!(stored.min_commit_native_post_threshold, MAX_MIN_COMMIT_NATIVE);
+    assert_eq!(
+        stored.min_commit_native_pre_threshold,
+        MAX_MIN_COMMIT_NATIVE
+    );
+    assert_eq!(
+        stored.min_commit_native_post_threshold,
+        MAX_MIN_COMMIT_NATIVE
+    );
 }

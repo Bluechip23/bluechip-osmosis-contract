@@ -8,7 +8,7 @@
 //!   - `creation_fee` auto-charged by the gamm module,
 //!   - `leftover`   (`reserved - creation_fee`) remitted to the wallet,
 //!   - `earmark`    (`raised_net - max_lock`, over-cap only) left in the pool
-//!                  for the creator's time-locked claim.
+//!     for the creator's time-locked claim.
 //!
 //! The load-bearing invariant is that these EXACTLY account for the balance
 //! with nothing created or destroyed:

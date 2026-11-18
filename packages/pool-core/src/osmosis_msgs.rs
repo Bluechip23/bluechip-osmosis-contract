@@ -1,13 +1,13 @@
 //! Osmosis-native message builders.
 //!
 //! Single typed surface for every osmosis-std construction the pool needs
-//! as it moves off the internal CW20 AMM and onto chain-native modules:
+//! to drive the chain-native modules:
 //!
-//! - **TokenFactory** — the creator token becomes a native bank denom
-//!   (`factory/{admin}/{subdenom}`) instead of a CW20 contract. The pool
-//!   contract is the denom admin, so it can mint at threshold-crossing and
-//!   distribution.
-//! - **GAMM** — at threshold-crossing the pool seeds a native balancer
+//! - **TokenFactory** — the creator token is a native bank denom
+//!   (`factory/{admin}/{subdenom}`). The pool
+//!   contract is the denom admin, so it can mint during distribution and
+//!   when the pool opens.
+//! - **GAMM** — after the distribution the pool seeds a native balancer
 //!   pool. Equal weights give the standard constant-product (`x*y=k`)
 //!   curve.
 //! - **poolmanager** — post-threshold commits route their swap leg through
@@ -127,7 +127,7 @@ pub fn set_denom_metadata_msg(
 /// Returns `None` if the params query is unavailable on the target chain
 /// build or the fee is not denominated in `denom`. Callers treat `None`
 /// as "fall back to the factory-configured value." Using the live value
-/// at threshold-crossing makes the seed math self-correcting: the pool
+/// (at crossing and at pool creation) keeps the seed math correct: the pool
 /// always reserves exactly what the module will charge, so a governance
 /// change to the fee — or a mis-set factory config — can no longer brick
 /// the crossing by leaving the pool unable to cover the create fee.

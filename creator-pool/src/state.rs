@@ -12,7 +12,7 @@
 //! POOL_INFO, POOL_STATE, POOL_FEE_STATE, POOL_SPECS, POOL_ANALYTICS,
 //! LIQUIDITY_POSITIONS, OWNER_POSITIONS, NEXT_POSITION_ID, POOL_PAUSED,
 //! POOL_PAUSED_AUTO, EMERGENCY_WITHDRAWAL, PENDING_EMERGENCY_WITHDRAW,
-//! EMERGENCY_DRAINED, EXPECTED_FACTORY, REENTRANCY_LOCK, IS_THRESHOLD_HIT,
+//! EMERGENCY_DRAINED, EXPECTED_FACTORY, IS_THRESHOLD_HIT,
 //! CREATOR_FEE_POT, USER_LAST_COMMIT
 //!
 //! Threshold-cross machinery:
@@ -81,7 +81,7 @@ pub const COMMIT_LEDGER: cw_storage_plus::Map<&Addr, Uint128> =
 pub const COMMITTER_COUNT: Item<u32> = Item::new("committer_count");
 /// Re-entrancy/inflight flag set while a threshold-crossing commit is mid-execution.
 pub const THRESHOLD_PROCESSING: Item<bool> = Item::new("threshold_processing");
-/// Fixed split of creator-token amounts paid out at threshold crossing.
+/// Fixed split of creator-token amounts (committers, creator, protocol, pool).
 pub const THRESHOLD_PAYOUT_AMOUNTS: Item<ThresholdPayoutAmounts> =
     Item::new("threshold_payout_amounts");
 /// Written at threshold crossing, removed when the native pool is created.
@@ -211,8 +211,8 @@ pub struct PendingMint {
 pub const PENDING_MINT_REPLIES: Map<u64, PendingMint> = Map::new("pending_mint_replies");
 
 /// Per-user accumulator of distribution-mint amounts whose dispatch
-/// failed (e.g., the recipient is a contract that rejects CW20 receive,
-/// is on a future mint allowlist, or otherwise rejects the mint).
+/// failed (e.g., the recipient is a blocked or module address, or the
+/// mint is otherwise rejected by the chain).
 ///
 /// Without this map, a single failing recipient would have reverted the
 /// entire batch tx and stalled the distribution. With it, the failing
@@ -448,8 +448,8 @@ pub struct CommitLimitInfo {
     pub min_commit_native_post_threshold: Uint128,
 }
 
-/// Time-locked creator entitlement to the RAW excess coins parked in the
-/// contract at threshold crossing.
+/// Time-locked creator entitlement to the RAW excess coins held by the
+/// contract (OSMO from crossing; tokens once the pool has been seeded).
 ///
 /// When the raised bluechip exceeds `max_bluechip_lock_per_pool`, the pool
 /// is seeded with only `max_bluechip_lock` OSMO + the non-earmarked

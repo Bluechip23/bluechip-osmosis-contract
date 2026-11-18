@@ -12,7 +12,7 @@ use crate::state::PENDING_FACTORY_NOTIFY;
 use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
 use cosmwasm_std::{Addr, CosmosMsg, SubMsg, WasmMsg};
 
-use crate::contract::{execute_retry_factory_notify};
+use crate::contract::execute_retry_factory_notify;
 use crate::error::ContractError;
 use crate::testing::fixtures::setup_pool_storage;
 
@@ -216,7 +216,7 @@ mod reply_handler_tests {
     #[test]
     fn reply_initial_notify_err_does_not_touch_crossing_state() {
         use crate::state::{
-            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, GROSS_NATIVE_COMMITTED,
+            GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE,
         };
         use crate::testing::fixtures::setup_pool_post_threshold;
         use cosmwasm_std::Uint128;
@@ -266,7 +266,7 @@ mod reply_handler_tests {
     #[test]
     fn reply_retry_err_does_not_touch_crossing_state() {
         use crate::state::{
-            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, GROSS_NATIVE_COMMITTED,
+            GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE,
         };
         use crate::testing::fixtures::setup_pool_post_threshold;
         use cosmwasm_std::Uint128;
@@ -308,7 +308,7 @@ mod reply_handler_tests {
     #[test]
     fn reply_retry_ok_does_not_touch_crossing_state() {
         use crate::state::{
-            IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE, GROSS_NATIVE_COMMITTED,
+            GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_STATE,
         };
         use crate::testing::fixtures::setup_pool_post_threshold;
         use cosmwasm_std::Uint128;

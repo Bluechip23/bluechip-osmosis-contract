@@ -14,9 +14,9 @@ use pool_factory_interfaces::{
 /// Fetch the live factory context a commit needs, in one cross-contract
 /// round-trip: the current `bluechip_wallet_address` (protocol-fee recipient
 /// + threshold-cross reward target — live so an admin wallet rotation takes
-/// effect for every existing pool without a snapshot), the chain's GAMM
-/// creation-fee coin, and — when that fee is non-native — the TWAP-valued
-/// native budget for acquiring it at crossing.
+///   effect for every existing pool without a snapshot), the chain's GAMM
+///   creation-fee coin, and — when that fee is non-native — the TWAP-valued
+///   native budget for acquiring it at crossing.
 ///
 /// The commit itself is never valued: the threshold is denominated in the
 /// native asset, so a commit's value toward it is simply its attached
@@ -53,4 +53,3 @@ pub fn query_registered_router(deps: Deps, factory_addr: &Addr) -> StdResult<Opt
     )?;
     Ok(resp.router)
 }
-

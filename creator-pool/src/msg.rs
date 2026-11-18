@@ -1,7 +1,7 @@
 //! Creator-pool (commit-phase) wire-format types.
 //!
 //! Shared types (response structs, CommitFeeInfo, PoolConfigUpdate,
-//! Cw20HookMsg, CommitStatus) live in `pool_core::msg` and are
+//! CommitStatus) live in `pool_core::msg` and are
 //! re-exported below so every existing `use crate::msg::X;` import in
 //! the creator-pool crate resolves unchanged.
 //!
@@ -26,9 +26,8 @@ use {
 
 #[cw_serde]
 pub enum ExecuteMsg {
-    // The creator token is a native TokenFactory denom now, so selling it
-    // is a normal `SimpleSwap` with the creator denom attached as funds —
-    // there is no CW20 `Receive(Cw20ReceiveMsg)` sell hook anymore.
+    // The creator token is a native TokenFactory denom, so selling it is a
+    // normal `SimpleSwap` with the creator denom attached as funds.
     SimpleSwap {
         offer_asset: TokenInfo,
         belief_price: Option<Decimal>,
@@ -84,7 +83,7 @@ pub enum ExecuteMsg {
     // non-zero entry in FAILED_MINTS (the original committer address).
     // Optional `recipient` lets the user route the claim to a fresh
     // wallet — useful when the original recipient is the reason the mint
-    // failed (e.g., a contract that rejects CW20 receive). Defaults to
+    // failed (e.g., a blocked or module address). Defaults to
     // `info.sender` so the simple case requires no parameters.
     //
     // Mint is dispatched as a reply_always SubMsg using the same
@@ -187,9 +186,9 @@ pub enum QueryMsg {
     // call to render an earnings panel.
     #[returns(CreatorEarningsResponse)]
     CreatorEarnings {},
-    // The native Osmosis GAMM pool id this contract seeded at threshold
-    // crossing (learned from the MsgCreateBalancerPool reply). `None`
-    // pre-threshold. Frontends use this to route users' own liquidity
+    // The native Osmosis GAMM pool id this contract seeded after the
+    // distribution (learned from the MsgCreateBalancerPool reply). `None`
+    // until then. Frontends use this to route users' own liquidity
     // add/remove (MsgJoinPool / MsgExitPool) at the native pool and to
     // resolve the LP-share denom `gamm/pool/{id}` for balance display —
     // third-party LP lives on the native pool, not in this contract.
@@ -298,8 +297,7 @@ pub struct PoolInstantiateMsg {
     pub commit_threshold_limit_native: Uint128,
     /// TokenFactory subdenom for the creator token. The pool creates
     /// `factory/{pool_contract_addr}/{subdenom}` at instantiate and
-    /// becomes its denom admin. Replaces the old `token_address: Addr`
-    /// (the CW20 contract) and `cw20_token_contract_id`.
+    /// becomes its denom admin.
     pub subdenom: String,
     /// Creator-chosen token display name / ticker / decimals. Used at
     /// instantiate to register bank denom `Metadata` (`MsgSetDenomMetadata`)
@@ -319,7 +317,7 @@ pub struct PoolInstantiateMsg {
     /// factory from its `gamm_pool_creation_fee.amount` config. Pinned at
     /// instantiate into `CREATION_FEE_RESERVE_TARGET`; the pool retains this
     /// much bluechip out of the protocol's 1% commit fee to cover the fee the
-    /// `x/gamm` module auto-charges at threshold-crossing. Zero disables the
+    /// `x/gamm` module charges when the pool is created. Zero disables the
     /// reserve (gamm fee waived). `#[serde(default)]` keeps pre-this-field
     /// factory create messages deserializing with a zero (disabled) reserve.
     #[serde(default)]

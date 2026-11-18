@@ -14,9 +14,9 @@ use crate::msg::{
 };
 use crate::state::{
     COMMITFEEINFO, COMMIT_INFO, COMMIT_LIMIT_INFO, CREATOR_EXCESS_POSITION,
-    DISTRIBUTION_STALL_TIMEOUT_SECONDS, DISTRIBUTION_STATE, IS_THRESHOLD_HIT,
-    NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY, POOL_COMMITS_QUERY_DEFAULT_LIMIT,
-    POOL_COMMITS_QUERY_MAX_LIMIT, THRESHOLD_CROSSED_AT, GROSS_NATIVE_COMMITTED,
+    DISTRIBUTION_STALL_TIMEOUT_SECONDS, DISTRIBUTION_STATE, GROSS_NATIVE_COMMITTED,
+    IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, PENDING_FACTORY_NOTIFY,
+    POOL_COMMITS_QUERY_DEFAULT_LIMIT, POOL_COMMITS_QUERY_MAX_LIMIT, THRESHOLD_CROSSED_AT,
 };
 use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Deps, Env, Order, StdResult, Uint128,
@@ -104,7 +104,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
 }
 
 /// The native GAMM pool id (and its `gamm/pool/{id}` LP-share denom) seeded
-/// at threshold crossing, or `None` pre-threshold. Read-only; lets frontends
+/// after the distribution, or `None` until then. Read-only; lets frontends
 /// route users' own MsgJoinPool / MsgExitPool at the native pool.
 pub fn query_native_pool_id(deps: Deps) -> StdResult<crate::msg::NativePoolIdResponse> {
     let pool_id = crate::state::POOL_ID.may_load(deps.storage)?;

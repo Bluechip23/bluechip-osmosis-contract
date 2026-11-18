@@ -20,11 +20,11 @@ use crate::state::{
     POOL_STATE,
 };
 use cosmwasm_std::{to_json_binary, Binary, Deps, Env, StdError, StdResult, Uint128};
-use std::str::FromStr;
 use osmosis_std::types::osmosis::poolmanager::v1beta1::{PoolmanagerQuerier, SwapAmountInRoute};
 use pool_factory_interfaces::{
     AllPoolsResponse, IsPausedResponse, PoolQueryMsg, PoolStateResponseForFactory,
 };
+use std::str::FromStr;
 
 pub fn query_is_paused(deps: Deps) -> StdResult<IsPausedResponse> {
     let paused = POOL_PAUSED.may_load(deps.storage)?.unwrap_or(false);
@@ -101,8 +101,7 @@ pub fn query_simulation(deps: Deps, offer_asset: TokenInfo) -> StdResult<Simulat
         // understates ideal (and thus spread) — conservative for a
         // warning metric.
         let num = price.atomics().full_mul(offer_asset.amount);
-        let ideal =
-            Uint128::try_from(num / cosmwasm_std::Uint256::from(10u128.pow(18))).ok()?;
+        let ideal = Uint128::try_from(num / cosmwasm_std::Uint256::from(10u128.pow(18))).ok()?;
         Some(ideal.saturating_sub(return_amount))
     })()
     .unwrap_or_default();

@@ -17,8 +17,8 @@ use crate::state::{
     PENDING_EMERGENCY_WITHDRAW, POOL_ID, POOL_INFO, POOL_PAUSED, POOL_PAUSED_AUTO, POOL_SPECS,
 };
 use cosmwasm_std::{
-    Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, Env, MessageInfo, Response, StdError, Storage,
-    Uint128,
+    Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, Env, MessageInfo, Response, StdError,
+    Storage, Uint128,
 };
 use pool_factory_interfaces::{EmergencyWithdrawDelayResponse, FactoryQueryMsg};
 
@@ -45,7 +45,11 @@ pub fn ensure_not_drained(storage: &dyn Storage) -> Result<(), ContractError> {
 // Pause / Unpause
 // ---------------------------------------------------------------------------
 
-pub fn execute_pause(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, ContractError> {
+pub fn execute_pause(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
     let pool_info = POOL_INFO.load(deps.storage)?;
     if info.sender != pool_info.factory_addr {
         return Err(ContractError::Unauthorized {});
@@ -355,6 +359,13 @@ pub fn execute_update_config_from_factory(
     let mut specs_changed = false;
 
     if let Some(fee) = update.lp_fee {
+        // The fee is passed to the native GAMM pool once, when that pool is
+        // created, and a balancer pool's swap fee cannot be changed
+        // afterwards. Accepting an update here after that point would only
+        // change this contract's stored copy and misreport the real fee.
+        if POOL_ID.may_load(deps.storage)?.is_some() {
+            return Err(ContractError::LpFeeFixedAfterPoolCreation {});
+        }
         let max_lp_fee = Decimal::percent(10);
         let min_lp_fee = Decimal::permille(1); // 0.1%
         if fee > max_lp_fee {

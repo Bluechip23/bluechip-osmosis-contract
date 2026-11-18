@@ -11,12 +11,13 @@
 //!    still short (see `reserve_bluechip_fee`).
 //! 2. Credit the threshold portion to `COMMIT_LEDGER` +
 //!    `GROSS_NATIVE_COMMITTED` / `NATIVE_RAISED_FROM_COMMIT`, then run the
-//!    payout: mint the splits, schedule the distribution airdrop, and emit
-//!    the `MsgCreateBalancerPool` SubMsg that seeds the NATIVE pool.
+//!    payout step: schedule the distribution airdrop, secure the GAMM
+//!    creation-fee coin and record the pending pool seed. No tokens are
+//!    minted and no native pool is created here; both happen after the
+//!    distribution (see `threshold_payout::build_pool_seed`).
 //! 3. REFUND the gross excess (less any reserve retention) to the crosser
-//!    via `BankMsg::Send` — there is no inline swap (the native pool
-//!    doesn't exist yet within this tx; third-party trading happens on the
-//!    native pool once seeded).
+//!    via `BankMsg::Send` — there is no inline swap (the native pool does
+//!    not exist until the distribution has finished).
 //! 4. Update commit analytics and clear `THRESHOLD_PROCESSING`.
 
 use cosmwasm_std::{Addr, Coin, CosmosMsg, Decimal, DepsMut, Env, Response, Uint128};
@@ -29,7 +30,7 @@ use crate::generic_helpers::{
 use crate::msg::CommitFeeInfo;
 use crate::state::{
     CommitLimitInfo, PoolAnalytics, PoolInfo, PoolSpecs, ThresholdPayoutAmounts,
-    IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
+    GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, THRESHOLD_PROCESSING,
 };
 
 use super::commit_base_attributes;
@@ -92,15 +93,18 @@ pub(crate) fn process_threshold_crossing_with_excess(
     // initial `distributions_remaining`, so it MUST reflect the crosser
     // before the payout runs — hence the insert-and-count happens here.
     super::record_committer(deps.storage, &sender, value_to_threshold)?;
-    GROSS_NATIVE_COMMITTED.save(deps.storage, &commit_config.commit_amount_for_threshold_native)?;
+    GROSS_NATIVE_COMMITTED.save(
+        deps.storage,
+        &commit_config.commit_amount_for_threshold_native,
+    )?;
     // NATIVE_RAISED_FROM_COMMIT stores the NET bluechip entering the pool
     // for the threshold portion. The excess is refunded, not seeded.
     NATIVE_RAISED_FROM_COMMIT.update::<_, ContractError>(deps.storage, |r| {
         Ok(r.checked_add(threshold_portion_after_fees)?)
     })?;
 
-    // Run the payout: mints + distribution setup + the MsgCreateBalancerPool
-    // SubMsg that seeds the native pool. IS_THRESHOLD_HIT is flipped inside.
+    // Run the payout step: distribution setup, creation-fee coin, pending
+    // pool seed. IS_THRESHOLD_HIT is flipped inside.
     let payout_msgs = trigger_threshold_payout(
         deps.storage,
         &deps.querier,
@@ -149,14 +153,13 @@ pub(crate) fn process_threshold_crossing_with_excess(
         &env,
     );
     // Order matters: acquire a cross-denom creation fee FIRST (fee_swap,
-    // when the chain's fee is not native-denominated), create the native
-    // pool NEXT (the gamm module charges the fee from the pool's balance),
-    // THEN remit any creation-fee reserve leftover to the bluechip wallet.
+    // when the chain's fee is not native-denominated), THEN remit any
+    // creation-fee reserve leftover to the bluechip wallet. The fee coin is
+    // held for the deferred pool creation.
     let mut response = Response::new().add_messages(messages);
     if let Some(swap) = payout_msgs.fee_swap {
         response = response.add_message(swap);
     }
-    let mut response = response;
     if let Some(remit) = payout_msgs.reserve_remit {
         response = response.add_message(remit);
     }
@@ -247,13 +250,12 @@ pub(crate) fn process_threshold_hit_exact(
         &env,
     );
     // Order matters: acquire a cross-denom creation fee FIRST (fee_swap),
-    // create the native pool NEXT (the gamm module charges the fee), THEN
-    // remit any creation-fee reserve leftover.
+    // THEN remit any creation-fee reserve leftover. The fee coin is held
+    // for the deferred pool creation.
     let mut response = Response::new().add_messages(messages);
     if let Some(swap) = payout.fee_swap {
         response = response.add_message(swap);
     }
-    let mut response = response;
     if let Some(remit) = payout.reserve_remit {
         response = response.add_message(remit);
     }

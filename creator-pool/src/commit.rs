@@ -35,13 +35,13 @@ use crate::admin::ensure_not_drained;
 use crate::asset::{get_native_denom, TokenInfo, TokenType};
 use crate::error::ContractError;
 use crate::generic_helpers::{
-    check_rate_limit, enforce_transaction_deadline, get_bank_transfer_to_msg, with_reentrancy_guard,
+    check_rate_limit, enforce_transaction_deadline, get_bank_transfer_to_msg,
 };
 use crate::msg::CommitFeeInfo;
 use crate::state::{
-    PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
-    POOL_ANALYTICS, POOL_INFO, POOL_PAUSED, POOL_SPECS, THRESHOLD_PAYOUT_AMOUNTS,
-    THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
+    PoolSpecs, COMMITFEEINFO, COMMIT_LIMIT_INFO, GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT,
+    LAST_THRESHOLD_ATTEMPT, POOL_ANALYTICS, POOL_INFO, POOL_PAUSED, POOL_SPECS,
+    THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
 };
 
 use crate::swap_helper::get_commit_context;
@@ -91,7 +91,7 @@ pub(crate) fn record_committer(
         // `may_load` + `save` (not `update`) so a pool whose
         // COMMITTER_COUNT was never initialised still counts correctly.
         let current = COMMITTER_COUNT.may_load(storage)?.unwrap_or(0);
-        COMMITTER_COUNT.save(storage, &current.checked_add(1).unwrap_or(u32::MAX))?;
+        COMMITTER_COUNT.save(storage, &current.saturating_add(1))?;
     }
     Ok(())
 }
@@ -143,22 +143,19 @@ pub fn commit(
     }
     enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
-    with_reentrancy_guard(deps, |mut deps| {
-        let pool_specs = POOL_SPECS.load(deps.storage)?;
-        let sender = info.sender.clone();
-        check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
-        // Hand the already-loaded POOL_SPECS to the dispatcher so it
-        // doesn't re-read the same item.
-        execute_commit_logic(
-            &mut deps,
-            env,
-            info,
-            asset,
-            belief_price,
-            max_spread,
-            pool_specs,
-        )
-    })
+    let mut deps = deps;
+    let pool_specs = POOL_SPECS.load(deps.storage)?;
+    let sender = info.sender.clone();
+    check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
+    execute_commit_logic(
+        &mut deps,
+        env,
+        info,
+        asset,
+        belief_price,
+        max_spread,
+        pool_specs,
+    )
 }
 
 fn execute_commit_logic(
@@ -178,12 +175,11 @@ fn execute_commit_logic(
 
     // commits flow only in the bluechip direction.
     // `validate_pool_token_info` pins `asset_infos[0]` to the canonical
-    // bluechip Native denom and `asset_infos[1]` to the creator-token
-    // CW20, and the inner `match` below only handles bluechip Native,
+    // bluechip Native denom and `asset_infos[1]` to the creator
+    // TokenFactory denom, and the inner `match` below only handles bluechip Native,
     // returning `AssetMismatch` for everything else. The outer check is
     // bluechip-only so a caller passing the creator-token side surfaces
-    // the clearer error earlier and skips the USD-conversion +
-    // min-commit + analytics work that would otherwise run before the
+    // the clearer error earlier and skips the min-commit + analytics work that would otherwise run before the
     // inner reject. The inner `_ => AssetMismatch` arm remains as
     // defense-in-depth against config corruption.
     if !asset.info.equal(&pool_info.pool_info.asset_infos[0]) {
@@ -442,8 +438,7 @@ fn execute_commit_logic(
                     // crossing handler errors, the entire tx reverts —
                     // including this `save(true)` — so the storage
                     // reverts to whatever it was before this tx (which
-                    // was `false`). REENTRANCY_LOCK separately blocks
-                    // any in-tx reentry. Net: under normal operation,
+                    // was `false`). Net: under normal operation,
                     // `THRESHOLD_PROCESSING == true` at this point is
                     // structurally unreachable.
                     //

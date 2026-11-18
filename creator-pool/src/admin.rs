@@ -7,13 +7,13 @@
 //!
 //! The creator-pool crate keeps:
 //! - `execute_emergency_withdraw` — a wrapper around pool-core's
-//! two-phase initiate/core_drain that adds the commit-only
-//! pre-threshold rejection, CREATOR_EXCESS_POSITION earmark preservation,
-//! and DISTRIBUTION_STATE halt.
+//!   two-phase initiate/core_drain that adds the commit-only
+//!   pre-threshold rejection, CREATOR_EXCESS_POSITION earmark preservation,
+//!   and DISTRIBUTION_STATE halt.
 //! - `execute_recover_stuck_states` + private recovery helpers —
-//! all three failure modes (stuck threshold, stalled distribution,
-//! jammed reentrancy guard) only ever occur inside the commit
-//! flow, so they stay here rather than in the shared library.
+//!   both failure modes (stuck threshold, stalled distribution) only
+//!   ever occur inside the commit flow, so they stay here rather than
+//!   in the shared library.
 
 pub use pool_core::admin::{
     ensure_not_drained, execute_cancel_emergency_withdraw, execute_emergency_withdraw_dispatch,
@@ -26,9 +26,8 @@ use crate::state::{
     CREATOR_EXCESS_POSITION, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX,
     DISTRIBUTION_STATE, FAILED_MINTS, IS_THRESHOLD_HIT, LAST_THRESHOLD_ATTEMPT,
     MAX_CONSECUTIVE_DISTRIBUTION_FAILURES, PENDING_EMERGENCY_WITHDRAW, POOL_INFO, POOL_PAUSED,
-    PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, REENTRANCY_LOCK,
-    STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS,
-    THRESHOLD_PROCESSING,
+    PUBLIC_DISTRIBUTION_RECOVERY_WINDOW_SECONDS, STUCK_DISTRIBUTION_RECOVERY_WINDOW_SECONDS,
+    STUCK_THRESHOLD_RECOVERY_WINDOW_SECONDS, THRESHOLD_PROCESSING,
 };
 use cosmwasm_std::{
     Addr, DepsMut, Env, MessageInfo, Order, Response, StdResult, Storage, SubMsg, Timestamp,
@@ -42,14 +41,14 @@ use cosmwasm_std::{
 /// Wraps pool-core's two-phase emergency withdraw with commit-only
 /// bookkeeping:
 /// - Pre-threshold rejection (committed funds are untracked in
-/// reserves; draining would strand them).
+///   reserves; draining would strand them).
 /// - CREATOR_EXCESS_POSITION earmark PRESERVATION on Phase 2 —
-/// its raw `bluechip_amount` / `token_amount` are passed to the core
-/// drain as sweep EXCLUSIONS so the time-locked excess stays in the
-/// contract for the creator; the record itself is left intact so the
-/// creator can still `ClaimCreatorExcessLiquidity` after the drain.
+///   its raw `bluechip_amount` / `token_amount` are passed to the core
+///   drain as sweep EXCLUSIONS so the time-locked excess stays in the
+///   contract for the creator; the record itself is left intact so the
+///   creator can still `ClaimCreatorExcessLiquidity` after the drain.
 /// - DISTRIBUTION_STATE halt on Phase 2 so future
-/// ContinueDistribution calls reject cleanly.
+///   ContinueDistribution calls reject cleanly.
 ///
 /// Phase 1/2 dispatch: if `PENDING_EMERGENCY_WITHDRAW` is unset we run
 /// Phase 1 (pause + set timelock); otherwise Phase 2 (drain after the
@@ -117,7 +116,49 @@ pub fn execute_emergency_withdraw(
         }
     }
 
-    execute_emergency_withdraw_dispatch(deps.branch(), env, info, earmark_bluechip, earmark_creator)
+    let mut response = execute_emergency_withdraw_dispatch(
+        deps.branch(),
+        env.clone(),
+        info,
+        earmark_bluechip,
+        earmark_creator,
+    )?;
+
+    // Drained before the pool was ever seeded: the creation-fee coin bought
+    // at crossing will never be spent. If it is a foreign denom the core
+    // drain (which sweeps only the pool's two denoms) leaves it behind, so
+    // send it to the same recipient instead of stranding it.
+    if pending_armed {
+        if let (Some(seed), Some(drain)) = (
+            crate::state::PENDING_POOL_SEED.may_load(deps.storage)?,
+            crate::state::EMERGENCY_WITHDRAWAL.may_load(deps.storage)?,
+        ) {
+            let pool_denoms = [
+                crate::asset::get_native_denom(&pool_info.pool_info.asset_infos)?,
+                pool_info.token_denom.clone(),
+            ];
+            if let Some(held) = seed
+                .fee_coin_held
+                .filter(|c| !pool_denoms.contains(&c.denom))
+            {
+                let balance = deps
+                    .querier
+                    .query_balance(env.contract.address, held.denom.clone())
+                    .map(|c| c.amount)
+                    .unwrap_or_default();
+                if !balance.is_zero() {
+                    response = response.add_message(cosmwasm_std::BankMsg::Send {
+                        to_address: drain.recipient.to_string(),
+                        amount: vec![cosmwasm_std::Coin {
+                            denom: held.denom,
+                            amount: balance,
+                        }],
+                    });
+                }
+            }
+        }
+    }
+    Ok(response)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,8 +182,8 @@ pub fn execute_recover_stuck_states(
         return Err(ContractError::Unauthorized {});
     }
 
-    // Reject recovery on a drained pool. None of the three recovery
-    // branches (StuckThreshold, StuckDistribution, StuckReentrancyGuard)
+    // Reject recovery on a drained pool. Neither recovery branch
+    // (StuckThreshold, StuckDistribution)
     // produce any fund-flow on a drained pool — every downstream consumer
     // (commit, ContinueDistribution, swap) re-checks `ensure_not_drained`
     // and fails closed — but `recover_distribution` re-saves
@@ -164,13 +205,15 @@ pub fn execute_recover_stuck_states(
         RecoveryType::StuckDistribution => {
             recover_distribution(deps.storage, &env, &mut recovered_items)?;
         }
-        RecoveryType::StuckReentrancyGuard => {
-            recover_reentrancy_guard(deps.storage, &mut recovered_items)?;
-        }
+        // There is no reentrancy lock any more (the handlers only message
+        // chain modules, which do not call back, and the old flag was
+        // released before any message dispatched). The variant is kept so
+        // the factory's existing message still deserializes; it recovers
+        // nothing and falls through to `NothingToRecover`.
+        RecoveryType::StuckReentrancyGuard => {}
         RecoveryType::Both => {
             let _ = recover_threshold(deps.storage, &env, &mut recovered_items);
             let _ = recover_distribution(deps.storage, &env, &mut recovered_items);
-            let _ = recover_reentrancy_guard(deps.storage, &mut recovered_items);
         }
     }
 
@@ -271,18 +314,6 @@ fn recover_distribution(
 
             recovered.push(format!("distribution_restarted_{}_remaining", remaining));
         }
-    }
-    Ok(())
-}
-
-fn recover_reentrancy_guard(
-    storage: &mut dyn Storage,
-    recovered: &mut Vec<String>,
-) -> StdResult<()> {
-    let guard = REENTRANCY_LOCK.may_load(storage)?.unwrap_or(false);
-    if guard {
-        REENTRANCY_LOCK.save(storage, &false)?;
-        recovered.push("reentrancy_guard".to_string());
     }
     Ok(())
 }
@@ -414,8 +445,8 @@ pub fn execute_self_recover_distribution(
 ///
 /// Optional `recipient` lets the user redirect the mint to a fresh
 /// wallet; this is the practical exit when the original recipient is
-/// the very reason the mint failed (a contract that rejects CW20
-/// receive, a future blacklist on the original CW20). Defaults to
+/// the very reason the mint failed (e.g. a blocked or module
+/// address). Defaults to
 /// `info.sender` so the simple case takes no parameters.
 ///
 /// Mint goes through the same `build_distribution_mint_submsg` harness

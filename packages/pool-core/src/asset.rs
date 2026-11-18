@@ -18,7 +18,7 @@ use cw_utils::must_pay;
 pub const UBLUECHIP_DENOM: &str = "ubluechip";
 
 // Pool-specific extension methods for TokenInfo.
-// These depend on cw20/bank message building which is only needed in the pool contract.
+// These depend on bank message building which is only needed in the pool contract.
 pub trait TokenInfoPoolExt {
     fn deduct_tax(&self, querier: &QuerierWrapper) -> StdResult<Coin>;
     fn into_msg(self, querier: &QuerierWrapper, recipient: Addr) -> StdResult<CosmosMsg>;
@@ -41,7 +41,6 @@ impl TokenInfoPoolExt for TokenInfo {
     fn into_msg(self, querier: &QuerierWrapper, recipient: Addr) -> StdResult<CosmosMsg> {
         // Both the bluechip side and the creator TokenFactory side are
         // native bank coins, so every outgoing transfer is a BankMsg::Send.
-        // (Pre-migration the CreatorToken arm built a `Cw20ExecuteMsg::Transfer`.)
         Ok(CosmosMsg::Bank(BankMsg::Send {
             to_address: recipient.to_string(),
             amount: vec![self.deduct_tax(querier)?],
@@ -50,9 +49,9 @@ impl TokenInfoPoolExt for TokenInfo {
 
     fn confirm_sent_native_balance(&self, message_info: &MessageInfo) -> StdResult<()> {
         // Accept EITHER bank denom as attached funds. The creator token is
-        // now a TokenFactory native denom, so a `SimpleSwap` selling the
-        // creator token attaches that denom directly (replacing the old
-        // CW20 `Receive`/`Send` hook path). Whichever side the offer is,
+        // a TokenFactory native denom, so a `SimpleSwap` selling the
+        // creator token attaches that denom directly. Whichever side the
+        // offer is,
         // `must_pay` verifies the exact attached amount.
         let denom = match &self.info {
             TokenType::Native { denom } | TokenType::CreatorToken { denom } => denom,

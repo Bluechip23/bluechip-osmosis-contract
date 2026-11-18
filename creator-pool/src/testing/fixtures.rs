@@ -6,9 +6,7 @@
 //! commit-phase state and (post-threshold) a native GAMM `POOL_ID` so the
 //! swap path has a pool to route through.
 
-use cosmwasm_std::testing::{
-    MockApi, MockQuerier, MockStorage,
-};
+use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage};
 use cosmwasm_std::{
     to_json_binary, Addr, Binary, ContractResult, Decimal, OwnedDeps, SystemError, SystemResult,
     Uint128, WasmQuery,
@@ -18,9 +16,9 @@ use crate::asset::{PoolPairType, TokenType};
 use crate::msg::CommitFeeInfo;
 use crate::state::{
     CommitLimitInfo, PoolDetails, PoolInfo, PoolSpecs, PoolState, ThresholdPayoutAmounts,
-    COMMITFEEINFO, COMMIT_LIMIT_INFO, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_ID,
-    POOL_INFO, POOL_SPECS, POOL_STATE, THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
-    GROSS_NATIVE_COMMITTED,
+    COMMITFEEINFO, COMMIT_LIMIT_INFO, GROSS_NATIVE_COMMITTED, IS_THRESHOLD_HIT,
+    NATIVE_RAISED_FROM_COMMIT, POOL_ID, POOL_INFO, POOL_SPECS, POOL_STATE,
+    THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING,
 };
 
 /// The pool's native creator TokenFactory denom used across the shared
@@ -53,9 +51,7 @@ pub fn mock_dependencies_with_balance(
 /// Generic over the querier `Q` (only `deps.storage` is touched) so both
 /// the stock `MockQuerier` and the `PoolMockQuerier` (which answers the
 /// estimate Stargate query) can share these fixtures.
-pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(
-    deps: &mut OwnedDeps<MockStorage, MockApi, Q>,
-) {
+pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(deps: &mut OwnedDeps<MockStorage, MockApi, Q>) {
     // Mirror instantiate: every real pool carries its cw2 record, which
     // `migrate` now requires.
     cw2::set_contract_version(
