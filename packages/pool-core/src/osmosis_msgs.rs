@@ -1,10 +1,10 @@
 //! Osmosis-native message builders.
 //!
 //! Single typed surface for every osmosis-std construction the pool needs
-//! as it moves off the internal CW20 AMM and onto chain-native modules:
+//! to drive the chain-native modules:
 //!
-//! - **TokenFactory** — the creator token becomes a native bank denom
-//!   (`factory/{admin}/{subdenom}`) instead of a CW20 contract. The pool
+//! - **TokenFactory** — the creator token is a native bank denom
+//!   (`factory/{admin}/{subdenom}`). The pool
 //!   contract is the denom admin, so it can mint at threshold-crossing and
 //!   distribution.
 //! - **GAMM** — at threshold-crossing the pool seeds a native balancer

@@ -12,7 +12,7 @@
 //! POOL_INFO, POOL_STATE, POOL_FEE_STATE, POOL_SPECS, POOL_ANALYTICS,
 //! LIQUIDITY_POSITIONS, OWNER_POSITIONS, NEXT_POSITION_ID, POOL_PAUSED,
 //! POOL_PAUSED_AUTO, EMERGENCY_WITHDRAWAL, PENDING_EMERGENCY_WITHDRAW,
-//! EMERGENCY_DRAINED, EXPECTED_FACTORY, REENTRANCY_LOCK, IS_THRESHOLD_HIT,
+//! EMERGENCY_DRAINED, EXPECTED_FACTORY, IS_THRESHOLD_HIT,
 //! CREATOR_FEE_POT, USER_LAST_COMMIT
 //!
 //! Threshold-cross machinery:
@@ -211,8 +211,8 @@ pub struct PendingMint {
 pub const PENDING_MINT_REPLIES: Map<u64, PendingMint> = Map::new("pending_mint_replies");
 
 /// Per-user accumulator of distribution-mint amounts whose dispatch
-/// failed (e.g., the recipient is a contract that rejects CW20 receive,
-/// is on a future mint allowlist, or otherwise rejects the mint).
+/// failed (e.g., the recipient is a blocked or module address, or the
+/// mint is otherwise rejected by the chain).
 ///
 /// Without this map, a single failing recipient would have reverted the
 /// entire batch tx and stalled the distribution. With it, the failing

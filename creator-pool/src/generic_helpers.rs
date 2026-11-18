@@ -27,12 +27,6 @@ use crate::error::ContractError;
 use crate::state::{Committing, COMMIT_INFO};
 use cosmwasm_std::{Addr, Storage, Timestamp, Uint128};
 
-// `with_reentrancy_guard` lives in `pool_core::generic` and reaches
-// callers in this crate via the `pub use pool_core::generic::*;`
-// re-export above. The swap path in `pool_core::swap` and any
-// liquidity / admin caller in either pool crate share a single
-// implementation rather than each open-coding the load/check/save dance.
-
 pub fn update_commit_info(
     storage: &mut dyn Storage,
     sender: &Addr,

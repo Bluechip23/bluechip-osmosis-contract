@@ -35,7 +35,7 @@ use crate::admin::ensure_not_drained;
 use crate::asset::{get_native_denom, TokenInfo, TokenType};
 use crate::error::ContractError;
 use crate::generic_helpers::{
-    check_rate_limit, enforce_transaction_deadline, get_bank_transfer_to_msg, with_reentrancy_guard,
+    check_rate_limit, enforce_transaction_deadline, get_bank_transfer_to_msg,
 };
 use crate::msg::CommitFeeInfo;
 use crate::state::{
@@ -143,22 +143,19 @@ pub fn commit(
     }
     enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
-    with_reentrancy_guard(deps, |mut deps| {
-        let pool_specs = POOL_SPECS.load(deps.storage)?;
-        let sender = info.sender.clone();
-        check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
-        // Hand the already-loaded POOL_SPECS to the dispatcher so it
-        // doesn't re-read the same item.
-        execute_commit_logic(
-            &mut deps,
-            env,
-            info,
-            asset,
-            belief_price,
-            max_spread,
-            pool_specs,
-        )
-    })
+    let mut deps = deps;
+    let pool_specs = POOL_SPECS.load(deps.storage)?;
+    let sender = info.sender.clone();
+    check_rate_limit(&mut deps, &env, &pool_specs, &sender)?;
+    execute_commit_logic(
+        &mut deps,
+        env,
+        info,
+        asset,
+        belief_price,
+        max_spread,
+        pool_specs,
+    )
 }
 
 fn execute_commit_logic(
@@ -178,12 +175,11 @@ fn execute_commit_logic(
 
     // commits flow only in the bluechip direction.
     // `validate_pool_token_info` pins `asset_infos[0]` to the canonical
-    // bluechip Native denom and `asset_infos[1]` to the creator-token
-    // CW20, and the inner `match` below only handles bluechip Native,
+    // bluechip Native denom and `asset_infos[1]` to the creator
+    // TokenFactory denom, and the inner `match` below only handles bluechip Native,
     // returning `AssetMismatch` for everything else. The outer check is
     // bluechip-only so a caller passing the creator-token side surfaces
-    // the clearer error earlier and skips the USD-conversion +
-    // min-commit + analytics work that would otherwise run before the
+    // the clearer error earlier and skips the min-commit + analytics work that would otherwise run before the
     // inner reject. The inner `_ => AssetMismatch` arm remains as
     // defense-in-depth against config corruption.
     if !asset.info.equal(&pool_info.pool_info.asset_infos[0]) {
@@ -442,8 +438,7 @@ fn execute_commit_logic(
                     // crossing handler errors, the entire tx reverts —
                     // including this `save(true)` — so the storage
                     // reverts to whatever it was before this tx (which
-                    // was `false`). REENTRANCY_LOCK separately blocks
-                    // any in-tx reentry. Net: under normal operation,
+                    // was `false`). Net: under normal operation,
                     // `THRESHOLD_PROCESSING == true` at this point is
                     // structurally unreachable.
                     //

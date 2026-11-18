@@ -1,7 +1,7 @@
 //! Creator-pool (commit-phase) wire-format types.
 //!
 //! Shared types (response structs, CommitFeeInfo, PoolConfigUpdate,
-//! Cw20HookMsg, CommitStatus) live in `pool_core::msg` and are
+//! CommitStatus) live in `pool_core::msg` and are
 //! re-exported below so every existing `use crate::msg::X;` import in
 //! the creator-pool crate resolves unchanged.
 //!
@@ -26,9 +26,8 @@ use {
 
 #[cw_serde]
 pub enum ExecuteMsg {
-    // The creator token is a native TokenFactory denom now, so selling it
-    // is a normal `SimpleSwap` with the creator denom attached as funds —
-    // there is no CW20 `Receive(Cw20ReceiveMsg)` sell hook anymore.
+    // The creator token is a native TokenFactory denom, so selling it is a
+    // normal `SimpleSwap` with the creator denom attached as funds.
     SimpleSwap {
         offer_asset: TokenInfo,
         belief_price: Option<Decimal>,
@@ -84,7 +83,7 @@ pub enum ExecuteMsg {
     // non-zero entry in FAILED_MINTS (the original committer address).
     // Optional `recipient` lets the user route the claim to a fresh
     // wallet — useful when the original recipient is the reason the mint
-    // failed (e.g., a contract that rejects CW20 receive). Defaults to
+    // failed (e.g., a blocked or module address). Defaults to
     // `info.sender` so the simple case requires no parameters.
     //
     // Mint is dispatched as a reply_always SubMsg using the same
@@ -298,8 +297,7 @@ pub struct PoolInstantiateMsg {
     pub commit_threshold_limit_native: Uint128,
     /// TokenFactory subdenom for the creator token. The pool creates
     /// `factory/{pool_contract_addr}/{subdenom}` at instantiate and
-    /// becomes its denom admin. Replaces the old `token_address: Addr`
-    /// (the CW20 contract) and `cw20_token_contract_id`.
+    /// becomes its denom admin.
     pub subdenom: String,
     /// Creator-chosen token display name / ticker / decimals. Used at
     /// instantiate to register bank denom `Metadata` (`MsgSetDenomMetadata`)

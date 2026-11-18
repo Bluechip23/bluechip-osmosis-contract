@@ -188,13 +188,6 @@ pub const EMERGENCY_DRAINED: Item<bool> = Item::new("emergency_drained");
 /// Expected factory address pinned at instantiate for sanity checks.
 pub const EXPECTED_FACTORY: Item<ExpectedFactory> = Item::new("expected_factory");
 
-// Reentrancy lock acquired by `commit` and `simple_swap` to reject
-// re-entry within the same tx. The storage key string must remain
-// `"rate_limit_guard"` because already-deployed pools persist the lock
-// under that key. Despite the key's name this is a reentrancy guard, not
-// a rate limiter — rate limiting is handled by USER_LAST_COMMIT.
-pub const REENTRANCY_LOCK: Item<bool> = Item::new("rate_limit_guard");
-
 /// Per-user timestamp of last commit, used by swap/commit rate limiting.
 pub const USER_LAST_COMMIT: Map<&Addr, u64> = Map::new("user_last_commit");
 
@@ -275,8 +268,9 @@ pub const MIN_LP_FEE: Decimal = Decimal::permille(1);
 pub const POOL_KIND_COMMIT: &str = "commit";
 
 /// Relative circuit-breaker floor, as a whole-number percent of the
-/// seeded per-side liquidity ([`SEED_LIQUIDITY`]). If EITHER side of the
-/// live native pool is below this percentage of what was seeded, a routed
+/// seeded bluechip-side liquidity ([`SEED_LIQUIDITY`]). If the BLUECHIP
+/// (OSMO) side of the live native pool is below this percentage of what was
+/// seeded (a drain), a routed
 /// swap or post-threshold commit REVERTS with
 /// `ContractError::LiquidityBelowSeedFloor`. It is a per-transaction check:
 /// no pause flag is latched, so nothing needs an admin `Unpause` to clear

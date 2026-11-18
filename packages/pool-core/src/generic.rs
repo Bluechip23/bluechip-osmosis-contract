@@ -8,51 +8,16 @@
 //! `validate_pool_threshold_payments` — stay in the creator-pool crate.
 
 use crate::error::ContractError;
-use crate::state::{PoolSpecs, REENTRANCY_LOCK, USER_LAST_COMMIT, USER_LAST_LIQUIDITY_OP};
+use crate::state::{PoolSpecs, USER_LAST_COMMIT, USER_LAST_LIQUIDITY_OP};
 use cosmwasm_std::{
     Addr, BankMsg, Coin, CosmosMsg, Decimal, Decimal256, DepsMut, Env, StdError, StdResult,
     Timestamp, Uint128,
 };
 use cw_storage_plus::Map;
 
-/// Run `body` under the contract-wide `REENTRANCY_LOCK`.
-///
-/// Centralizes the load → check → save(true) → run → save(false)
-/// pattern so the swap path in `pool_core::swap` and any
-/// liquidity / admin caller in either pool crate share a single
-/// implementation.
-///
-/// The guard is cleared **unconditionally** before returning, on both
-/// success and error paths. Production CosmWasm reverts every staged
-/// storage write when a handler returns `Err`, so the explicit
-/// `save(false)` on the error path is redundant in production —
-/// but mock test environments (`mock_dependencies`) do **not** revert,
-/// and a follow-up call in the same `#[test]` would otherwise see
-/// a stuck `REENTRANCY_LOCK = true` from the prior failed attempt.
-/// Always clearing keeps the helper safe under both runtimes.
-pub fn with_reentrancy_guard<F, T>(mut deps: DepsMut, body: F) -> Result<T, ContractError>
-where
-    F: FnOnce(DepsMut) -> Result<T, ContractError>,
-{
-    if REENTRANCY_LOCK.may_load(deps.storage)?.unwrap_or(false) {
-        return Err(ContractError::ReentrancyGuard {});
-    }
-    REENTRANCY_LOCK.save(deps.storage, &true)?;
-    let result = body(deps.branch());
-    // Unconditional clear. See doc-comment above for why this matters
-    // for the test mock-storage path even though production tx
-    // atomicity makes it redundant on the error branch.
-    REENTRANCY_LOCK.save(deps.storage, &false)?;
-    result
-}
-
-/// Swap / commit rate limit. Keyed in `USER_LAST_COMMIT`.
-///
-/// On the CW20 swap path `sender` may be attacker-influenced (a hostile
-/// CW20 token controls `cw20_msg.sender`). That is tolerable here
-/// because this map gates only swaps/commits — never liquidity withdrawals,
-/// which live in the separate `USER_LAST_LIQUIDITY_OP` map. See
-/// `check_liquidity_rate_limit` and the `USER_LAST_LIQUIDITY_OP` doc.
+/// Swap / commit cooldown. Keyed in `USER_LAST_COMMIT` by the calling
+/// address. It only spaces out DIRECT calls from one wallet: router-routed
+/// swaps are exempt, and trades made on the native pool never reach it.
 pub fn check_rate_limit(
     deps: &mut DepsMut,
     env: &Env,
@@ -62,11 +27,8 @@ pub fn check_rate_limit(
     enforce_min_interval(deps, env, pool_specs, sender, &USER_LAST_COMMIT)
 }
 
-/// Liquidity-operation (deposit / add / remove) rate limit. Keyed in
-/// `USER_LAST_LIQUIDITY_OP`, deliberately distinct from the swap/commit
-/// map so that no swap — including a hostile-CW20 swap that spoofs
-/// `cw20_msg.sender` — can ever stamp an LP's withdrawal cooldown. Every
-/// caller passes the real `info.sender`, which cannot be spoofed.
+/// Separate cooldown map (`USER_LAST_LIQUIDITY_OP`) kept distinct from the
+/// swap/commit map. No current entry point stamps it.
 pub fn check_liquidity_rate_limit(
     deps: &mut DepsMut,
     env: &Env,

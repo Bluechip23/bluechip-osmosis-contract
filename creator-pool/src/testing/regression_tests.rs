@@ -11,83 +11,11 @@ use crate::msg::{ExecuteMsg, MigrateMsg};
 use crate::state::{
     DistributionState, ExpectedFactory, RecoveryType, COMMIT_LEDGER,
     DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX, DISTRIBUTION_STATE,
-    EMERGENCY_DRAINED, EXPECTED_FACTORY, POOL_SPECS, REENTRANCY_LOCK, THRESHOLD_PROCESSING,
+    EMERGENCY_DRAINED, EXPECTED_FACTORY, POOL_SPECS, THRESHOLD_PROCESSING,
 };
 use crate::testing::fixtures::{
     setup_pool_post_threshold, setup_pool_storage, with_factory_context, CREATOR_DENOM,
 };
-
-#[test]
-fn test_recover_stuck_reentrancy_guard() {
-    let mut deps = mock_dependencies();
-    setup_pool_storage(&mut deps);
-
-    // Set up the factory address for authorization
-    EXPECTED_FACTORY
-        .save(
-            &mut deps.storage,
-            &ExpectedFactory {
-                expected_factory_address: Addr::unchecked("factory_contract"),
-            },
-        )
-        .unwrap();
-
-    // Simulate stuck reentrancy guard
-    REENTRANCY_LOCK.save(&mut deps.storage, &true).unwrap();
-    assert!(REENTRANCY_LOCK.load(&deps.storage).unwrap());
-
-    let env = mock_env();
-    let factory_info = message_info(&Addr::unchecked("factory_contract"), &[]);
-
-    // Recover via RecoverStuckStates
-    let msg = ExecuteMsg::RecoverStuckStates {
-        recovery_type: RecoveryType::StuckReentrancyGuard,
-    };
-
-    let res = execute(deps.as_mut(), env, factory_info, msg).unwrap();
-
-    // Guard should be reset
-    assert!(!REENTRANCY_LOCK.load(&deps.storage).unwrap());
-
-    // Check response attributes
-    let recovered_attr = res
-        .attributes
-        .iter()
-        .find(|a| a.key == "recovered")
-        .expect("Should have 'recovered' attribute");
-    assert!(recovered_attr.value.contains("reentrancy_guard"));
-}
-
-#[test]
-fn test_recover_stuck_reentrancy_guard_unauthorized() {
-    let mut deps = mock_dependencies();
-    setup_pool_storage(&mut deps);
-
-    EXPECTED_FACTORY
-        .save(
-            &mut deps.storage,
-            &ExpectedFactory {
-                expected_factory_address: Addr::unchecked("factory_contract"),
-            },
-        )
-        .unwrap();
-
-    REENTRANCY_LOCK.save(&mut deps.storage, &true).unwrap();
-
-    let env = mock_env();
-    // Not the factory - should fail
-    let hacker_info = message_info(&Addr::unchecked("hacker"), &[]);
-
-    let msg = ExecuteMsg::RecoverStuckStates {
-        recovery_type: RecoveryType::StuckReentrancyGuard,
-    };
-
-    let err = execute(deps.as_mut(), env, hacker_info, msg).unwrap_err();
-    assert!(matches!(err, ContractError::Unauthorized {}));
-
-    // Guard still stuck
-    assert!(REENTRANCY_LOCK.load(&deps.storage).unwrap());
-}
 
 #[test]
 fn test_recover_not_stuck_returns_error() {
@@ -103,9 +31,8 @@ fn test_recover_not_stuck_returns_error() {
         )
         .unwrap();
 
-    // Guard is NOT stuck
-    REENTRANCY_LOCK.save(&mut deps.storage, &false).unwrap();
-
+    // The legacy reentrancy-guard variant still deserializes but has
+    // nothing to recover.
     let env = mock_env();
     let factory_info = message_info(&Addr::unchecked("factory_contract"), &[]);
 
@@ -131,8 +58,7 @@ fn test_recover_both_resets_all_stuck_states() {
         )
         .unwrap();
 
-    // Simulate both stuck reentrancy guard and stuck threshold
-    REENTRANCY_LOCK.save(&mut deps.storage, &true).unwrap();
+    // Simulate a stuck threshold flag
     THRESHOLD_PROCESSING.save(&mut deps.storage, &true).unwrap();
 
     // Set last threshold attempt to far in the past so it qualifies as stuck
@@ -152,8 +78,7 @@ fn test_recover_both_resets_all_stuck_states() {
 
     let res = execute(deps.as_mut(), env, factory_info, msg).unwrap();
 
-    // Both should be reset
-    assert!(!REENTRANCY_LOCK.load(&deps.storage).unwrap());
+    // The stuck flag is reset
     assert!(!THRESHOLD_PROCESSING.load(&deps.storage).unwrap());
 
     let recovered_attr = res
@@ -161,7 +86,6 @@ fn test_recover_both_resets_all_stuck_states() {
         .iter()
         .find(|a| a.key == "recovered")
         .expect("Should have 'recovered' attribute");
-    assert!(recovered_attr.value.contains("reentrancy_guard"));
     assert!(recovered_attr.value.contains("threshold"));
 }
 
@@ -422,9 +346,46 @@ fn test_migrate_rejects_foreign_or_missing_contract_name() {
 }
 
 #[test]
+fn test_lp_fee_is_fixed_once_the_native_pool_exists() {
+    // A balancer pool's swap fee cannot change after creation, so neither
+    // fee-update path may alter the stored copy once POOL_ID is set.
+    let mut deps = mock_dependencies();
+    setup_pool_post_threshold(&mut deps); // POOL_ID set
+    let before = POOL_SPECS.load(&deps.storage).unwrap().lp_fee;
+
+    let err = migrate(
+        deps.as_mut(),
+        mock_env(),
+        MigrateMsg::UpdateFees {
+            new_fees: Decimal::percent(1),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::LpFeeFixedAfterPoolCreation {}));
+
+    let factory = crate::state::POOL_INFO.load(&deps.storage).unwrap().factory_addr;
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&factory, &[]),
+        ExecuteMsg::UpdateConfigFromFactory {
+            update: crate::msg::PoolConfigUpdate {
+                lp_fee: Some(Decimal::percent(1)),
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::LpFeeFixedAfterPoolCreation {}));
+    assert_eq!(POOL_SPECS.load(&deps.storage).unwrap().lp_fee, before);
+}
+
+#[test]
 fn test_migrate_rejects_excessive_fees() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
+    // The fee is only tunable before the native pool exists.
+    crate::state::POOL_ID.remove(&mut deps.storage);
 
     let env = mock_env();
 
@@ -445,6 +406,8 @@ fn test_migrate_rejects_excessive_fees() {
 fn test_migrate_accepts_valid_fees() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
+    // The fee is only tunable before the native pool exists.
+    crate::state::POOL_ID.remove(&mut deps.storage);
 
     let env = mock_env();
 
@@ -468,6 +431,8 @@ fn test_migrate_accepts_valid_fees() {
 fn test_migrate_accepts_small_fees() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
+    // The fee is only tunable before the native pool exists.
+    crate::state::POOL_ID.remove(&mut deps.storage);
 
     let env = mock_env();
 
@@ -488,6 +453,8 @@ fn test_migrate_accepts_small_fees() {
 fn test_migrate_rejects_zero_fees() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
+    // The fee is only tunable before the native pool exists.
+    crate::state::POOL_ID.remove(&mut deps.storage);
 
     let env = mock_env();
     let msg = MigrateMsg::UpdateFees {
@@ -507,6 +474,8 @@ fn test_migrate_rejects_zero_fees() {
 fn test_migrate_rejects_below_minimum() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
+    // The fee is only tunable before the native pool exists.
+    crate::state::POOL_ID.remove(&mut deps.storage);
 
     let env = mock_env();
     let msg = MigrateMsg::UpdateFees {
@@ -526,6 +495,8 @@ fn test_migrate_rejects_below_minimum() {
 fn test_migrate_accepts_minimum_fee() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
+    // The fee is only tunable before the native pool exists.
+    crate::state::POOL_ID.remove(&mut deps.storage);
 
     let env = mock_env();
     let msg = MigrateMsg::UpdateFees {

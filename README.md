@@ -535,8 +535,10 @@ must not be relied on as one.
 
 **Post-crossing circuit breaker.** Before any contract-routed swap or
 post-threshold commit, a relative liquidity breaker compares the live GAMM
-pool to what was seeded and **reverts that transaction** if either side is
-below 25% of its seed (a drain signal). It is a per-transaction check, not a
+pool to what was seeded and **reverts that transaction** if the **OSMO side**
+is below 25% of its seed (a drain signal). It is one-directional on purpose:
+the creator-token side shrinking means buyers pushed the price up, which is
+the pool working, so it never trips the breaker. It is a per-transaction check, not a
 latched pause: nothing is written, the caller's funds come back through
 normal tx failure, and the next transaction re-evaluates the live pool on its
 own. There is no auto-pause for the multisig to reset, and the committer
@@ -552,16 +554,15 @@ What the breaker is **not**:
   exists; the trade's own minimum-out still applies.
 - It covers this contract's venue only. Trades, LP joins and LP exits made
   **directly on the native Osmosis pool** never run it (or the admin pause).
-- It compares against the launch seed forever. One side falling to 25% of
-  its seed corresponds to roughly a 16x price move in **either** direction,
-  so a token that appreciates that far closes this contract's swap and
-  commit venue just as a collapse does, until reserves return or outside LPs
-  add depth. Native trading continues regardless.
+- It compares against the launch seed forever. The OSMO side falling to
+  25% of its seed corresponds to roughly a 16x price **drop**; from then on
+  this contract's swap and commit venue stays closed until OSMO-side depth
+  returns (buyers or outside LPs). Native trading continues regardless.
 
 ```rust
 // packages/pool-core/src/swap.rs — Err(LiquidityBelowSeedFloor) reverts the
 // swap; no pause flag is touched.
-enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creator_denom)?;
+enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom)?;
 ```
 
 ---
@@ -576,10 +577,9 @@ enforce_liquidity_breaker(storage, querier, pool_id, bluechip_denom, creator_den
   Post-threshold commits skip the budget entirely, so a pricing-pool outage
   can never block trading.
 - **Arithmetic** — checked/`Uint256` arithmetic throughout;
-  `overflow-checks = true` in release. (A `REENTRANCY_LOCK` flag wraps commit
-  and swap, but it is released before the handler's messages dispatch, so
-  treat it as bookkeeping, not as a protection: the handlers only message
-  chain modules, which do not call back.)
+  `overflow-checks = true` in release. There is no reentrancy lock: the
+  handlers only message chain modules (bank, TokenFactory, GAMM,
+  poolmanager), none of which call back into the contract.
 - **Strict fund handling** — `must_pay` on every commit/swap rejects
   multi-denom or wrong-amount attachments, so no stray coins are ever
   absorbed.
@@ -895,9 +895,9 @@ pending per-pool config updates.
 | Commit threshold | 500,000 OSMO (`500000000000`, 6-dec native base units; expected to be retuned over time via the 48h config flow — applies to pools created after the change) | factory config |
 | Token supply per pool | 1,200,000 (500k committers minted in batches first; 325k creator / 25k protocol / 350k pool seed minted when the pool opens) | `THRESHOLD_PAYOUT_*_BASE_UNITS` |
 | Commit fees | 1% protocol + 5% creator | commits only |
-| GAMM swap fee (LP) | 0.3% default (0.1%–10% bounds) | `DEFAULT_LP_FEE` → pool `swap_fee` |
+| GAMM swap fee (LP) | 0.3% default (0.1%–10% bounds); adjustable only **before** the native pool is created, fixed afterwards | `DEFAULT_LP_FEE` → pool `swap_fee` |
 | Min commit (pre / post) | 115 OSMO / 25 OSMO (ceiling 25,000 OSMO) | `DEFAULT_MIN_COMMIT_NATIVE_*` |
-| Circuit-breaker floor | 25% of seeded per-side | `BREAKER_FLOOR_PERCENT` |
+| Circuit-breaker floor | OSMO side at 25% of its seed (creator-token side not checked) | `BREAKER_FLOOR_PERCENT` |
 | Commit/swap cooldown | 13 s / wallet on direct calls (router-routed and native trades not limited) | `DEFAULT_SWAP_RATE_LIMIT_SECS` |
 | Max OSMO lock per pool | config; mainnet sets it to the full threshold (500,000 OSMO) so the whole net raise is seeded and no creator excess arises | `max_bluechip_lock_per_pool` |
 | Creator excess lock | 7 days (config), then claim once | `CreatorExcessLiquidity.unlock_time` |
@@ -915,7 +915,7 @@ pending per-pool config updates.
 
 Two layers, both runnable from this repo:
 
-**308 workspace unit/property tests** (mock chain): every fee split, gate,
+**307 workspace unit/property tests** (mock chain): every fee split, gate,
 recovery path, and the crossing-conservation property test
 (`creator-pool/src/testing/invariant_tests.rs`).
 
@@ -953,7 +953,7 @@ cargo fmt --all -- --check
 make optimize-all                           # deterministic wasm → artifacts/*.wasm
 ```
 
-Current suite: **creator-pool 168, factory 108, router 24, pool-core 8**
+Current suite: **creator-pool 167, factory 108, router 24, pool-core 8**
 (includes the crossing-conservation property test). Ship the factory **`prod`**
 optimizer build only (real 48h timelocks); the `integration_short_timing`
 build is for shell tests and is CI-guarded against shipping.

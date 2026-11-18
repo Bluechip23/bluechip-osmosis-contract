@@ -20,9 +20,7 @@ pub fn execute_claim_creator_excess(
     transaction_deadline: Option<Timestamp>,
 ) -> Result<Response, ContractError> {
     crate::generic_helpers::enforce_transaction_deadline(env.block.time, transaction_deadline)?;
-    crate::generic_helpers::with_reentrancy_guard(deps, |deps| {
-        execute_claim_creator_excess_inner(deps, env, info)
-    })
+    execute_claim_creator_excess_inner(deps, env, info)
 }
 
 fn execute_claim_creator_excess_inner(

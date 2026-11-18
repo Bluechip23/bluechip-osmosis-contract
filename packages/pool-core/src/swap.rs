@@ -26,7 +26,7 @@
 
 use crate::asset::TokenInfo;
 use crate::error::ContractError;
-use crate::generic::{check_rate_limit, enforce_transaction_deadline, with_reentrancy_guard};
+use crate::generic::{check_rate_limit, enforce_transaction_deadline};
 use crate::osmosis_msgs::swap_exact_amount_in_msg;
 use crate::state::{
     PoolCtx, SwapForwardPayload, BREAKER_FLOOR_PERCENT, IS_THRESHOLD_HIT, POOL_ANALYTICS, POOL_ID,
@@ -252,17 +252,23 @@ pub fn compute_token_out_min<C: CustomQuery>(
 ///   must not brick every swap; the per-swap `token_out_min_amount` floor
 ///   still protects the individual trade.
 ///
-/// A side missing entirely from the query response reads as zero liquidity
-/// and therefore trips the breaker — the correct, conservative behaviour if
-/// the pool has been drained of one side.
+/// ONE-DIRECTIONAL: only the BLUECHIP (OSMO) side is checked. That side
+/// falling is the drain signal — value has left the pool. The creator-token
+/// side falling means buyers pushed the price UP, which is the pool working,
+/// not failing; tripping on it would shut this contract's swap / commit
+/// venue for any token that appreciates ~16x from its launch price. So the
+/// creator side is deliberately not compared.
+///
+/// A bluechip side missing entirely from the query response reads as zero
+/// liquidity and therefore trips the breaker — the correct, conservative
+/// behaviour if the pool has been drained.
 pub fn enforce_liquidity_breaker<C: CustomQuery>(
     storage: &dyn Storage,
     querier: &QuerierWrapper<C>,
     pool_id: u64,
     bluechip_denom: &str,
-    creator_denom: &str,
 ) -> Result<(), ContractError> {
-    let (seed_osmo, seed_creator) = match SEED_LIQUIDITY.may_load(storage)? {
+    let (seed_osmo, _seed_creator) = match SEED_LIQUIDITY.may_load(storage)? {
         Some(seed) => seed,
         None => return Ok(()),
     };
@@ -272,41 +278,23 @@ pub fn enforce_liquidity_breaker<C: CustomQuery>(
         Err(_) => return Ok(()),
     };
 
-    // Resolve each side's current amount by denom; a side absent from the
-    // response reads as zero (drained), which trips the breaker.
-    let current_of = |denom: &str| -> Uint128 {
-        liquidity
-            .iter()
-            .find(|c| c.denom == denom)
-            .and_then(|c| Uint128::from_str(&c.amount).ok())
-            .unwrap_or_default()
-    };
-    let current_osmo = current_of(bluechip_denom);
-    let current_creator = current_of(creator_denom);
+    let current_osmo = liquidity
+        .iter()
+        .find(|c| c.denom == bluechip_denom)
+        .and_then(|c| Uint128::from_str(&c.amount).ok())
+        .unwrap_or_default();
 
     // `current < BREAKER_FLOOR_PERCENT% of seed`  ⇔
     // `current * 100 < seed * BREAKER_FLOOR_PERCENT`.
     // `saturating_mul` keeps the comparison well-defined for huge balances:
     // a saturated `current * 100` is enormous, so a healthy side never trips.
-    let floor_pct = Uint128::new(BREAKER_FLOOR_PERCENT);
-    let hundred = Uint128::new(100);
-    let below_floor = |current: Uint128, seed: Uint128| -> bool {
-        current.saturating_mul(hundred) < seed.saturating_mul(floor_pct)
-    };
-
-    if below_floor(current_osmo, seed_osmo) {
+    if current_osmo.saturating_mul(Uint128::new(100))
+        < seed_osmo.saturating_mul(Uint128::new(BREAKER_FLOOR_PERCENT))
+    {
         return Err(ContractError::LiquidityBelowSeedFloor {
             side: bluechip_denom.to_string(),
             current: current_osmo,
             seed: seed_osmo,
-            floor_percent: BREAKER_FLOOR_PERCENT,
-        });
-    }
-    if below_floor(current_creator, seed_creator) {
-        return Err(ContractError::LiquidityBelowSeedFloor {
-            side: creator_denom.to_string(),
-            current: current_creator,
-            seed: seed_creator,
             floor_percent: BREAKER_FLOOR_PERCENT,
         });
     }
@@ -334,32 +322,29 @@ pub fn simple_swap(
 ) -> Result<Response, ContractError> {
     enforce_transaction_deadline(env.block.time, transaction_deadline)?;
 
-    with_reentrancy_guard(deps, move |mut deps| {
-        if !IS_THRESHOLD_HIT.load(deps.storage)? {
-            return Err(ContractError::ShortOfThreshold {});
-        }
-        let ctx = match preloaded_ctx {
-            Some(ctx) => ctx,
-            None => PoolCtx::load(deps.storage)?,
-        };
-        execute_simple_swap_with_ctx(
-            &mut deps,
-            env,
-            info,
-            sender,
-            offer_asset,
-            belief_price,
-            max_spread,
-            allow_high_max_spread,
-            to,
-            ctx,
-            sender_is_registered_router,
-        )
-    })
+    let mut deps = deps;
+    if !IS_THRESHOLD_HIT.load(deps.storage)? {
+        return Err(ContractError::ShortOfThreshold {});
+    }
+    let ctx = match preloaded_ctx {
+        Some(ctx) => ctx,
+        None => PoolCtx::load(deps.storage)?,
+    };
+    execute_simple_swap_with_ctx(
+        &mut deps,
+        env,
+        info,
+        sender,
+        offer_asset,
+        belief_price,
+        max_spread,
+        allow_high_max_spread,
+        to,
+        ctx,
+        sender_is_registered_router,
+    )
 }
 
-/// Builds the native-pool swap SubMsg. Callers enforce the
-/// IS_THRESHOLD_HIT gate before delegating here.
 #[allow(clippy::too_many_arguments)]
 fn execute_simple_swap_with_ctx(
     deps: &mut DepsMut,
@@ -422,21 +407,18 @@ fn execute_simple_swap_with_ctx(
         .ok_or(ContractError::ShortOfThreshold {})?;
 
     // Native relative circuit breaker BEFORE dispatching the swap: if
-    // either side of the live pool has fallen below BREAKER_FLOOR_PERCENT%
-    // of its seeded liquidity, this returns `Err` and the whole tx reverts
+    // the bluechip (OSMO) side of the live pool has fallen below
+    // BREAKER_FLOOR_PERCENT% of its seeded liquidity, this returns `Err` and the whole tx reverts
     // (offer funds go back to the sender by tx failure; no pause is
     // latched). Shares the exact helper with the post-threshold commit swap
-    // path so the protection can't drift between the two sites. The breaker
-    // keys on the CANONICAL pair sides ([0] = bluechip Native, [1] =
-    // creator) so it matches `SEED_LIQUIDITY = (seed_osmo, seed_creator)`
-    // regardless of the swap DIRECTION (`offer_denom`/`ask_denom` flip on a
-    // sell).
+    // path so the protection can't drift between the two sites. It keys on
+    // the CANONICAL bluechip side ([0]) regardless of the swap DIRECTION
+    // (`offer_denom`/`ask_denom` flip on a sell).
     enforce_liquidity_breaker(
         deps.storage,
         &deps.querier,
         pool_id,
         &denom_of(&pool_info.pool_info.asset_infos[0]),
-        &denom_of(&pool_info.pool_info.asset_infos[1]),
     )?;
 
     let token_in = Coin {

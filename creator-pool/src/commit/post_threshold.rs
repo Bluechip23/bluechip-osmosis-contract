@@ -74,9 +74,9 @@ pub(super) fn process_post_threshold_commit(
     let creator_denom = pool_info.token_denom.clone();
 
     // Native relative circuit breaker BEFORE dispatching the swap leg,
-    // matching the `SimpleSwap` site (both share the helper). If either side
-    // of the live pool has fallen below BREAKER_FLOOR_PERCENT% of its seeded
-    // liquidity, this returns `Err` and the whole commit reverts: the
+    // matching the `SimpleSwap` site (both share the helper). If the bluechip
+    // (OSMO) side of the live pool has fallen below BREAKER_FLOOR_PERCENT% of
+    // its seeded liquidity, this returns `Err` and the whole commit reverts: the
     // committer's GROSS attached bluechip is returned by tx failure, no fees
     // are taken, no swap is dispatched, and no pause is latched. Pre-threshold
     // commits never reach here (no pool yet).
@@ -85,7 +85,6 @@ pub(super) fn process_post_threshold_commit(
         &deps.querier,
         pool_id,
         &bluechip_denom,
-        &creator_denom,
     )?;
 
     let token_in = Coin {

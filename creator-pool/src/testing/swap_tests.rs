@@ -16,7 +16,7 @@ use crate::msg::{CommitFeeInfo, ExecuteMsg, PoolInstantiateMsg};
 use crate::state::{
     DistributionState, SwapForwardPayload, COMMITFEEINFO, COMMIT_INFO, COMMIT_LEDGER,
     COMMIT_LIMIT_INFO, DEFAULT_ESTIMATED_GAS_PER_DISTRIBUTION, DEFAULT_MAX_GAS_PER_TX,
-    DISTRIBUTION_STATE, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_INFO, REENTRANCY_LOCK,
+    DISTRIBUTION_STATE, IS_THRESHOLD_HIT, NATIVE_RAISED_FROM_COMMIT, POOL_INFO,
     REPLY_ID_SWAP_FORWARD, THRESHOLD_PAYOUT_AMOUNTS, THRESHOLD_PROCESSING, GROSS_NATIVE_COMMITTED,
 };
 use crate::testing::fixtures::{
@@ -886,41 +886,6 @@ fn test_final_batch_completes_distribution() {
 }
 
 #[test]
-fn test_commit_reentrancy_protection() {
-    let mut deps = mock_dependencies();
-    setup_pool_storage(&mut deps);
-
-    REENTRANCY_LOCK.save(&mut deps.storage, &true).unwrap();
-
-    let env = mock_env();
-    let info = message_info(
-        &Addr::unchecked("user"),
-        &[Coin {
-            denom: "ubluechip".to_string(),
-            amount: Uint128::new(1_000_000),
-        }],
-    );
-
-    let msg = ExecuteMsg::Commit {
-        asset: TokenInfo {
-            info: TokenType::Native {
-                denom: "ubluechip".to_string(),
-            },
-            amount: Uint128::new(1_000_000),
-        },
-        transaction_deadline: None,
-        belief_price: None,
-        max_spread: None,
-    };
-
-    let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
-    match err {
-        ContractError::ReentrancyGuard {} => (),
-        _ => panic!("Expected ReentrancyGuard error"),
-    }
-}
-
-#[test]
 fn test_commit_rate_limiting() {
     let mut deps = mock_dependencies_with_balance(&[Coin {
         denom: "ubluechip".to_string(),
@@ -1006,7 +971,7 @@ fn test_commit_with_deadline() {
 }
 
 #[test]
-fn test_simple_swap_bluechip_to_cw20() {
+fn test_simple_swap_bluechip_to_creator_token() {
     // Uses the estimate-answering querier so the non-belief-price swap derives
     // a NON-ZERO `token_out_min_amount` (CARRY-OVER 2 rejects a zero floor).
     use crate::mock_querier::mock_deps_estimate;
@@ -1144,14 +1109,11 @@ fn test_swap_sell_creator_token_native() {
     )));
 }
 
-/// TODO(phase2): the original test exercised the CW20 Receive-hook
-/// anti-spoof guard (`Cw20SwapBalanceMismatch`). That entire attack surface
-/// is gone — the creator token is a native TokenFactory denom now, and
-/// `SimpleSwap` verifies the attached funds via `must_pay` (the bank module
-/// cannot be spoofed). Repurposed to assert the native sell path REQUIRES the
-/// funds to actually be attached.
+/// A sell must actually attach the creator token: `SimpleSwap` verifies the
+/// attached funds via `must_pay`, so a claimed amount with no funds is
+/// rejected before any state change.
 #[test]
-fn test_cw20_receive_rejects_balance_shortfall() {
+fn test_sell_without_attached_funds_is_rejected() {
     let mut deps = mock_dependencies();
     setup_pool_post_threshold(&mut deps);
 
@@ -1493,7 +1455,7 @@ fn test_belief_price_with_zero_price() {
 }
 
 #[test]
-fn test_swap_cw20_to_bluechip_direct() {
+fn test_swap_creator_token_to_bluechip_direct() {
     // Native sell of the creator token: attach the creator denom as funds
     // and swap it for bluechip via `SimpleSwap`.
     use crate::mock_querier::mock_deps_estimate;
@@ -1548,7 +1510,7 @@ fn test_swap_cw20_to_bluechip_direct() {
 }
 
 #[test]
-fn test_swap_cw20_with_custom_recipient() {
+fn test_swap_creator_token_with_custom_recipient() {
     // Native sell routed to a custom recipient via `SimpleSwap { to }`.
     use crate::mock_querier::mock_deps_estimate;
     let mut deps = mock_deps_estimate(&[]); // estimate mock ⇒ non-zero floor (CARRY-OVER 2)
@@ -2437,6 +2399,65 @@ fn test_native_breaker_allows_healthy_pool() {
         Coin {
             denom: CREATOR_DENOM.to_string(),
             amount: Uint128::new(500_000),
+        },
+    ]);
+
+    let env = mock_env();
+    let swap_amount = Uint128::new(100_000_000);
+    let info = message_info(
+        &Addr::unchecked("trader"),
+        &[Coin {
+            denom: "ubluechip".to_string(),
+            amount: swap_amount,
+        }],
+    );
+    let msg = ExecuteMsg::SimpleSwap {
+        offer_asset: TokenInfo {
+            info: TokenType::Native {
+                denom: "ubluechip".to_string(),
+            },
+            amount: swap_amount,
+        },
+        belief_price: Some(Decimal::percent(200)),
+        max_spread: None,
+        allow_high_max_spread: None,
+        to: None,
+        transaction_deadline: None,
+    };
+    let res = execute(deps.as_mut(), env, info, msg).unwrap();
+    assert_eq!(action_attr(&res), "swap");
+    expect_single_swap_forward(&res);
+    assert!(
+        !crate::state::POOL_PAUSED.load(&deps.storage).unwrap_or(false),
+        "healthy pool is not paused by the breaker"
+    );
+}
+
+#[test]
+fn test_native_breaker_ignores_a_low_creator_side_price_appreciation() {
+    use crate::mock_querier::mock_deps_estimate;
+    let mut deps = mock_deps_estimate(&[Coin {
+        denom: "ubluechip".to_string(),
+        amount: Uint128::new(1_000_000_000),
+    }]);
+    setup_pool_post_threshold(&mut deps);
+    crate::state::SEED_LIQUIDITY
+        .save(
+            &mut deps.storage,
+            &(Uint128::new(1_000_000), Uint128::new(1_000_000)),
+        )
+        .unwrap();
+    // The token has appreciated ~100x: buyers took the creator side down
+    // to 10% of its seed while the OSMO side grew to 10x. That is the pool
+    // working, not a drain, so the one-directional breaker stays quiet.
+    deps.querier.set_pool_liquidity(vec![
+        Coin {
+            denom: "ubluechip".to_string(),
+            amount: Uint128::new(10_000_000),
+        },
+        Coin {
+            denom: CREATOR_DENOM.to_string(),
+            amount: Uint128::new(100_000),
         },
     ]);
 

@@ -628,6 +628,11 @@ pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, Co
 
     match msg {
         MigrateMsg::UpdateFees { new_fees } => {
+            // Same rule as the config path: once the native pool exists its
+            // swap fee is fixed, so only the stored copy would change.
+            if POOL_ID.may_load(deps.storage)?.is_some() {
+                return Err(ContractError::LpFeeFixedAfterPoolCreation {});
+            }
             if new_fees > MAX_LP_FEE || new_fees < MIN_LP_FEE {
                 return Err(ContractError::LpFeeOutOfRange {
                     got: new_fees,

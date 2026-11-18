@@ -1,7 +1,7 @@
 //! Shared wire-format types for consuming pool contract crates.
 //!
 //! Split boundary:
-//! - Shared (this module): CommitFeeInfo, PoolConfigUpdate, Cw20HookMsg,
+//! - Shared (this module): CommitFeeInfo, PoolConfigUpdate,
 //! CommitStatus, and every response struct returned by a query
 //! handler that lives in `pool_core::query`.
 //! - Per-contract (in creator-pool): ExecuteMsg,
@@ -16,7 +16,7 @@
 use crate::asset::TokenInfo;
 use crate::state::PoolAnalytics;
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Binary, Decimal, Timestamp, Uint128};
+use cosmwasm_std::{Addr, Binary, Decimal, Uint128};
 
 #[cw_serde]
 pub struct CommitFeeInfo {
@@ -54,18 +54,6 @@ pub struct PoolConfigUpdate {
     // factory's `pricing_pool_id`; re-routing, if ever needed, is a
     // factory config update (48h-timelocked), not a per-pool knob a
     // compromised admin could point at a malicious source.
-}
-
-#[cw_serde]
-pub enum Cw20HookMsg {
-    Swap {
-        belief_price: Option<Decimal>,
-        max_spread: Option<Decimal>,
-        #[serde(default)]
-        allow_high_max_spread: Option<bool>,
-        to: Option<String>,
-        transaction_deadline: Option<Timestamp>,
-    },
 }
 
 #[cw_serde]
