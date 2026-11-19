@@ -33,13 +33,13 @@ scripts/run_lifecycle_test.sh                # full automated rehearsal
 |---|---|
 | `../deploy_osmosis.sh <env>` | store the 5 wasms, instantiate factory + router, verify (config readback + live x/twap probe). Resumable via the state file; handles mainnet gov-mode code IDs too |
 | `create_commit_pool.sh <name> <symbol>` | factory.Create; logs the new pool to `commit_pools.txt` |
-| `cross_threshold.sh <pool> [amount]` | commit OSMO past the native threshold (auto-sized from the remaining gap) |
-| `continue_distribution.sh <pool>` | flush the post-threshold committer payout batches |
-| `swap.sh <pool> native\|token <amt>` | AMM swap either direction (simulates first) |
+| `cross_threshold.sh <pool> [amount]` | commit OSMO past the native threshold (auto-sized from the remaining gap). Crossing queues the airdrop; it does not mint or create the native pool |
+| `continue_distribution.sh <pool>` | flush the committer payout batches, then make the follow-up call that mints the remaining splits and creates the native pool (trading opens here) |
+| `swap.sh <pool> native\|token <amt>` | AMM swap either direction (simulates first); only after the distribution has finished and the pool is open |
 | `liquidity.sh deposit\|shares\|remove` | LP on the NATIVE GAMM pool (MsgJoinPool/MsgExitPool; discovers the pool id via the contract's `native_pool_id` query) |
 | `route_swap.sh buy\|hop ...` | router swaps: single hop OSMO→token, or 2-hop tokenA→OSMO→tokenB |
-| `status.sh [pool]` | factory/router/pool health — the same signals the RUNBOOK alerts on |
-| `run_lifecycle_test.sh` | end-to-end: create → commit → cross → distribute → swap → LP → route, with a pass/fail summary |
+| `status.sh [pool]` | factory/router/pool health (config, fee-route probe, distribution state, pending factory-notify) |
+| `run_lifecycle_test.sh` | end-to-end: create → commit → cross → distribute (pool opens) → swap → LP → route, with a pass/fail summary |
 | `_helpers.sh` | shared tx/query plumbing (sourced, not run) |
 
 ## Testnet tips
@@ -54,5 +54,9 @@ scripts/run_lifecycle_test.sh                # full automated rehearsal
   build. For rapid-fire testing deploy with
   `FACTORY_WASM_FILE=factory-integration.wasm ./deploy_osmosis.sh`
   (short timelocks/limits — **never** ship that wasm to mainnet).
-- Commits and swaps share a 13s per-wallet rate limit; the scripts
+- Direct commits and swaps share a 13s per-wallet cooldown (router
+  swaps and native Osmosis trades are not subject to it); the scripts
   sleep around it where it matters.
+- Swaps, post-threshold commits and LP only work once
+  `continue_distribution.sh` has finished: until then the native pool
+  does not exist and the contract answers `DistributionInProgress`.

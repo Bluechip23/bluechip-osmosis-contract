@@ -234,7 +234,7 @@ async function connectKeplrWallet() {
 
 ## 4. Subscribe Button (Commit)
 
-The **Subscribe** button lets your fans commit OSMO to your creator pool. This is how people support you. Before the pool reaches its commit threshold (**500,000 OSMO** for pools created under the current factory config — a value governance retunes over time as market conditions change, applying to pools created after the change), commits are recorded in a ledger. After the threshold is crossed, commits are swapped through the native Osmosis pool and your supporter receives your creator tokens. A commit's value toward the threshold is simply the OSMO attached to it — there is no price conversion involved.
+The **Subscribe** button lets your fans commit OSMO to your creator pool. This is how people support you. Before the pool reaches its commit threshold (**500,000 OSMO** for pools created under the current factory config — a value governance retunes over time as market conditions change, applying to pools created after the change), commits are recorded in a ledger and are final (there is no refund or cancel). When the threshold is crossed, supporters are first paid their share of the token airdrop in batches; once everyone has been paid, the native Osmosis pool is created and trading opens. From then on a commit is swapped through that pool and your supporter receives your creator tokens. In the window between the crossing and the pool opening, commits and swaps are refused (`DistributionInProgress`). A commit's value toward the threshold is simply the OSMO attached to it — there is no price conversion involved.
 
 **A 6% fee is deducted:** 1% goes to the BlueChip protocol, 5% goes to you the creator.
 
@@ -402,7 +402,7 @@ async function handleSubscribe() {
 
 ## 5. Buy Button (Swap OSMO for Creator Tokens)
 
-The **Buy** button lets people swap their OSMO for your creator tokens. This only works **after** the pool has crossed its OSMO commit threshold and its native Osmosis pool exists. (Since it's a normal Osmosis pool, buyers can also just trade it on [app.osmosis.zone](https://app.osmosis.zone) — the contract's `simple_swap` is a convenience venue with the same result.)
+The **Buy** button lets people swap their OSMO for your creator tokens. This only works **after** the pool has crossed its OSMO commit threshold, every committer has been paid their airdrop, and the native Osmosis pool has been created (`{ native_pool_id: {} }` returns a non-null `pool_id`). (Since it's a normal Osmosis pool, buyers can also just trade it on [app.osmosis.zone](https://app.osmosis.zone) — the contract's `simple_swap` is a convenience venue with the same result.)
 
 ```html
 <!-- ============================================================ -->
@@ -751,12 +751,15 @@ Both pools in the route must be past their threshold (active pools). Get the rou
 
 ## 8. Liquidity — It's a Native Osmosis Pool
 
-Earlier versions of the protocol had their own liquidity-position system (deposit, withdraw, position NFTs, fee collection). **That system is gone.** When a creator pool crosses its threshold, the contract creates and seeds a **native Osmosis GAMM pool**, and:
+Earlier versions of the protocol had their own liquidity-position system (deposit, withdraw, position NFTs, fee collection). **That system is gone.** After a creator pool crosses its threshold and has paid out the committer airdrop, the contract creates and seeds a **native Osmosis GAMM pool**, and:
 
-- The **seed liquidity belongs to no one** — the pool contract holds the
-  `gamm/pool/{id}` LP shares itself, permanently. It cannot be pulled,
-  rugged, or transferred, and there are **no** `deposit_liquidity`,
-  `remove_liquidity`, or `collect_fees` entry points on the contract.
+- The **seed liquidity belongs to no user** — the pool contract holds the
+  `gamm/pool/{id}` LP shares itself, and there are **no**
+  `deposit_liquidity`, `remove_liquidity`, or `collect_fees` entry points
+  on the contract, so no creator, committer or trader can withdraw it. It
+  is not burned, though: the protocol admin's time-delayed emergency
+  withdraw can move those shares to the protocol wallet. Do not tell
+  users it is permanently locked.
 - **Anyone can LP the normal Osmosis way.** Visit
   [app.osmosis.zone](https://app.osmosis.zone), find the pool
   (`OSMO / <creator token>`), and add or remove liquidity there like any
@@ -769,9 +772,11 @@ If your old integration called `deposit_liquidity`, `add_to_position`,
 `remove_all_liquidity`, `remove_partial_liquidity`,
 `remove_partial_liquidity_by_percent`, `collect_fees`, or the
 `position` / `positions_by_owner` queries — delete that code and point
-your users at Osmosis instead. The pool id of the native pool is emitted
-in the threshold-crossing transaction and can also be inferred from the
-pool's reserves queries (Section 10).
+your users at Osmosis instead. Read the native pool id from the pool
+contract with `{ native_pool_id: {} }` → `{ pool_id, lp_share_denom }`.
+Both are `null` until the pool has opened (it is created by the
+`ContinueDistribution` call that follows the last airdrop batch, not by
+the threshold-crossing transaction).
 
 ---
 
@@ -779,10 +784,10 @@ pool's reserves queries (Section 10).
 
 The factory exposes a single creation path — the commit (creator) pool:
 
-- **Commit (creator) pool** — factory `create` message. The new pool mints its own **TokenFactory denom** (`factory/{pool_address}/{subdenom}`) and starts in a funding (commit) phase. Once the configured OSMO commit threshold is crossed, 1,200,000 creator tokens are minted and distributed:
-   - **500,000** to early subscribers (proportional to their commits)
-   - **325,000** to you, the creator
-   - **25,000** to the BlueChip protocol
+- **Commit (creator) pool** — factory `create` message. The new pool mints its own **TokenFactory denom** (`factory/{pool_address}/{subdenom}`) and starts in a funding (commit) phase. Once the configured OSMO commit threshold is crossed, 1,200,000 creator tokens are minted in two steps — the subscribers' 500,000 first, in batches, then the rest in the transaction that opens the pool:
+   - **500,000** to early subscribers (proportional to their commits), paid first
+   - **325,000** to you, the creator, when the pool opens
+   - **25,000** to the BlueChip protocol, when the pool opens
    - **350,000** seeded into the native Osmosis pool as initial liquidity
 
 > **Wire-format note:** The `pool_msg` body carries **only** `pool_token_info`. Every other dial — commit threshold, fee splits, threshold-payout amounts, lock caps, pricing config — is sourced from the factory's stored config and silently overwrites anything a caller tries to send. The `creator_token` entry is a **placeholder with a `denom` key** — the pool overwrites it with its real TokenFactory denom at instantiate.
@@ -815,8 +820,8 @@ The factory exposes a single creation path — the commit (creator) pool:
             <li>Your connected wallet becomes the creator wallet — <strong>DO NOT LOSE IT</strong></li>
             <li>Pool requires 500,000 OSMO in commits to activate (current factory config; governance retunes this over time for newly created pools)</li>
             <li>You earn 5% of every commit transaction</li>
-            <li>Once threshold is met, a native Osmosis pool is created and your token becomes tradeable</li>
-            <li>You receive 325,000 creator tokens at threshold crossing</li>
+            <li>Once the threshold is met, supporters receive their tokens first; then a native Osmosis pool is created and your token becomes tradeable</li>
+            <li>You receive 325,000 creator tokens when the pool opens, after every supporter has been paid</li>
         </ul>
     </div>
 
@@ -974,6 +979,14 @@ async function checkPoolStatus(poolAddress) {
     // raised/target are micro-OSMO (6 decimals): the gross OSMO committed
     // so far, and the pool's OSMO commit threshold.
     if (status === "fully_committed") {
+        // Crossing the threshold does NOT open trading by itself: the
+        // committer airdrop is paid out first, then the native pool is
+        // created. Trading is open once native_pool_id is non-null.
+        var native = await client.queryContractSmart(poolAddress, { native_pool_id: {} });
+        if (native.pool_id === null) {
+            console.log("Threshold reached — distributing tokens to supporters. Trading opens when this finishes.");
+            return false;
+        }
         console.log("Pool is active! Trading is enabled.");
         return true;
     } else {
@@ -989,7 +1002,8 @@ async function checkPoolStatus(poolAddress) {
 ### Get Pool Reserves
 
 Post-migration, `pool_state` reads the **live reserves of the native
-Osmosis pool** (zero until the threshold crossing seeds it).
+Osmosis pool** (zero until the pool opens, which happens after the
+committer airdrop has been fully distributed — not at threshold crossing).
 `total_liquidity` and `nft_ownership_accepted` are retained for wire
 compatibility only — check the GAMM pool itself for LP-share data.
 
@@ -1084,7 +1098,10 @@ async function getCreatorEarnings(poolAddress) {
 }
 
 // Live state of the 500k-token committer airdrop after crossing.
-// Returns null when no distribution is active.
+// Returns null before the crossing and again once the pool has opened.
+// While it is non-null, swaps and post-threshold commits are refused;
+// distributions_remaining === 0 with a non-null result means every
+// supporter has been paid and the pool-opening call is the next one.
 async function getDistributionState(poolAddress) {
     var client = await CosmWasmClient.CosmWasmClient.connect(BLUECHIP_CONFIG.rpc);
     var d = await client.queryContractSmart(poolAddress, { distribution_state: {} });
@@ -1543,13 +1560,14 @@ Here's a complete, self-contained HTML page you can save and use. It includes wa
 | **"Invalid commit-pool creation funds: ... Send exactly one denom"** | Create-pool requires exactly one coin entry of `uosmo`. Remove any IBC / tokenfactory / stray denoms from the `funds` array before re-broadcasting |
 | **"Insufficient commit-pool creation fee"** | The attached OSMO is below the factory's flat `pool_creation_fee`. Query `{ factory: {} }` for the live value and re-attach |
 | **"creation fee is disabled; do not attach any funds"** | The factory currently has the creation fee set to zero. Pass an empty `funds` array on these calls |
-| **"rate limited"** | Commits have a 13-second cooldown per wallet. Wait and try again |
+| **"rate limited"** | Direct commits and swaps share a 13-second cooldown per wallet. Wait and try again |
+| **"Trading through this contract opens once the committer distribution has finished"** | The pool has crossed its threshold but is still paying out the supporter airdrop, so its native pool does not exist yet. Buy, Sell and Subscribe are refused until it opens. Poll `{ native_pool_id: {} }` and enable the buttons when `pool_id` is non-null |
 | **"Route exceeds the maximum of 3 hops"** | The router caps routes at 3 hops. Any creator-token pair needs at most 2 (token → OSMO → token) |
 | **"...not registered with the factory" (router)** | A hop's pool address is not in the factory registry. Use addresses from the factory's `pools` query |
 | **Router swap reverts on minimum_receive** | Price moved past your tolerance between simulation and execution. Re-quote and retry, or widen slippage slightly |
 | **"Commit too small"** | Each pool enforces a minimum commit in OSMO: 115 OSMO pre-threshold, 25 OSMO post-threshold by default (the error prints the amounts in micro-OSMO base units). Increase the amount |
-| **"Pool is not fully committed"** | Buy/Sell only work after the pool crosses its OSMO commit threshold. Use Subscribe instead |
-| **"Native pool liquidity below the circuit-breaker floor"** | A reserve of the native GAMM pool is below 25% of what was seeded at crossing, so this swap/commit reverted (funds returned by tx failure). Nothing is paused: retry once the pool's liquidity recovers, or trade directly on the native pool |
+| **"Pool is not fully committed"** | Buy/Sell only work after the pool crosses its OSMO commit threshold and has opened. Use Subscribe instead |
+| **"Native pool liquidity below the circuit-breaker floor"** | The OSMO side of the native GAMM pool is below 25% of what was seeded when the pool opened, so this swap/commit reverted (funds returned by tx failure). Nothing is paused: retry once the pool's liquidity recovers, or trade directly on the native pool |
 | **Calls to `deposit_liquidity` / `collect_fees` / `position` fail** | Those entry points no longer exist — liquidity lives in the native Osmosis pool. LP directly on [app.osmosis.zone](https://app.osmosis.zone) (see Section 8) |
 | **Transaction stuck / pending** | The transaction may still be processing. Check the tx hash on [Mintscan](https://www.mintscan.io/osmosis) or another Osmosis explorer |
 | **Keplr not detecting on mobile** | Use the Keplr mobile app's built-in browser to visit your site |
@@ -1566,7 +1584,7 @@ These are the addresses you need. Get them from the BlueChip team or a block exp
 | **Pool Address** | Your specific creator pool | Returned when pool is created (tx hash), or the factory `pools` query |
 | **Router Address** | Multi-hop cross-token swaps | Deployment records (deployed alongside the factory) |
 | **Creator Token Denom** | Native TokenFactory denom `factory/{pool}/{sub}` | Query the pool's `pair` endpoint |
-| **GAMM Pool ID** | The native Osmosis pool seeded at crossing | Threshold-crossing tx events / Osmosis app |
+| **GAMM Pool ID** | The native Osmosis pool, created once the supporter airdrop has been distributed | The pool's `{ native_pool_id: {} }` query / Osmosis app |
 
 ### How to Find Your Creator Token Denom
 

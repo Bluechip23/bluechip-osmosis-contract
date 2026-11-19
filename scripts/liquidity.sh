@@ -9,8 +9,8 @@
 #   scripts/liquidity.sh remove  <pool_addr> [share-amount]
 #
 # Post-migration, third-party liquidity lives on the native Osmosis
-# GAMM pool the contract seeded at threshold crossing — NOT in the
-# contract. The contract is only used to DISCOVER the pool
+# GAMM pool the contract creates once the committer distribution has
+# finished (run continue_distribution.sh first) — NOT in the contract. The contract is only used to DISCOVER the pool
 # ({"native_pool_id":{}} -> pool_id + the gamm/pool/{id} share denom);
 # add/remove are chain-native MsgJoinPool / MsgExitPool. The old
 # deposit_liquidity / position-NFT / CW20-allowance flow is gone.
