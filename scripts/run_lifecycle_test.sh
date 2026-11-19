@@ -11,9 +11,10 @@
 #   1. create a commit pool (factory.Create)
 #   2. make a small pre-threshold commit and verify raise accounting
 #   3. commit past the native threshold (auto-sized from the gap)
-#   4. verify the crossing seeded the NATIVE GAMM pool (reserves > 0)
-#   5. drain the committer distribution and verify the TokenFactory
-#      payout landed (bank balance of the creator denom)
+#   4. drain the committer distribution and verify the TokenFactory
+#      payout landed (bank balance of the creator denom); the final
+#      ContinueDistribution call creates the native pool
+#   5. verify the NATIVE GAMM pool is seeded (reserves > 0)
 #   6. swap native -> token and token -> native through the contract
 #      (routed via the native pool)
 #   7. join the native GAMM pool (MsgJoinPool via liquidity.sh),
@@ -119,7 +120,25 @@ rate_limit_pause
 # ---- 3. cross the threshold ------------------------------------------
 step "cross the threshold" "$SCRIPTS/cross_threshold.sh" "$POOL_ADDR"
 
-# ---- 4. AMM seeded ----------------------------------------------------
+# ---- 4. distribution (its final call opens the native pool) ------------
+distribution() {
+    "$SCRIPTS/continue_distribution.sh" "$POOL_ADDR" || return 1
+    # Creator token is a native TokenFactory denom — the payout is a
+    # plain bank balance, no CW20 query.
+    local bal
+    bal="$(query_json bank balances "$ADDR" \
+        | jq -r --arg d "$TOKEN_DENOM" \
+            '.balances[]? | select(.denom == $d) | .amount' | head -1)"
+    bal="${bal:-0}"
+    echo "committer creator-token balance: $bal $TOKEN_DENOM"
+    [ "$bal" != "0" ]
+}
+step "drain distribution + TokenFactory payout landed" distribution
+
+
+# ---- 5. AMM seeded ----------------------------------------------------
+# The native pool is created by the ContinueDistribution call that follows
+# the last payout batch, NOT by the crossing — so this runs after step 4.
 amm_seeded() {
     local status state r0 r1
     status="$(query_smart "$POOL_ADDR" '{"is_fully_commited":{}}')"
@@ -134,22 +153,7 @@ amm_seeded() {
     echo "reserves: reserve0=$r0 reserve1=$r1"
     [ "$r0" != "0" ] && [ "$r1" != "0" ]
 }
-step "threshold crossing seeded the AMM" amm_seeded
-
-# ---- 5. distribution --------------------------------------------------
-distribution() {
-    "$SCRIPTS/continue_distribution.sh" "$POOL_ADDR" || return 1
-    # Creator token is a native TokenFactory denom — the payout is a
-    # plain bank balance, no CW20 query.
-    local bal
-    bal="$(query_json bank balances "$ADDR" \
-        | jq -r --arg d "$TOKEN_DENOM" \
-            '.balances[]? | select(.denom == $d) | .amount' | head -1)"
-    bal="${bal:-0}"
-    echo "committer creator-token balance: $bal $TOKEN_DENOM"
-    [ "$bal" != "0" ]
-}
-step "drain distribution + TokenFactory payout landed" distribution
+step "distribution finished and seeded the AMM" amm_seeded
 rate_limit_pause
 
 # ---- 6. swaps ----------------------------------------------------------

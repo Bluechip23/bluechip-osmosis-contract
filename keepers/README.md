@@ -10,7 +10,10 @@ keeper**, which per sweep:
 
 - calls each pool's `ContinueDistribution` when it has an active
   post-threshold distribution, so committers receive their creator tokens in
-  a reasonable timeframe;
+  a reasonable timeframe — and then once more, which is the call that mints
+  the creator / protocol / pool-seed tokens and creates the native Osmosis
+  pool. **A pool does not open for trading until the keeper (or anyone) has
+  made that final call**;
 - retries stuck `NotifyThresholdCrossed` submessages via each pool's
   permissionless `RetryFactoryNotify` (query-first, so it only spends gas on
   pools that actually report `pending=true`);
@@ -94,6 +97,8 @@ every DISTRIBUTION_POLL_INTERVAL_MS (default 30 min):
       submit pool.ContinueDistribution {}
       if NothingToRecover → move to next pool
       if ok + distribution_complete=false → continue same pool
+        (the last batch still reports false: the pool-opening call is next)
+      if ok + distribution_complete=true → pool is open; move to next pool
       otherwise → move to next pool
 
   warn if wallet balance < MIN_KEEPER_BALANCE_UBLUECHIP
@@ -180,11 +185,23 @@ against a testnet:
   kept `MIN_KEEPER_BALANCE_UBLUECHIP` set to something sane. There is no
   bounty income, so this WILL eventually happen without topping up.
 
-- **Keeper is down for a while.** Nothing breaks: distributions simply
-  pause mid-flight (committers wait longer for their creator tokens),
-  stuck notifies stay pending, and rate-limit maps grow slightly. All
-  three actions are permissionless, so anyone can advance them manually
-  in the meantime.
+- **Keeper is down for a while.** No funds are at risk, but a crossed pool
+  is stuck short of launch: committers wait for their creator tokens and
+  the native pool is not created, so nothing can be traded. Stuck notifies
+  stay pending and rate-limit maps grow slightly. All three actions are
+  permissionless, so anyone can advance them manually in the meantime.
+  Note the contract's 24h stall rule: if a distribution goes more than 24
+  hours without a batch, `ContinueDistribution` starts failing with
+  `DistributionTimeout` until the factory admin runs
+  `RecoverPoolStuckStates` (or, after 7 days, anyone calls
+  `SelfRecoverDistribution`). Keep the keeper's downtime well under a day
+  while any pool is mid-distribution.
+
+- **The pool-opening call keeps failing.** After the last batch the keeper
+  will log `distribution batch tx failed` on every sweep for that pool. The
+  usual cause is that Osmosis changed its pool-creation fee since the
+  crossing; the error names the coin and amount to send to the pool
+  contract, after which the next call succeeds.
 
 ## Layout
 

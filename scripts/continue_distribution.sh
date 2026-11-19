@@ -11,8 +11,13 @@
 # keeper (keepers/, `npm run distribution-keeper`) does this; this
 # script is the manual/testnet equivalent.
 #
-# Loops until DistributionState returns null (no active distribution)
-# or max-batches (default 25) is hit.
+# Once the ledger is empty, one further ContinueDistribution call mints
+# the creator / protocol / pool-seed tokens and creates the native pool
+# (trading opens there). DistributionState stays non-null until that
+# call succeeds, so this same loop makes it.
+#
+# Loops until DistributionState returns null (distribution finished AND
+# pool open) or max-batches (default 25) is hit.
 # =====================================================================
 set -euo pipefail
 
@@ -33,7 +38,7 @@ fi
 for (( i=1; i<=MAX_BATCHES; i++ )); do
     STATE="$(query_smart "$POOL_ADDR" '{"distribution_state":{}}')"
     if [ "$STATE" = "null" ] || [ -z "$STATE" ]; then
-        echo "no active distribution — ledger fully drained"
+        echo "no active distribution — ledger drained and native pool open"
         exit 0
     fi
     if echo "$STATE" | jq -e '.is_stalled == true' >/dev/null 2>&1; then
@@ -44,6 +49,9 @@ for (( i=1; i<=MAX_BATCHES; i++ )); do
     echo "[batch $i] distribution active — sending continue_distribution"
     RESULT="$(submit_tx wasm execute "$POOL_ADDR" '{"continue_distribution":{}}')"
     echo "          tx $(echo "$RESULT" | jq -r '.txhash')"
+    # ContinueDistribution has a 5s per-caller cooldown on-chain; the
+    # pool-opening call always follows a batch from this same wallet.
+    sleep 6
 done
 
 echo "hit max-batches=$MAX_BATCHES with distribution still active:" >&2

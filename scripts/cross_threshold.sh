@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =====================================================================
 # cross_threshold.sh — commit enough OSMO into a commit pool to cross
-#                      its threshold (seeds the AMM + mints the
-#                      creator-token supply + starts distribution)
+#                      its threshold (queues the committer airdrop;
+#                      the native pool opens after distribution)
 # =====================================================================
 # usage: scripts/cross_threshold.sh <pool_addr> [native-amount-micro]
 #
@@ -18,11 +18,12 @@
 #      (no conversion, no oracle).
 #   2. Cumulative OSMO raised is compared against the pool's pinned
 #      commit_threshold_limit_native.
-#   3. The crossing commit triggers the threshold payout — mints the
-#      creator-token supply, seeds the AMM reserves, and queues the
-#      committer distribution ledger. NOBODY is paid in the crossing
-#      tx: run scripts/continue_distribution.sh (or the keeper) to
-#      flush the gas-budgeted batches.
+#   3. The crossing commit queues the committer distribution ledger and
+#      secures the GAMM creation fee. NOBODY is paid, nothing is minted
+#      and NO native pool exists after the crossing tx: run
+#      scripts/continue_distribution.sh (or the keeper) to flush the
+#      gas-budgeted batches. Its final call mints the creator /
+#      protocol / pool-seed tokens and creates the native pool.
 #
 # Constraints honored:
 #   - the crossing commit must meet the pre-threshold minimum
@@ -111,12 +112,13 @@ echo "$AFTER"
 
 if is_fully_committed "$AFTER"; then
     echo ""
-    echo "THRESHOLD CROSSED — the AMM is seeded and the committer"
-    echo "distribution ledger is queued."
+    echo "THRESHOLD CROSSED — the committer distribution ledger is queued."
+    echo "The native pool does NOT exist yet: it is created after the"
+    echo "distribution, and swaps are refused until then."
     echo ""
     echo "NEXT:"
-    echo "  scripts/continue_distribution.sh $POOL_ADDR   # flush payout batches"
-    echo "  scripts/swap.sh $POOL_ADDR native 1000000     # trade against the AMM"
+    echo "  scripts/continue_distribution.sh $POOL_ADDR   # pay committers, then open the pool"
+    echo "  scripts/swap.sh $POOL_ADDR native 1000000     # trade (only once the pool is open)"
     echo "  scripts/status.sh $POOL_ADDR"
 else
     echo ""
