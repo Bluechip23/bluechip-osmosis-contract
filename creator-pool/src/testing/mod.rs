@@ -9,3 +9,4 @@ mod regression_tests;
 mod swap_tests;
 mod threshold_tests;
 mod update_pool_tests;
+mod withdraw_commit_tests;

@@ -161,7 +161,9 @@ address-permission route:
 > `pricing_pool_id` that budgets the GAMM creation-fee swap at crossing;
 > it runs in every pre-threshold commit and fails closed, so it can
 > block funding and crossing (never the size of the threshold). Commits
-> made before the threshold have no refund path.
+> are locked in: the only exit is `WithdrawCommit`, which returns a
+> committer's net (post-fee) contribution once a pool has gone 18 months
+> without crossing.
 
 For the per-contract route instead, generate the combined gov v1
 proposal (one vote stores the three wasms, gzip-compressed, hashes and

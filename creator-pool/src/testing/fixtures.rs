@@ -60,6 +60,14 @@ pub fn setup_pool_storage<Q: cosmwasm_std::Querier>(deps: &mut OwnedDeps<MockSto
         env!("CARGO_PKG_VERSION"),
     )
     .unwrap();
+    // Mirror instantiate: the pool's creation time starts the 18-month
+    // commit-withdrawal clock.
+    crate::state::POOL_CREATED_AT
+        .save(
+            &mut deps.storage,
+            &cosmwasm_std::testing::mock_env().block.time,
+        )
+        .unwrap();
     let pool_info = PoolInfo {
         pool_id: 1u64,
         pool_info: PoolDetails {

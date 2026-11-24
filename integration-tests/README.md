@@ -64,11 +64,12 @@ Start with `instantiate_factory_against_live_twap` (proves the x/twap
 config probe end to end), then `full_lifecycle_create_commit_cross_swap`
 (create → cross → distribute → pool opens → swap).
 
-The eight scenarios: factory instantiate against a live TWAP; the full
+The nine scenarios: factory instantiate against a live TWAP; the full
 lifecycle; a mainnet-shape crossing that buys a USDC creation fee and
 pays it when the pool opens; TWAP orientation on a 25:1 pool;
 third-party LP join/exit; mid-crossing atomicity; an unroutable fee
-denom failing closed and recovering; and the router end to end.
+denom failing closed and recovering; the router end to end; and a
+committer withdrawal from an uncrossed pool after 18 months.
 
 ## Version note
 

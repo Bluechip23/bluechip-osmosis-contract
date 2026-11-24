@@ -187,7 +187,9 @@ per pool up to 25,000 OSMO). Direct calls are spaced by a **13s per-wallet
 cooldown** — a spam throttle, not a trading control (see
 [Sandwich / MEV protection](#sandwich--mev-protection)).
 Pre-threshold, `SimpleSwap`, `ContinueDistribution` and every claim path
-reject — only `Commit` works. There is no refund or cancel for a commit.
+reject — only `Commit` works. A commit cannot be cancelled; the one exit is
+[`WithdrawCommit`](#withdrawing-from-a-pool-that-never-crossed), available
+only once a pool has gone 18 months without crossing.
 
 ### Stage 2 — Threshold crossing (one atomic transaction)
 
@@ -774,11 +776,14 @@ evenly divisible commits:
 
 Things a committer should know before funding:
 
-- **There is no refund path before the threshold.** A commit is final. If a
-  pool never reaches its threshold, or is paused, or the fee route stays
-  broken, earlier commits stay in the pool contract with no exit in the
-  current code. The 1% and 5% fees on each commit are paid out immediately
-  and are not recoverable either.
+- **A commit is locked in for 18 months.** It cannot be cancelled. If the
+  pool has still not reached its threshold 18 months (548 days) after it
+  was created, each committer can take back their **net** contribution
+  with `WithdrawCommit` — 94% of what they committed, because the 1% and
+  5% fees were paid out when each commit landed and are not held by the
+  pool. See
+  [withdrawing from a pool that never crossed](#withdrawing-from-a-pool-that-never-crossed).
+  Once a pool crosses, commits are final.
 - The creator's 325,000 tokens are not vested. They are minted in the same
   transaction that opens the pool, after every committer has received
   theirs, so creator and committers can first trade at the same moment.
@@ -791,6 +796,37 @@ Things a committer should know before funding:
   [Excess liquidity above the lock cap](#excess-liquidity-above-the-lock-cap)).
   These values are snapshotted per pool at creation; check them for the
   specific pool you are funding.
+
+### Withdrawing from a pool that never crossed
+
+```json
+{ "withdraw_commit": {} }
+```
+
+- **When:** only while the pool has **not** crossed its threshold, and only
+  once the pool is at least 18 months old (`COMMIT_WITHDRAW_LOCK_SECONDS`,
+  548 days from the pool's creation — not from the individual commit).
+- **What you get:** your net contribution, in OSMO. The 6% commit fees are
+  not refunded.
+- **What it changes:** your gross contribution is subtracted from the
+  amount committed toward the threshold, and you are removed from the
+  ledger, so you would receive no airdrop if the pool later crosses. It is
+  one call for your whole position; there is no partial withdrawal.
+- **The pool stays open.** Others can keep committing, you can commit
+  again, and the pool can still cross. After it crosses, withdrawal is
+  closed for good.
+- **Nothing can block it.** It needs no factory query, so a broken fee
+  route does not affect it, and it is deliberately not stopped by an admin
+  pause.
+
+```json
+{ "commit_withdraw_info": { "wallet": "osmo1..." } }
+// { unlock_time, withdrawals_open, committed, refundable }
+```
+
+The small part of the protocol's 1% fee that the pool retains toward the
+GAMM creation fee is protocol revenue, not committer funds. It stays in
+the pool contract if everyone withdraws.
 
 ---
 
@@ -902,6 +938,7 @@ exists until every committer has been paid.
 
 { "distribution_state": {} }        // live airdrop cursor + is_stalled; null once the pool has opened
 { "emergency_withdraw_status": {} } // armed drain (executable-from / expires-at) + drained flag
+{ "commit_withdraw_info": { "wallet": "osmo1..." } } // 18-month unlock time + what the wallet would get back
 { "analytics": {} }                 // volume/commit/swap counters for indexers
 ```
 
@@ -941,11 +978,11 @@ pending per-pool config updates.
 
 Two layers, both runnable from this repo:
 
-**308 workspace unit/property tests** (mock chain): every fee split, gate,
+**313 workspace unit/property tests** (mock chain): every fee split, gate,
 recovery path, and the crossing-conservation property test
 (`creator-pool/src/testing/invariant_tests.rs`).
 
-**An 8-test end-to-end suite on the real chain modules**
+**A 9-test end-to-end suite on the real chain modules**
 (`integration-tests/`, osmosis-test-tube): the contracts run against an
 in-process Osmosis chain binary — real tokenfactory, gamm, poolmanager, and
 twap modules, not mocks. It covers:
@@ -970,6 +1007,9 @@ twap modules, not mocks. It covers:
    recovers.
 8. **Router end-to-end** — registration timelock, belief-price gate, and the
    no-wedge path.
+9. **Commit withdrawal** — refused before 18 months; after a real 548-day
+   time jump each committer gets their net back by bank transfer and the
+   committed total drops accordingly.
 
 ---
 
@@ -982,7 +1022,7 @@ cargo fmt --all -- --check
 make optimize-all                           # deterministic wasm → artifacts/*.wasm
 ```
 
-Current suite: **creator-pool 168, factory 108, router 24, pool-core 8**
+Current suite: **creator-pool 173, factory 108, router 24, pool-core 8**
 (includes the crossing-conservation property test). Ship the factory **`prod`**
 optimizer build only (real 48h timelocks); the `integration_short_timing`
 build is for shell tests and is CI-guarded against shipping.

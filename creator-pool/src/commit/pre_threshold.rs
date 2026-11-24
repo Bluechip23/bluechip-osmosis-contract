@@ -33,6 +33,11 @@ pub(super) fn process_pre_threshold_commit(
     // iff `sender` is new. `record_committer` does the
     // has()-before-update check so repeat committers never double-count.
     super::record_committer(deps.storage, &sender, commit_value)?;
+    // Track the same committer's NET contribution — what the pool actually
+    // holds for them and what `WithdrawCommit` would refund.
+    crate::state::COMMIT_NET_LEDGER.update::<_, ContractError>(deps.storage, &sender, |v| {
+        Ok(v.unwrap_or_default().checked_add(net_bluechip)?)
+    })?;
     // `new_usd_total` is the dispatcher's already-computed
     // `GROSS_NATIVE_COMMITTED + commit_value` (overflow-checked there,
     // and the routing into this handler depends on it), so save it

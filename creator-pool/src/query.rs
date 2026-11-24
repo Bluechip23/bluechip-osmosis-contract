@@ -88,6 +88,34 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::Analytics {} => to_json_binary(&query_analytics(deps)?),
 
         QueryMsg::NativePoolId {} => to_json_binary(&query_native_pool_id(deps)?),
+        QueryMsg::CommitWithdrawInfo { wallet } => {
+            let unlock_time = crate::state::POOL_CREATED_AT
+                .load(deps.storage)?
+                .plus_seconds(crate::state::COMMIT_WITHDRAW_LOCK_SECONDS);
+            let crossed = crate::state::IS_THRESHOLD_HIT
+                .may_load(deps.storage)?
+                .unwrap_or(false);
+            let (committed, refundable) = match wallet {
+                Some(w) if !crossed => {
+                    let addr = deps.api.addr_validate(&w)?;
+                    (
+                        crate::state::COMMIT_LEDGER
+                            .may_load(deps.storage, &addr)?
+                            .unwrap_or_default(),
+                        crate::state::COMMIT_NET_LEDGER
+                            .may_load(deps.storage, &addr)?
+                            .unwrap_or_default(),
+                    )
+                }
+                _ => Default::default(),
+            };
+            to_json_binary(&crate::msg::CommitWithdrawInfoResponse {
+                unlock_time,
+                withdrawals_open: !crossed && env.block.time >= unlock_time,
+                committed,
+                refundable,
+            })
+        }
         QueryMsg::EmergencyWithdrawStatus {} => {
             let pending = crate::state::PENDING_EMERGENCY_WITHDRAW.may_load(deps.storage)?;
             to_json_binary(&crate::msg::EmergencyWithdrawStatusResponse {

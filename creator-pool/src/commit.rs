@@ -24,6 +24,7 @@ pub mod post_threshold;
 pub mod pre_threshold;
 pub mod threshold_crossing;
 pub mod threshold_payout;
+pub mod withdraw;
 
 pub use distribution::execute_continue_distribution;
 
