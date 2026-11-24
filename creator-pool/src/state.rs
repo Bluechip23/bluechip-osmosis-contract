@@ -84,6 +84,23 @@ pub const THRESHOLD_PROCESSING: Item<bool> = Item::new("threshold_processing");
 /// Fixed split of creator-token amounts (committers, creator, protocol, pool).
 pub const THRESHOLD_PAYOUT_AMOUNTS: Item<ThresholdPayoutAmounts> =
     Item::new("threshold_payout_amounts");
+/// Block time at which this pool was instantiated. Starts the clock for
+/// `WithdrawCommit`.
+pub const POOL_CREATED_AT: Item<Timestamp> = Item::new("pool_created_at");
+
+/// How long a pool must have existed, without crossing its threshold,
+/// before committers may withdraw: 18 months (548 days).
+pub const COMMIT_WITHDRAW_LOCK_SECONDS: u64 = 548 * 86_400;
+
+/// Per-committer NET (post-fee) bluechip that entered the pool's bank
+/// balance from their pre-threshold commits — the amount `WithdrawCommit`
+/// refunds. `COMMIT_LEDGER` holds the matching GROSS amounts; the 1% + 5%
+/// commit fees were paid out when each commit landed and are not held by
+/// the pool, so they are not refundable. Sums to `NATIVE_RAISED_FROM_COMMIT`
+/// while the pool is pre-threshold.
+pub const COMMIT_NET_LEDGER: cw_storage_plus::Map<&Addr, Uint128> =
+    cw_storage_plus::Map::new("commit_net_ledger");
+
 /// Written at threshold crossing, removed when the native pool is created.
 /// While present the pool has crossed but is NOT yet seeded: the creator,
 /// protocol and pool-seed tokens are unminted and no native pool exists.

@@ -127,6 +127,18 @@ pub enum ContractError {
     )]
     DistributionInProgress {},
 
+    #[error(
+        "Commits can be withdrawn only from a pool that has not reached its threshold after \
+         18 months; this pool unlocks withdrawals at {unlock_time}"
+    )]
+    CommitWithdrawLocked { unlock_time: Timestamp },
+
+    #[error("This pool has crossed its threshold; commits can no longer be withdrawn")]
+    CommitWithdrawAfterThreshold {},
+
+    #[error("No commit to withdraw for {user}")]
+    NoCommitToWithdraw { user: String },
+
     #[error("Pool has been permanently drained via emergency withdrawal")]
     EmergencyDrained {},
 

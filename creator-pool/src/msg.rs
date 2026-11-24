@@ -99,6 +99,13 @@ pub enum ExecuteMsg {
     ClaimFailedDistribution {
         recipient: Option<String>,
     },
+    // Withdraw the caller's commit from a pool that has NOT crossed its
+    // threshold, once the pool has existed for 18 months. Refunds the
+    // caller's net (post-fee) contribution, subtracts their gross
+    // contribution from the pool's committed total, and removes them from
+    // the ledger. One-shot per committer; closed for good once the pool
+    // crosses. Takes no funds.
+    WithdrawCommit {},
 }
 
 #[cw_serde]
@@ -198,6 +205,25 @@ pub enum QueryMsg {
     // becomes executable / expires) and whether the pool has been drained.
     #[returns(EmergencyWithdrawStatusResponse)]
     EmergencyWithdrawStatus {},
+    // When commit withdrawals unlock for this pool and, if `wallet` is
+    // given, what that wallet would get back.
+    #[returns(CommitWithdrawInfoResponse)]
+    CommitWithdrawInfo { wallet: Option<String> },
+}
+
+#[cw_serde]
+pub struct CommitWithdrawInfoResponse {
+    /// Pool creation time + 18 months.
+    pub unlock_time: Timestamp,
+    /// True when a withdrawal would be accepted right now: the unlock time
+    /// has passed and the pool has not crossed its threshold.
+    pub withdrawals_open: bool,
+    /// The wallet's gross amount counted toward the threshold (zero when no
+    /// wallet was given or it has no commit).
+    pub committed: Uint128,
+    /// What `WithdrawCommit` would send the wallet: its net contribution
+    /// after the commit fees that were already paid out.
+    pub refundable: Uint128,
 }
 
 #[cw_serde]

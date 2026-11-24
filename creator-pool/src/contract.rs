@@ -195,6 +195,7 @@ pub fn instantiate(
     // per newly-seen committer in `COMMIT_LEDGER`.
     crate::state::COMMITTER_COUNT.save(deps.storage, &0u32)?;
     IS_THRESHOLD_HIT.save(deps.storage, &false)?;
+    crate::state::POOL_CREATED_AT.save(deps.storage, &env.block.time)?;
     POOL_INFO.save(deps.storage, &pool_info)?;
     POOL_STATE.save(deps.storage, &pool_state)?;
     POOL_SPECS.save(deps.storage, &pool_specs)?;
@@ -362,6 +363,12 @@ pub fn execute(
         }
         ExecuteMsg::ClaimFailedDistribution { recipient } => {
             execute_claim_failed_distribution(deps, env, info, recipient)
+        }
+        ExecuteMsg::WithdrawCommit {} => {
+            cw_utils::nonpayable(&info).map_err(|e| ContractError::InvalidCommitFunds {
+                reason: e.to_string(),
+            })?;
+            crate::commit::withdraw::execute_withdraw_commit(deps, env, info)
         }
     }
 }
